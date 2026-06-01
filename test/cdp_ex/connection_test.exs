@@ -182,4 +182,69 @@ defmodule CDPEx.ConnectionTest do
     FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
     assert {:ok, %{}} = Task.await(task)
   end
+
+  test "a subscriber that dies without unsubscribing is pruned, not leaked", %{conn: conn} do
+    parent = self()
+
+    sub =
+      spawn(fn ->
+        :ok = Connection.subscribe(conn, "Page.lifecycleEvent")
+        :ok = Connection.subscribe(conn, :all)
+        send(parent, :subscribed)
+
+        receive do
+          :die -> :ok
+        end
+      end)
+
+    assert_receive :subscribed, 2_000
+
+    # The connection monitors the subscriber and tracks it in both sets.
+    state = :sys.get_state(conn)
+    assert Map.has_key?(state.monitors, sub)
+    assert MapSet.member?(state.all_subscribers, sub)
+    assert MapSet.member?(Map.get(state.subscribers, "Page.lifecycleEvent", MapSet.new()), sub)
+
+    # Kill it without unsubscribing; the connection's :DOWN handler must prune it
+    # from every subscription set and drop the monitor.
+    Process.exit(sub, :kill)
+
+    eventually(fn ->
+      s = :sys.get_state(conn)
+
+      not Map.has_key?(s.monitors, sub) and
+        not MapSet.member?(s.all_subscribers, sub) and
+        not MapSet.member?(Map.get(s.subscribers, "Page.lifecycleEvent", MapSet.new()), sub)
+    end)
+  end
+
+  test "unsubscribing from the last method releases the monitor", %{conn: conn} do
+    :ok = Connection.subscribe(conn, "A")
+    :ok = Connection.subscribe(conn, :all)
+    assert Map.has_key?(:sys.get_state(conn).monitors, self())
+
+    # Still subscribed to :all, so the monitor stays.
+    :ok = Connection.unsubscribe(conn, "A")
+    assert Map.has_key?(:sys.get_state(conn).monitors, self())
+
+    # No subscriptions left: the monitor is released.
+    :ok = Connection.unsubscribe(conn, :all)
+    refute Map.has_key?(:sys.get_state(conn).monitors, self())
+  end
+
+  # Poll until `fun` returns true, or fail — for asserting an async state change
+  # (here: the connection processing a subscriber's :DOWN) without a fixed sleep.
+  defp eventually(fun, retries \\ 100) do
+    cond do
+      fun.() ->
+        :ok
+
+      retries > 0 ->
+        Process.sleep(10)
+        eventually(fun, retries - 1)
+
+      true ->
+        flunk("condition not met in time")
+    end
+  end
 end

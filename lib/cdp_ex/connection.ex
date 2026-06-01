@@ -36,6 +36,7 @@ defmodule CDPEx.Connection do
     pending: %{},
     subscribers: %{},
     all_subscribers: MapSet.new(),
+    monitors: %{},
     waiters: []
   ]
 
@@ -79,6 +80,9 @@ defmodule CDPEx.Connection do
   Subscribes the calling process to a CDP event method (e.g.
   `"Page.lifecycleEvent"`) or to `:all` events. Delivered as
   `{:cdp_event, conn_pid, method, params}`.
+
+  The subscription is removed automatically if the subscribing process exits, so
+  a crashed subscriber can't accumulate in the connection.
   """
   @spec subscribe(GenServer.server(), String.t() | :all) :: :ok
   def subscribe(conn, method), do: GenServer.call(conn, {:subscribe, method, self()})
@@ -159,21 +163,25 @@ defmodule CDPEx.Connection do
   end
 
   def handle_call({:subscribe, :all, pid}, _from, state) do
+    state = monitor_subscriber(state, pid)
     {:reply, :ok, %{state | all_subscribers: MapSet.put(state.all_subscribers, pid)}}
   end
 
   def handle_call({:subscribe, method, pid}, _from, state) do
+    state = monitor_subscriber(state, pid)
     subs = Map.update(state.subscribers, method, MapSet.new([pid]), &MapSet.put(&1, pid))
     {:reply, :ok, %{state | subscribers: subs}}
   end
 
   def handle_call({:unsubscribe, :all, pid}, _from, state) do
-    {:reply, :ok, %{state | all_subscribers: MapSet.delete(state.all_subscribers, pid)}}
+    state = %{state | all_subscribers: MapSet.delete(state.all_subscribers, pid)}
+    {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
 
   def handle_call({:unsubscribe, method, pid}, _from, state) do
     subs = Map.update(state.subscribers, method, MapSet.new(), &MapSet.delete(&1, pid))
-    {:reply, :ok, %{state | subscribers: subs}}
+    state = %{state | subscribers: subs}
+    {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
 
   def handle_call({:await_event, matcher, timeout}, from, state) do
@@ -202,6 +210,13 @@ defmodule CDPEx.Connection do
         GenServer.reply(from, {:error, :timeout})
         {:noreply, %{state | waiters: waiters}}
     end
+  end
+
+  # A subscriber process died without unsubscribing: drop it from every
+  # subscription and forget its monitor, so dead pids can't accumulate. Must come
+  # before the catch-all clause, which would otherwise feed it to WebSocket.stream.
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    {:noreply, drop_subscriber(state, pid)}
   end
 
   # Any other message is an inbound WebSocket transport frame.
@@ -333,6 +348,54 @@ defmodule CDPEx.Connection do
     # the socket owner and every other caller sharing it.
     :throw, _ -> false
     :exit, _ -> false
+  end
+
+  # ── subscriber lifecycle ────────────────────────────────────────────────────
+
+  # Monitor a subscriber the first time it subscribes, so we learn if it dies.
+  # At most one monitor per pid, however many methods it subscribes to.
+  defp monitor_subscriber(state, pid) do
+    if Map.has_key?(state.monitors, pid) do
+      state
+    else
+      ref = Process.monitor(pid)
+      %{state | monitors: Map.put(state.monitors, pid, ref)}
+    end
+  end
+
+  # After an unsubscribe, release our monitor once the pid has no subscriptions
+  # left — otherwise we'd hold a monitor for a fully-unsubscribed process.
+  defp demonitor_if_orphaned(state, pid) do
+    if subscribed_anywhere?(state, pid) do
+      state
+    else
+      case Map.pop(state.monitors, pid) do
+        {nil, _monitors} ->
+          state
+
+        {ref, monitors} ->
+          _ = Process.demonitor(ref, [:flush])
+          %{state | monitors: monitors}
+      end
+    end
+  end
+
+  defp subscribed_anywhere?(state, pid) do
+    MapSet.member?(state.all_subscribers, pid) or
+      Enum.any?(state.subscribers, fn {_method, set} -> MapSet.member?(set, pid) end)
+  end
+
+  # Remove a (dead) subscriber from every subscription and forget its monitor.
+  defp drop_subscriber(state, pid) do
+    subscribers =
+      Map.new(state.subscribers, fn {method, set} -> {method, MapSet.delete(set, pid)} end)
+
+    %{
+      state
+      | subscribers: subscribers,
+        all_subscribers: MapSet.delete(state.all_subscribers, pid),
+        monitors: Map.delete(state.monitors, pid)
+    }
   end
 
   # ── websocket plumbing ──────────────────────────────────────────────────────
