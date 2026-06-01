@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-01
+
 ### Added
 - Initial OTP-native Chrome DevTools Protocol client.
 - `CDPEx.launch/1` and `CDPEx.stop/1` — supervised headless Chrome lifecycle.
@@ -13,4 +15,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/commits/main
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/patrols/cdp_ex/releases/tag/v0.1.0
