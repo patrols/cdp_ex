@@ -3,7 +3,7 @@ defmodule CDPEx.ProtocolTest do
 
   alias CDPEx.Protocol
 
-  doctest CDPEx.Protocol
+  doctest Protocol
 
   defp decode(iodata), do: iodata |> IO.iodata_to_binary() |> Jason.decode!()
 
@@ -35,7 +35,7 @@ defmodule CDPEx.ProtocolTest do
       frame = {:text, ~s({"id":11,"error":{"code":-32000,"message":"nope"}})}
 
       assert Protocol.classify(frame) ==
-               {:reply, 11, {:error, %{"code" => -32000, "message" => "nope"}}}
+               {:reply, 11, {:error, %{"code" => -32_000, "message" => "nope"}}}
     end
 
     test "event with params" do

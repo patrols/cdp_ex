@@ -66,7 +66,7 @@ defmodule CDPEx.ConnectionTest do
     assert_receive {:fake_cdp_recv, ^fake, %{"id" => id}}, 2_000
     FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32601,"message":"not found"}}))
 
-    assert {:error, {:cdp_error, "Bad.method", %{"code" => -32601, "message" => "not found"}}} =
+    assert {:error, {:cdp_error, "Bad.method", %{"code" => -32_601, "message" => "not found"}}} =
              Task.await(task)
   end
 

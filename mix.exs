@@ -54,7 +54,9 @@ defmodule CDPEx.MixProject do
       # Dev/test tooling
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      # Style enforcer; runs as a `mix format` plugin (see .formatter.exs).
+      {:styler, "~> 1.11", only: [:dev, :test], runtime: false}
     ]
   end
 

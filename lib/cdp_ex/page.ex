@@ -188,9 +188,7 @@ defmodule CDPEx.Page do
   def screenshot(%__MODULE__{} = page, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @screenshot_timeout)
 
-    params =
-      %{"format" => "png"}
-      |> maybe_full_page(Keyword.get(opts, :full_page, false))
+    params = maybe_full_page(%{"format" => "png"}, Keyword.get(opts, :full_page, false))
 
     with {:ok, %{"data" => base64}} <-
            Connection.call(page.conn, "Page.captureScreenshot", params, timeout),

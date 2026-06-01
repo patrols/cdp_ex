@@ -192,9 +192,8 @@ defmodule CDPEx.Browser do
              "Page.setLifecycleEventsEnabled",
              %{"enabled" => true},
              @bootstrap_timeout
-           ),
-         :ok <- maybe_prevent_alerts(conn, opts) do
-      :ok
+           ) do
+      maybe_prevent_alerts(conn, opts)
     end
   end
 

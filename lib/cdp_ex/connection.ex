@@ -97,8 +97,7 @@ defmodule CDPEx.Connection do
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout()) ::
           :ok | {:error, :timeout | :noproc | {:ws_closed, term()}}
-  def await_event(conn, matcher, timeout \\ @default_call_timeout)
-      when is_function(matcher, 1) do
+  def await_event(conn, matcher, timeout \\ @default_call_timeout) when is_function(matcher, 1) do
     GenServer.call(conn, {:await_event, matcher, timeout}, call_deadline(timeout))
   catch
     :exit, {:noproc, _} -> {:error, :noproc}

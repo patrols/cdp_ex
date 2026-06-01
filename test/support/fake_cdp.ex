@@ -182,11 +182,9 @@ defmodule CDPEx.FakeCDP do
   defp parse_payload(opcode, masked?, 127, <<len::64, rest::binary>>),
     do: take_payload(opcode, masked?, len, rest)
 
-  defp parse_payload(_opcode, _masked?, len0, _rest) when len0 in [126, 127],
-    do: :incomplete
+  defp parse_payload(_opcode, _masked?, len0, _rest) when len0 in [126, 127], do: :incomplete
 
-  defp parse_payload(opcode, masked?, len0, rest),
-    do: take_payload(opcode, masked?, len0, rest)
+  defp parse_payload(opcode, masked?, len0, rest), do: take_payload(opcode, masked?, len0, rest)
 
   defp take_payload(opcode, true, len, data) do
     case data do

@@ -14,4 +14,5 @@
   "mint": {:hex, :mint, "1.8.0", "b964eaf4416f2dee2ba88968d52239fca5621b0402b9c95f55a08eb9d74803e9", [:mix], [{:castore, "~> 0.1.0 or ~> 1.0", [hex: :castore, repo: "hexpm", optional: true]}, {:hpax, "~> 0.1.1 or ~> 0.2.0 or ~> 1.0", [hex: :hpax, repo: "hexpm", optional: false]}], "hexpm", "f3c572c11355eccf00f22275e9b42463bc17bd28db13be1e28f8e0bb4adbc849"},
   "mint_web_socket": {:hex, :mint_web_socket, "1.0.5", "60354efeb49b1eccf95dfb75f55b08d692e211970fe735a5eb3188b328be2a90", [:mix], [{:mint, ">= 1.4.1 and < 2.0.0-0", [hex: :mint, repo: "hexpm", optional: false]}], "hexpm", "04b35663448fc758f3356cce4d6ac067ca418bbafe6972a3805df984b5f12e61"},
   "nimble_parsec": {:hex, :nimble_parsec, "1.4.2", "8efba0122db06df95bfaa78f791344a89352ba04baedd3849593bfce4d0dc1c6", [:mix], [], "hexpm", "4b21398942dda052b403bbe1da991ccd03a053668d147d53fb8c4e0efe09c973"},
+  "styler": {:hex, :styler, "1.11.0", "35010d970689a23c2bcc8e97bd8bf7d20e3561d60c49be84654df5c37d051a9c", [:mix], [], "hexpm", "70f36165d0cf238a32b7a456fdef6a9c72e77e657d7ac4a0ace33aeba3f2b8c0"},
 }
