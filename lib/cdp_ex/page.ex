@@ -166,8 +166,9 @@ defmodule CDPEx.Page do
   @doc """
   Polls until `css` matches an element, or `timeout` elapses.
 
-  Returns `:ok` or `{:error, :timeout}`. Options: `:timeout` (default 5_000),
-  `:interval` (poll interval ms, default 100).
+  Returns `:ok`, `{:error, :timeout}`, or `{:error, reason}` if a non-transient
+  evaluate error occurs (e.g. the connection drops). Options: `:timeout`
+  (default 5_000), `:interval` (poll interval ms, default 100).
   """
   @spec wait_for_selector(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_selector(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
@@ -178,8 +179,9 @@ defmodule CDPEx.Page do
   Polls a JavaScript expression until it is truthy, or `timeout` elapses.
 
   The expression is coerced with `!!(...)`, so JS truthiness applies. Returns
-  `:ok` or `{:error, :timeout}`. Options: `:timeout` (default 5_000),
-  `:interval` (poll interval ms, default 100).
+  `:ok`, `{:error, :timeout}`, or `{:error, reason}` if a non-transient evaluate
+  error occurs (e.g. a thrown exception or a dropped connection). Options:
+  `:timeout` (default 5_000), `:interval` (poll interval ms, default 100).
   """
   @spec wait_for_function(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_function(%__MODULE__{} = page, js, opts \\ []) when is_binary(js) do
@@ -314,8 +316,8 @@ defmodule CDPEx.Page do
   @doc """
   Captures a PNG screenshot.
 
-  Returns `{:ok, png_binary}`, or `{:ok, path}` when `:path` is given (the file
-  is written and the path returned).
+  Returns `{:ok, data}` where `data` is the PNG bytes — or, when `:path` is
+  given, the written file path (also a binary).
 
   Options: `:path` (write to file), `:full_page` (capture beyond the viewport,
   default `false`), `:timeout` (default 30_000).
@@ -441,9 +443,9 @@ defmodule CDPEx.Page do
   @doc """
   Renders the page to PDF (`Page.printToPDF`).
 
-  Returns `{:ok, pdf_binary}`, or `{:ok, path}` when `:path` is given. Options:
-  `:path`, `:landscape` (default `false`), `:print_background` (default `true`),
-  `:timeout` (default 30_000).
+  Returns `{:ok, data}` where `data` is the PDF bytes — or, when `:path` is
+  given, the written file path (also a binary). Options: `:path`, `:landscape`
+  (default `false`), `:print_background` (default `true`), `:timeout` (default 30_000).
   """
   @spec pdf(t(), keyword()) :: {:ok, binary()} | {:error, term()}
   def pdf(%__MODULE__{} = page, opts \\ []) do
