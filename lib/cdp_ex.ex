@@ -85,7 +85,9 @@ defmodule CDPEx do
         try do
           fun.(page)
         after
-          close_page(browser, page)
+          # Best-effort: the page/browser may have already exited, and a teardown
+          # exit must not mask `fun`'s result or a raised exception.
+          safe(fn -> close_page(browser, page) end)
         end
 
       {:error, _} = error ->
@@ -99,11 +101,21 @@ defmodule CDPEx do
         try do
           with_page(browser, fun, opts)
         after
-          stop(browser)
+          safe(fn -> stop(browser) end)
         end
 
       {:error, _} = error ->
         error
     end
+  end
+
+  # Run a teardown action, swallowing an already-dead-process exit (or any raise)
+  # so cleanup in `with_page/3` never overrides the operation's real outcome.
+  defp safe(fun) do
+    fun.()
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

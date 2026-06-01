@@ -65,8 +65,8 @@ defmodule CDPEx.Connection do
   @spec call(GenServer.server(), String.t(), map(), timeout()) ::
           {:ok, map()} | {:error, term()}
   def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout) do
-    # Give the GenServer a slightly longer outer deadline than the CDP call so the
-    # internal `{:timeout, method}` reply wins over a raw GenServer.call timeout.
+    # Outer GenServer deadline is slightly longer than the CDP timeout so our own
+    # `{:timeout, method}` reply wins over a raw GenServer.call timeout.
     GenServer.call(conn, {:cdp_call, method, params, timeout}, call_deadline(timeout))
   catch
     :exit, {:noproc, _} -> {:error, :noproc}
@@ -90,18 +90,21 @@ defmodule CDPEx.Connection do
   @doc """
   Blocks until an event for which `matcher.(params)` returns true, or `timeout`.
 
-  `matcher` receives the event params map. Returns `:ok` on a match or
-  `{:error, :timeout}`. This is the GenServer-native replacement for the spike's
-  blocking `ws_wait_event`.
+  `matcher` receives the event params map. Returns `:ok` on a match, or
+  `{:error, reason}` where reason is `:timeout` (no matching event in time) or
+  `:noproc` / `{:ws_closed, _}` (the connection itself went away) — callers must
+  be able to tell those apart.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout()) ::
-          :ok | {:error, :timeout}
+          :ok | {:error, :timeout | :noproc | {:ws_closed, term()}}
   def await_event(conn, matcher, timeout \\ @default_call_timeout)
       when is_function(matcher, 1) do
     GenServer.call(conn, {:await_event, matcher, timeout}, call_deadline(timeout))
   catch
-    :exit, {:noproc, _} -> {:error, :timeout}
-    :exit, {{:ws_closed, _}, _} -> {:error, :timeout}
+    :exit, {:noproc, _} -> {:error, :noproc}
+    :exit, {:normal, _} -> {:error, :noproc}
+    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
+    :exit, {:shutdown, _} -> {:error, :noproc}
   end
 
   @doc "Closes the WebSocket and stops the connection."
@@ -122,8 +125,8 @@ defmodule CDPEx.Connection do
     {host, port, path} = Protocol.parse_ws_url(ws_url)
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)
 
-    # The handshake is done synchronously in init so its frames can't interleave
-    # with post-upgrade CDP frames. Reuses the spike's proven upgrade sequence.
+    # The handshake runs synchronously in init so its frames can't interleave
+    # with post-upgrade CDP frames.
     with {:ok, conn} <- HTTP.connect(:http, host, port, protocols: [:http1]),
          {:ok, conn, ref} <- WebSocket.upgrade(:ws, conn, path, []),
          {:ok, conn, status, headers} <- recv_upgrade(conn, ref, upgrade_timeout),
@@ -197,7 +200,7 @@ defmodule CDPEx.Connection do
     end
   end
 
-  # Inbound WebSocket transport message — the spike's blocking `receive`, inverted.
+  # Any other message is an inbound WebSocket transport frame.
   def handle_info(message, state) do
     case WebSocket.stream(state.conn, message) do
       {:ok, conn, responses} ->
@@ -215,7 +218,6 @@ defmodule CDPEx.Connection do
         stop_ws_closed(%{state | conn: conn}, reason)
 
       :unknown ->
-        # Not a Mint message (e.g. our own stray message). Ignore.
         {:noreply, state}
     end
   end
@@ -395,9 +397,12 @@ defmodule CDPEx.Connection do
       GenServer.reply(from, {:error, reason})
     end)
 
+    # Reply waiters with the real failure reason (e.g. {:ws_closed, _}), not
+    # {:error, :timeout} — a dropped socket must be distinguishable from a page
+    # that simply never fired the awaited event.
     Enum.each(state.waiters, fn {_matcher, from, timer} ->
       cancel_timer(timer)
-      GenServer.reply(from, {:error, :timeout})
+      GenServer.reply(from, {:error, reason})
     end)
   end
 

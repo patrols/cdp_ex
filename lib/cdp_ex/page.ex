@@ -60,8 +60,15 @@ defmodule CDPEx.Page do
         {:ok, page}
 
       {:error, :timeout} ->
+        # The page just didn't signal readiness in time — navigation was still
+        # issued, so return the page (best-effort), as documented.
         Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
         {:ok, page}
+
+      {:error, reason} ->
+        # The connection died during navigation (:noproc / {:ws_closed, _}).
+        # Surface it instead of returning a stale page handle as success.
+        {:error, reason}
     end
   end
 

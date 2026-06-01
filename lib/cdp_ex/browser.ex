@@ -104,16 +104,10 @@ defmodule CDPEx.Browser do
 
   def handle_call({:close_page, %Page{target_id: tid, conn: conn}}, _from, state) do
     # Close the target on the browser connection first (a page connection can't
-    # cleanly close its own target), then stop the page connection.
-    _ =
-      Connection.call(
-        state.browser_conn,
-        "Target.closeTarget",
-        %{"targetId" => tid},
-        @create_timeout
-      )
-
-    if Process.alive?(conn), do: Connection.close(conn)
+    # cleanly close its own target), then stop the page connection — best-effort,
+    # since either may already be gone.
+    close_target(state.browser_conn, tid)
+    safe_close(conn)
     {:reply, :ok, %{state | pages: Map.delete(state.pages, tid)}}
   end
 
@@ -144,11 +138,9 @@ defmodule CDPEx.Browser do
 
   @impl true
   def terminate(_reason, state) do
-    # Stop page connections best-effort, then guarantee Chrome cleanup.
-    Enum.each(state.pages, fn {_tid, conn} ->
-      if Process.alive?(conn), do: Connection.close(conn)
-    end)
-
+    # Stop page connections best-effort (a conn may already be dying — its exit
+    # must not abort us before Chrome.stop/1, which is the no-orphan guarantee).
+    Enum.each(state.pages, fn {_tid, conn} -> safe_close(conn) end)
     if state.chrome, do: Chrome.stop(state.chrome)
     :ok
   end
@@ -156,19 +148,38 @@ defmodule CDPEx.Browser do
   # ── page creation ───────────────────────────────────────────────────────────
 
   defp open_page(state, opts) do
-    with {:ok, %{"targetId" => tid}} <-
-           Connection.call(
-             state.browser_conn,
-             "Target.createTarget",
-             %{"url" => "about:blank"},
-             @create_timeout
-           ),
-         page_url = "ws://#{state.host}:#{state.port}/devtools/page/#{tid}",
-         {:ok, conn} <- Connection.start_link(page_url),
-         :ok <- bootstrap_page(conn, opts) do
-      {:ok, %Page{browser: self(), conn: conn, target_id: tid}}
-    else
+    case Connection.call(
+           state.browser_conn,
+           "Target.createTarget",
+           %{"url" => "about:blank"},
+           @create_timeout
+         ) do
+      {:ok, %{"targetId" => tid}} -> open_target(state, tid, opts)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The target exists now, so any failure past this point must close it (and the
+  # page connection, if opened) — otherwise we leak a Chrome tab/socket that
+  # isn't tracked in state.pages and can't be cleaned up deterministically.
+  defp open_target(state, tid, opts) do
+    page_url = "ws://#{state.host}:#{state.port}/devtools/page/#{tid}"
+
+    case Connection.start_link(page_url) do
+      {:ok, conn} ->
+        case bootstrap_page(conn, opts) do
+          :ok ->
+            {:ok, %Page{browser: self(), conn: conn, target_id: tid}}
+
+          {:error, reason} ->
+            safe_close(conn)
+            close_target(state.browser_conn, tid)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        close_target(state.browser_conn, tid)
+        {:error, reason}
     end
   end
 
@@ -207,5 +218,24 @@ defmodule CDPEx.Browser do
 
   defp drop_conn(pages, pid) do
     pages |> Enum.reject(fn {_tid, conn} -> conn == pid end) |> Map.new()
+  end
+
+  # Close a CDP target on the browser connection, ignoring failures (the browser
+  # conn may be gone, or the target already closed).
+  defp close_target(browser_conn, tid) do
+    _ = Connection.call(browser_conn, "Target.closeTarget", %{"targetId" => tid}, @create_timeout)
+    :ok
+  end
+
+  # Stop a page connection, tolerating an already-dead process. `Connection.close/1`
+  # is a `GenServer.stop`, which exits with `:noproc` if the process is gone — that
+  # exit must never propagate out of teardown.
+  defp safe_close(conn) do
+    if Process.alive?(conn), do: Connection.close(conn)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

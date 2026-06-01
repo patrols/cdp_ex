@@ -30,6 +30,7 @@ defmodule CDPEx.Chrome do
   """
 
   @launch_timeout 15_000
+  @stop_exit_timeout 3_000
   @default_window_size {1280, 1024}
 
   @type handle :: %{
@@ -101,7 +102,13 @@ defmodule CDPEx.Chrome do
   def stop(%{os_pid: os_pid, port: port} = handle) do
     kill(os_pid)
     close_port(port)
-    _ = if Map.get(handle, :owns_data_dir, false), do: File.rm_rf(handle.user_data_dir)
+    # `kill -9` is asynchronous: it returns before the OS has reaped Chrome, and
+    # a still-alive Chrome (or a child) can recreate files in the profile dir
+    # right after we delete it — which is exactly how the temp dir "reappeared"
+    # and failed cleanup on Linux CI. Wait for the process to actually exit, then
+    # remove the dir, retrying until it's gone (covers a child's final flush).
+    await_exit(os_pid, deadline(@stop_exit_timeout))
+    if Map.get(handle, :owns_data_dir, false), do: remove_dir(handle.user_data_dir)
     :ok
   end
 
@@ -264,6 +271,52 @@ defmodule CDPEx.Chrome do
     :ok
   rescue
     _ -> :ok
+  end
+
+  defp await_exit(nil, _deadline), do: :ok
+
+  defp await_exit(os_pid, deadline) do
+    if os_alive?(os_pid) and remaining_ms(deadline) > 0 do
+      Process.sleep(20)
+      await_exit(os_pid, deadline)
+    else
+      :ok
+    end
+  end
+
+  # `kill -0` signals nothing but returns success only if the process exists.
+  # On Windows there's no equivalent here, so skip the wait (taskkill /F /T is
+  # synchronous enough).
+  defp os_alive?(os_pid) do
+    case :os.type() do
+      {:win32, _} ->
+        false
+
+      _ ->
+        case System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true) do
+          {_, 0} -> true
+          _ -> false
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  # Remove the profile dir, retrying until it's actually gone (a child process
+  # can recreate a file between the rm and the check). Best-effort: gives up
+  # quietly after a few attempts — it's a temp dir the OS will reclaim anyway.
+  defp remove_dir(dir), do: remove_dir(dir, 5)
+  defp remove_dir(_dir, 0), do: :ok
+
+  defp remove_dir(dir, attempts) do
+    _ = File.rm_rf(dir)
+
+    if File.dir?(dir) do
+      Process.sleep(50)
+      remove_dir(dir, attempts - 1)
+    else
+      :ok
+    end
   end
 
   defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
