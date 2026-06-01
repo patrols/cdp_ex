@@ -196,6 +196,31 @@ defmodule CDPEx.IntegrationTest do
       assert File.exists?(path)
       File.rm(path)
     end
+
+    test "cookies round-trip: set, read, clear", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.set_cookies(page, [%{"name" => "cdpex", "value" => "42", "url" => fixture}])
+
+      assert {:ok, cookies} = Page.cookies(page)
+      assert Enum.any?(cookies, &(&1["name"] == "cdpex" and &1["value"] == "42"))
+
+      assert :ok = Page.clear_cookies(page)
+      assert {:ok, after_clear} = Page.cookies(page)
+      refute Enum.any?(after_clear, &(&1["name"] == "cdpex"))
+    end
+
+    test "set_user_agent overrides navigator.userAgent", %{page: page, fixture: fixture} do
+      assert :ok = Page.set_user_agent(page, "CDPExUA/1.0")
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:ok, "CDPExUA/1.0"} = Page.evaluate(page, "navigator.userAgent")
+    end
+
+    test "set_extra_headers are sent with the navigation request", %{page: page, fixture: fixture} do
+      assert :ok = Page.set_extra_headers(page, %{"X-CDPEx-Test" => "hello"})
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#echo-header")
+      assert {:ok, "hello"} = Page.text(page, "#echo-header")
+    end
   end
 
   describe "tracer bullet" do

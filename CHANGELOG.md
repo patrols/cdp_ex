@@ -10,6 +10,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page.wait_for_navigation/2` — await a navigation lifecycle milestone without issuing a navigation (e.g. after a click that navigates).
 - `CDPEx.Page.wait_for_function/3` — poll a JavaScript expression until it is truthy.
 - `CDPEx.Page.text/3`, `attribute/4`, `visible?/3` — element text / attribute / visibility helpers.
+- `CDPEx.Page.cookies/2`, `set_cookies/3`, `clear_cookies/2` — cookie get / set / clear (lazily enables the `Network` domain).
+- `CDPEx.Page.set_extra_headers/3`, `set_user_agent/3` — extra HTTP headers and User-Agent override.
 
 ## [0.1.0] - 2026-06-01
 

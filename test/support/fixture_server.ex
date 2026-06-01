@@ -10,17 +10,6 @@ defmodule CDPEx.FixtureServer do
   #     {:ok, %{url: url}} = FixtureServer.start()
   #     CDPEx.Page.navigate(page, url)
 
-  @html """
-  <!doctype html>
-  <html>
-    <head><title>CDPEx Fixture</title></head>
-    <body>
-      <h1 id="greeting">Hello</h1>
-      <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
-    </body>
-  </html>
-  """
-
   @spec start() :: {:ok, %{port: non_neg_integer(), url: String.t()}}
   def start do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
@@ -42,10 +31,14 @@ defmodule CDPEx.FixtureServer do
   end
 
   defp serve(socket) do
-    # Read (and ignore) the request line + headers, then respond.
-    _ = :gen_tcp.recv(socket, 0, 5_000)
+    # Read the request so we can reflect a header back into the page, then respond.
+    request =
+      case :gen_tcp.recv(socket, 0, 5_000) do
+        {:ok, data} -> data
+        _ -> ""
+      end
 
-    body = @html
+    body = render(request)
 
     response =
       "HTTP/1.1 200 OK\r\n" <>
@@ -55,5 +48,34 @@ defmodule CDPEx.FixtureServer do
 
     _ = :gen_tcp.send(socket, response)
     :gen_tcp.close(socket)
+  end
+
+  # Reflects the X-CDPEx-Test request header into #echo-header so integration
+  # tests can assert that extra headers were actually sent on the request.
+  defp render(request) do
+    """
+    <!doctype html>
+    <html>
+      <head><title>CDPEx Fixture</title></head>
+      <body>
+        <h1 id="greeting">Hello</h1>
+        <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
+        <div id="echo-header">#{header_value(request, "x-cdpex-test")}</div>
+      </body>
+    </html>
+    """
+  end
+
+  defp header_value(request, name) do
+    request
+    |> String.split("\r\n")
+    |> Enum.find_value("", &match_header(&1, name))
+  end
+
+  defp match_header(line, name) do
+    case String.split(line, ":", parts: 2) do
+      [k, v] -> if String.downcase(String.trim(k)) == name, do: String.trim(v)
+      _ -> nil
+    end
   end
 end

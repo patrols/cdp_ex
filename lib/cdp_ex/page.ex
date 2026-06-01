@@ -21,6 +21,7 @@ defmodule CDPEx.Page do
   @evaluate_timeout 15_000
   @selector_timeout 5_000
   @screenshot_timeout 30_000
+  @command_timeout 10_000
 
   @enforce_keys [:browser, :conn, :target_id]
   defstruct [:browser, :conn, :target_id]
@@ -299,6 +300,87 @@ defmodule CDPEx.Page do
     end
   end
 
+  @doc """
+  Returns all browser cookies as a list of CDP cookie maps.
+
+  Lazily enables the `Network` domain. Options: `:timeout` (default 10_000).
+  """
+  @spec cookies(t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def cookies(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    with :ok <- ensure_network(page, timeout),
+         {:ok, %{"cookies" => cookies}} <-
+           Connection.call(page.conn, "Network.getAllCookies", %{}, timeout) do
+      {:ok, cookies}
+    end
+  end
+
+  @doc """
+  Sets cookies. Each is a CDP `CookieParam` map — at least `"name"`, `"value"`,
+  and a `"url"` or `"domain"`. Lazily enables `Network`. Options: `:timeout`.
+  """
+  @spec set_cookies(t(), [map()], keyword()) :: :ok | {:error, term()}
+  def set_cookies(%__MODULE__{} = page, cookies, opts \\ []) when is_list(cookies) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    with :ok <- ensure_network(page, timeout),
+         {:ok, _} <-
+           Connection.call(page.conn, "Network.setCookies", %{"cookies" => cookies}, timeout) do
+      :ok
+    end
+  end
+
+  @doc "Clears all browser cookies. Lazily enables `Network`. Options: `:timeout`."
+  @spec clear_cookies(t(), keyword()) :: :ok | {:error, term()}
+  def clear_cookies(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    with :ok <- ensure_network(page, timeout),
+         {:ok, _} <- Connection.call(page.conn, "Network.clearBrowserCookies", %{}, timeout) do
+      :ok
+    end
+  end
+
+  @doc """
+  Sets extra HTTP headers sent with every subsequent request on this page.
+
+  `headers` is a map of header name => value; set them before navigating for
+  them to apply to that navigation. Lazily enables `Network`. Options: `:timeout`.
+  """
+  @spec set_extra_headers(t(), %{optional(String.t()) => String.t()}, keyword()) ::
+          :ok | {:error, term()}
+  def set_extra_headers(%__MODULE__{} = page, headers, opts \\ []) when is_map(headers) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    with :ok <- ensure_network(page, timeout),
+         {:ok, _} <-
+           Connection.call(
+             page.conn,
+             "Network.setExtraHTTPHeaders",
+             %{"headers" => headers},
+             timeout
+           ) do
+      :ok
+    end
+  end
+
+  @doc """
+  Overrides the page's User-Agent (`Emulation.setUserAgentOverride`).
+
+  Options: `:timeout` (default 10_000).
+  """
+  @spec set_user_agent(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def set_user_agent(%__MODULE__{} = page, user_agent, opts \\ []) when is_binary(user_agent) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+    params = %{"userAgent" => user_agent}
+
+    case Connection.call(page.conn, "Emulation.setUserAgentOverride", params, timeout) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
   defp maybe_full_page(params, true), do: Map.put(params, "captureBeyondViewport", true)
   defp maybe_full_page(params, false), do: params
 
@@ -315,6 +397,15 @@ defmodule CDPEx.Page do
     case File.write(path, bytes) do
       :ok -> {:ok, path}
       {:error, reason} -> {:error, {:write_failed, reason}}
+    end
+  end
+
+  # Lazily enable the Network domain (idempotent in CDP) so cookie/header ops
+  # work without callers opting in at page creation — keeps Page stateless.
+  defp ensure_network(page, timeout) do
+    case Connection.call(page.conn, "Network.enable", %{}, timeout) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
     end
   end
 end
