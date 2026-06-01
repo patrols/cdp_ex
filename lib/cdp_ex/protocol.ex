@@ -20,7 +20,7 @@ defmodule CDPEx.Protocol do
   @prevent_alerts_js "window.alert=function(){};window.confirm=function(){return true};window.prompt=function(){return null};"
 
   @typedoc "A decoded `Mint.WebSocket` frame."
-  @type frame :: WebSocket.frame() | {:close, integer(), binary()}
+  @type frame :: WebSocket.frame() | {:close, integer() | nil, binary()}
 
   @typedoc "The result of classifying a single decoded frame."
   @type classification ::
@@ -50,7 +50,7 @@ defmodule CDPEx.Protocol do
   """
   @spec encode(String.t(), map(), pos_integer(), String.t() | nil) :: iodata()
   def encode(method, params, id, session_id \\ nil)
-      when is_binary(method) and is_map(params) and is_integer(id) do
+      when is_binary(method) and is_map(params) and is_integer(id) and id > 0 do
     %{"id" => id, "method" => method, "params" => params}
     |> put_session(session_id)
     |> Jason.encode_to_iodata!()
@@ -68,16 +68,25 @@ defmodule CDPEx.Protocol do
   @spec decode_frames(WebSocket.t(), [term()], reference()) ::
           {:ok, WebSocket.t(), [frame()]} | {:error, term()}
   def decode_frames(websocket, responses, ref) do
-    Enum.reduce_while(responses, {:ok, websocket, []}, fn
-      {:data, ^ref, data}, {:ok, ws, acc} ->
-        case WebSocket.decode(ws, data) do
-          {:ok, ws, frames} -> {:cont, {:ok, ws, acc ++ frames}}
-          {:error, _ws, reason} -> {:halt, {:error, {:ws_decode, reason}}}
-        end
+    # Accumulate frame chunks in reverse (prepend, not `acc ++ frames`, which is
+    # O(n²) as the list grows) and flatten once at the end. This runs on every
+    # inbound transport message, so the linear path is worth the extra step.
+    result =
+      Enum.reduce_while(responses, {:ok, websocket, []}, fn
+        {:data, ^ref, data}, {:ok, ws, acc} ->
+          case WebSocket.decode(ws, data) do
+            {:ok, ws, frames} -> {:cont, {:ok, ws, [frames | acc]}}
+            {:error, _ws, reason} -> {:halt, {:error, {:ws_decode, reason}}}
+          end
 
-      _other, acc ->
-        {:cont, acc}
-    end)
+        _other, acc ->
+          {:cont, acc}
+      end)
+
+    case result do
+      {:ok, ws, chunks} -> {:ok, ws, chunks |> Enum.reverse() |> Enum.concat()}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc """

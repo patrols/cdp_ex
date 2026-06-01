@@ -47,8 +47,8 @@ defmodule CDPEx.Connection do
   @doc """
   Starts a connection to the given `ws://host:port/path` URL.
 
-  Options: `:upgrade_timeout` (ms, default 15_000) plus any `GenServer`
-  start options. Returns `{:ok, pid}` once the WebSocket handshake completes.
+  Options: `:upgrade_timeout` (ms, default 15_000) and `:name` (registers the
+  GenServer). Returns `{:ok, pid}` once the WebSocket handshake completes.
   """
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(ws_url, opts \\ []) do
