@@ -207,7 +207,7 @@ defmodule CDPEx.Connection do
 
         case Protocol.decode_frames(state.websocket, responses, state.ref) do
           {:ok, websocket, frames} ->
-            {:noreply, Enum.reduce(frames, %{state | websocket: websocket}, &dispatch/2)}
+            dispatch_frames(frames, %{state | websocket: websocket})
 
           {:error, reason} ->
             stop_ws_closed(state, reason)
@@ -245,6 +245,26 @@ defmodule CDPEx.Connection do
   end
 
   # ── frame dispatch ──────────────────────────────────────────────────────────
+
+  # Process a batch of decoded frames. A peer close frame ends the connection:
+  # dispatch everything before it (so any final replies/events still land), then
+  # fail remaining callers with {:ws_closed, _} and stop — otherwise a graceful
+  # close would be silently dropped and callers would only time out.
+  defp dispatch_frames(frames, state) do
+    case Enum.split_while(frames, &(not close_frame?(&1))) do
+      {pre, []} ->
+        {:noreply, Enum.reduce(pre, state, &dispatch/2)}
+
+      {pre, [close | _rest]} ->
+        state = Enum.reduce(pre, state, &dispatch/2)
+        stop_ws_closed(state, close_reason(close))
+    end
+  end
+
+  defp close_frame?({:close, _code, _reason}), do: true
+  defp close_frame?(_frame), do: false
+
+  defp close_reason({:close, code, reason}), do: {:peer_closed, code, reason}
 
   defp dispatch(frame, state) do
     case Protocol.classify(frame) do

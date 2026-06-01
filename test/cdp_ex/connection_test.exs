@@ -142,4 +142,20 @@ defmodule CDPEx.ConnectionTest do
     assert_receive {:DOWN, ^ref, :process, ^conn, _}, 2_000
     assert {:error, :noproc} = Connection.call(conn, "Page.enable", %{})
   end
+
+  test "a graceful peer close frame fails pending callers and stops the connection", %{
+    conn: conn,
+    fake: fake
+  } do
+    ref = Process.monitor(conn)
+    task = Task.async(fn -> Connection.call(conn, "Hang", %{}, 5_000) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Hang"}}, 2_000
+
+    # A graceful WebSocket close (opcode 0x8) — not a raw TCP drop — must still
+    # tear the connection down rather than leaving callers to time out.
+    FakeCDP.close(fake)
+
+    assert {:error, {:ws_closed, _}} = Task.await(task)
+    assert_receive {:DOWN, ^ref, :process, ^conn, {:shutdown, {:ws_closed, _}}}, 2_000
+  end
 end

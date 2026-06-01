@@ -29,6 +29,8 @@ defmodule CDPEx.Chrome do
   them via `:extra_args` if you need them.
   """
 
+  import Bitwise, only: [band: 2]
+
   @launch_timeout 15_000
   @stop_exit_timeout 3_000
   @default_window_size {1280, 1024}
@@ -197,7 +199,24 @@ defmodule CDPEx.Chrome do
     )
   end
 
-  defp executable?(path), do: File.exists?(path)
+  # A bare File.exists? would let a directory or a non-executable file through to
+  # Port.open, which raises instead of returning {:error, {:chrome_not_found, _}}.
+  # Require a regular file, and on unix the executable bit.
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular} = stat} -> regular_executable?(stat)
+      _ -> false
+    end
+  end
+
+  defp regular_executable?(stat) do
+    case :os.type() do
+      # Windows has no unix exec bit; a regular file is enough.
+      {:win32, _} -> true
+      # Any of user/group/other execute bits (0o111) set.
+      _ -> band(stat.mode, 0o111) != 0
+    end
+  end
 
   defp resolve_user_data_dir(opts) do
     case Keyword.get(opts, :user_data_dir) do

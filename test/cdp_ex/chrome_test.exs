@@ -98,6 +98,20 @@ defmodule CDPEx.ChromeTest do
                Chrome.launch(chrome_binary: "/no/such/chrome")
     end
 
+    test "returns chrome_not_found for a directory" do
+      dir = System.tmp_dir!()
+      assert {:error, {:chrome_not_found, ^dir}} = Chrome.launch(chrome_binary: dir)
+    end
+
+    @tag :tmp_dir
+    test "returns chrome_not_found for a non-executable file", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "not-chrome")
+      File.write!(path, "#!/bin/sh\n")
+      File.chmod!(path, 0o644)
+
+      assert {:error, {:chrome_not_found, ^path}} = Chrome.launch(chrome_binary: path)
+    end
+
     @tag :integration
     test "launches real Chrome, exposes a browser ws URL, and cleans up on stop" do
       assert {:ok, handle} = Chrome.launch([])

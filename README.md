@@ -20,10 +20,11 @@ end)
 ## Why CDPEx?
 
 It drives Chrome over CDP the way Puppeteer and Playwright do — but it's pure
-Elixir, and browsers, connections, and pages are **supervised OTP processes**. A
-Chrome crash or a dropped socket surfaces to the caller as `{:error, reason}`
-instead of a hung session, and `terminate/2` guarantees the OS process is reaped
-(no zombie Chromes).
+Elixir: the browser and each page's CDP connection are **supervised OTP
+processes** (a page is a lightweight handle over its connection). A Chrome crash
+or a dropped socket surfaces to the caller as `{:error, reason}` instead of a
+hung session, and `terminate/2` guarantees the OS process is reaped (no zombie
+Chromes).
 
 | | CDPEx | chrome_remote_interface | ChromicPDF | Wallaby |
 |---|---|---|---|---|

@@ -60,9 +60,12 @@ defmodule CDPEx.ProtocolTest do
       assert Protocol.classify({:ping, "p"}) == {:ping, "p"}
     end
 
-    test "pong and close are ignored" do
+    test "close surfaces so the connection can shut down" do
+      assert Protocol.classify({:close, 1000, "bye"}) == {:close, 1000, "bye"}
+    end
+
+    test "pong is ignored" do
       assert Protocol.classify({:pong, "p"}) == :ignore
-      assert Protocol.classify({:close, 1000, "bye"}) == :ignore
     end
 
     test "malformed JSON is ignored, not raised" do

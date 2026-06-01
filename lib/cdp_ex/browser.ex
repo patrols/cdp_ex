@@ -63,20 +63,33 @@ defmodule CDPEx.Browser do
   def init(launch_opts) do
     Process.flag(:trap_exit, true)
 
-    with {:ok, chrome} <- Chrome.launch(launch_opts),
-         {host, port, _path} = Protocol.parse_ws_url(chrome.debug_url),
-         {:ok, conn} <- Connection.start_link(chrome.debug_url) do
-      {:ok,
-       %__MODULE__{
-         chrome: chrome,
-         browser_conn: conn,
-         host: host,
-         port: port,
-         opts: launch_opts,
-         parent: parent_pid()
-       }}
-    else
+    case Chrome.launch(launch_opts) do
+      {:ok, chrome} -> connect_browser(chrome, launch_opts)
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # Chrome is running now. If the browser WebSocket fails to connect, init/1
+  # returns {:stop, _} *before* the GenServer loop starts, so terminate/2 never
+  # runs — we must reap Chrome here or leak the OS process and temp profile.
+  defp connect_browser(chrome, launch_opts) do
+    {host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
+
+    case Connection.start_link(chrome.debug_url) do
+      {:ok, conn} ->
+        {:ok,
+         %__MODULE__{
+           chrome: chrome,
+           browser_conn: conn,
+           host: host,
+           port: port,
+           opts: launch_opts,
+           parent: parent_pid()
+         }}
+
+      {:error, reason} ->
+        Chrome.stop(chrome)
+        {:stop, reason}
     end
   end
 

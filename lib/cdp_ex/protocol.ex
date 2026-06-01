@@ -27,6 +27,7 @@ defmodule CDPEx.Protocol do
           {:reply, id :: pos_integer(), {:ok, map()} | {:error, map()}}
           | {:event, method :: String.t(), params :: map()}
           | {:ping, binary()}
+          | {:close, code :: integer() | nil, reason :: binary()}
           | :ignore
 
   @doc """
@@ -83,8 +84,9 @@ defmodule CDPEx.Protocol do
   Classifies one decoded frame into a CDP-level action.
 
   Text frames are parsed as JSON and split into replies (by `"id"`) and events
-  (by `"method"`). Ping frames surface so the connection can pong. Everything
-  else (`pong`, `close`, unrecognised JSON) is `:ignore`.
+  (by `"method"`). Ping frames surface so the connection can pong, and a peer
+  `close` frame surfaces so the connection can shut down and fail pending
+  callers. Everything else (`pong`, unrecognised JSON) is `:ignore`.
 
   For an error reply, the raw CDP error object is returned; the connection wraps
   it with the originating method as `{:cdp_error, method, error}`.
@@ -106,6 +108,9 @@ defmodule CDPEx.Protocol do
       iex> CDPEx.Protocol.classify({:ping, "hi"})
       {:ping, "hi"}
 
+      iex> CDPEx.Protocol.classify({:close, 1000, "bye"})
+      {:close, 1000, "bye"}
+
       iex> CDPEx.Protocol.classify({:pong, "hi"})
       :ignore
   """
@@ -120,6 +125,7 @@ defmodule CDPEx.Protocol do
   end
 
   def classify({:ping, data}), do: {:ping, data}
+  def classify({:close, code, reason}), do: {:close, code, reason}
   def classify(_other), do: :ignore
 
   @doc """
