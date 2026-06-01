@@ -64,6 +64,24 @@ defmodule CDPEx.IntegrationTest do
       # The page handle's connection is gone too; ops fail rather than hang.
       assert {:error, _} = Page.evaluate(page, "1 + 1")
     end
+
+    test "close_page rejects a page from another browser without harming it" do
+      {:ok, browser_a} = CDPEx.launch()
+      {:ok, browser_b} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser_a) end)
+      on_exit(fn -> stop_quietly(browser_b) end)
+
+      {:ok, page_b} = CDPEx.new_page(browser_b)
+
+      # Closing B's page through A must refuse and must NOT stop B's page conn —
+      # the handle's conn belongs to another browser.
+      assert {:error, :unknown_page} = CDPEx.close_page(browser_a, page_b)
+      assert Process.alive?(page_b.conn)
+
+      # B still owns the page: it works and closes cleanly.
+      assert {:ok, _} = Page.evaluate(page_b, "1 + 1")
+      assert :ok = CDPEx.close_page(browser_b, page_b)
+    end
   end
 
   describe "page operations" do

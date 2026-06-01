@@ -49,8 +49,13 @@ defmodule CDPEx.Browser do
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
   def new_page(browser, opts \\ []), do: GenServer.call(browser, {:new_page, opts}, 30_000)
 
-  @doc "Closes a page opened with `new_page/2`."
-  @spec close_page(GenServer.server(), Page.t()) :: :ok
+  @doc """
+  Closes a page opened with `new_page/2`.
+
+  Returns `{:error, :unknown_page}` if the page does not belong to this browser
+  (a handle from a different browser, or one that was already closed).
+  """
+  @spec close_page(GenServer.server(), Page.t()) :: :ok | {:error, :unknown_page}
   def close_page(browser, %Page{} = page), do: GenServer.call(browser, {:close_page, page}, 15_000)
 
   @doc "Stops the browser, closing all pages and killing Chrome."
@@ -116,12 +121,21 @@ defmodule CDPEx.Browser do
   end
 
   def handle_call({:close_page, %Page{target_id: tid, conn: conn}}, _from, state) do
-    # Close the target on the browser connection first (a page connection can't
-    # cleanly close its own target), then stop the page connection — best-effort,
-    # since either may already be gone.
-    close_target(state.browser_conn, tid)
-    safe_close(conn)
-    {:reply, :ok, %{state | pages: Map.delete(state.pages, tid)}}
+    case Map.get(state.pages, tid) do
+      ^conn ->
+        # Close the target on the browser connection first (a page connection can't
+        # cleanly close its own target), then stop the page connection — best-effort,
+        # since either may already be gone.
+        close_target(state.browser_conn, tid)
+        safe_close(conn)
+        {:reply, :ok, %{state | pages: Map.delete(state.pages, tid)}}
+
+      _ ->
+        # Not one of this browser's pages (a handle from another browser, or one
+        # already closed). Don't close the handle's connection or send a stray
+        # closeTarget — doing so could stop a live page owned by another browser.
+        {:reply, {:error, :unknown_page}, state}
+    end
   end
 
   @impl true

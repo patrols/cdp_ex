@@ -158,4 +158,28 @@ defmodule CDPEx.ConnectionTest do
     assert {:error, {:ws_closed, _}} = Task.await(task)
     assert_receive {:DOWN, ^ref, :process, ^conn, {:shutdown, {:ws_closed, _}}}, 2_000
   end
+
+  test "a misbehaving matcher (throw/exit) is isolated and cannot crash the connection", %{
+    conn: conn,
+    fake: fake
+  } do
+    ref = Process.monitor(conn)
+
+    throwing = Task.async(fn -> Connection.await_event(conn, fn _ -> throw(:boom) end, 300) end)
+    exiting = Task.async(fn -> Connection.await_event(conn, fn _ -> exit(:boom) end, 300) end)
+
+    # Delivering an event runs both matchers inside the connection process. Without
+    # safe_match catching throw/exit, the first one would take the socket owner down.
+    FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
+
+    assert {:error, :timeout} = Task.await(throwing)
+    assert {:error, :timeout} = Task.await(exiting)
+    refute_received {:DOWN, ^ref, :process, ^conn, _}
+
+    # The connection survived both and still serves a normal call.
+    task = Task.async(fn -> Connection.call(conn, "Still.alive", %{}) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Still.alive"}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+    assert {:ok, %{}} = Task.await(task)
+  end
 end

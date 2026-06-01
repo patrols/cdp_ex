@@ -53,8 +53,12 @@ defmodule CDPEx do
   @spec new_page(pid(), keyword()) :: {:ok, Page.t()} | {:error, term()}
   def new_page(browser, opts \\ []), do: Browser.new_page(browser, opts)
 
-  @doc "Closes a page opened with `new_page/2`."
-  @spec close_page(pid(), Page.t()) :: :ok
+  @doc """
+  Closes a page opened with `new_page/2`.
+
+  Returns `{:error, :unknown_page}` if `page` was not opened on `browser`.
+  """
+  @spec close_page(pid(), Page.t()) :: :ok | {:error, :unknown_page}
   def close_page(browser, page), do: Browser.close_page(browser, page)
 
   @doc """

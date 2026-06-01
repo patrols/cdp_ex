@@ -149,7 +149,12 @@ defmodule CDPEx.Connection do
         {:noreply, %{state | next_id: id + 1, pending: pending}}
 
       {:error, state, reason} ->
-        {:reply, {:error, reason}, state}
+        # A failed socket write means this connection can no longer be trusted:
+        # reply with the documented {:ws_closed, _} shape (not the internal
+        # {:ws_send,_}/{:ws_encode,_} tuple), fail any other pending callers, and
+        # stop — so the next caller doesn't keep trying on a dead socket.
+        GenServer.reply(from, {:error, {:ws_closed, reason}})
+        stop_ws_closed(state, reason)
     end
   end
 
@@ -322,6 +327,12 @@ defmodule CDPEx.Connection do
     matcher.(params)
   rescue
     _ -> false
+  catch
+    # A caller-supplied matcher runs inside this connection process; a throw or
+    # exit (not just a raise) must be contained here too, or it would take down
+    # the socket owner and every other caller sharing it.
+    :throw, _ -> false
+    :exit, _ -> false
   end
 
   # ── websocket plumbing ──────────────────────────────────────────────────────
