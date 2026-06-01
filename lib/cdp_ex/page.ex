@@ -10,6 +10,16 @@ defmodule CDPEx.Page do
   Obtain one with `CDPEx.new_page/2`. If the underlying page dies (navigation to
   a new target, a crash), operations return `{:error, :noproc}` and you should
   open a fresh page.
+
+  ## Operations
+
+    * **Navigation** — `navigate/3`, `wait_for_navigation/2`
+    * **Evaluation** — `evaluate/3`, `call_function/4`, `html/2`
+    * **Waiting** — `wait_for_selector/3`, `wait_for_function/3`
+    * **Elements** — `text/3`, `attribute/4`, `visible?/3`, `click/3`
+    * **Capture** — `screenshot/2`, `pdf/2`
+    * **Emulation** — `set_viewport/4`, `set_user_agent/3`
+    * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
   """
 
   alias CDPEx.Connection
