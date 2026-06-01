@@ -12,6 +12,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page.text/3`, `attribute/4`, `visible?/3` — element text / attribute / visibility helpers.
 - `CDPEx.Page.cookies/2`, `set_cookies/3`, `clear_cookies/2` — cookie get / set / clear (lazily enables the `Network` domain).
 - `CDPEx.Page.set_extra_headers/3`, `set_user_agent/3` — extra HTTP headers and User-Agent override.
+- `CDPEx.Page.set_viewport/4` — viewport / device-metrics emulation.
+- `CDPEx.Page.pdf/2` — render the page to PDF (`Page.printToPDF`); returns bytes or writes to `:path`.
 
 ## [0.1.0] - 2026-06-01
 

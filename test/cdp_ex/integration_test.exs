@@ -221,6 +221,26 @@ defmodule CDPEx.IntegrationTest do
       :ok = Page.wait_for_selector(page, "#echo-header")
       assert {:ok, "hello"} = Page.text(page, "#echo-header")
     end
+
+    test "set_viewport changes the reported viewport size", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.set_viewport(page, 800, 600)
+      assert {:ok, 800} = Page.evaluate(page, "window.innerWidth")
+      assert {:ok, 600} = Page.evaluate(page, "window.innerHeight")
+    end
+
+    test "pdf returns PDF bytes and can write a file", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#greeting")
+
+      assert {:ok, bytes} = Page.pdf(page)
+      assert <<"%PDF-", _rest::binary>> = bytes
+
+      path = Path.join(System.tmp_dir!(), "cdp_ex_doc_#{System.unique_integer([:positive])}.pdf")
+      assert {:ok, ^path} = Page.pdf(page, path: path)
+      assert File.exists?(path)
+      File.rm(path)
+    end
   end
 
   describe "tracer bullet" do

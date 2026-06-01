@@ -295,7 +295,7 @@ defmodule CDPEx.Page do
 
     with {:ok, %{"data" => base64}} <-
            Connection.call(page.conn, "Page.captureScreenshot", params, timeout),
-         {:ok, bytes} <- decode_screenshot(base64) do
+         {:ok, bytes} <- decode_base64(base64) do
       write_or_return(bytes, Keyword.get(opts, :path))
     end
   end
@@ -381,13 +381,60 @@ defmodule CDPEx.Page do
     end
   end
 
+  @doc """
+  Overrides the viewport via `Emulation.setDeviceMetricsOverride`.
+
+  `width`/`height` are CSS pixels. Options: `:device_scale_factor` (default 1),
+  `:mobile` (default `false`), `:timeout`. Returns `:ok`.
+  """
+  @spec set_viewport(t(), pos_integer(), pos_integer(), keyword()) :: :ok | {:error, term()}
+  def set_viewport(%__MODULE__{} = page, width, height, opts \\ [])
+      when is_integer(width) and is_integer(height) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    params = %{
+      "width" => width,
+      "height" => height,
+      "deviceScaleFactor" => Keyword.get(opts, :device_scale_factor, 1),
+      "mobile" => Keyword.get(opts, :mobile, false)
+    }
+
+    case Connection.call(page.conn, "Emulation.setDeviceMetricsOverride", params, timeout) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Renders the page to PDF (`Page.printToPDF`).
+
+  Returns `{:ok, pdf_binary}`, or `{:ok, path}` when `:path` is given. Options:
+  `:path`, `:landscape` (default `false`), `:print_background` (default `true`),
+  `:timeout` (default 30_000).
+  """
+  @spec pdf(t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def pdf(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @screenshot_timeout)
+
+    params = %{
+      "landscape" => Keyword.get(opts, :landscape, false),
+      "printBackground" => Keyword.get(opts, :print_background, true)
+    }
+
+    with {:ok, %{"data" => base64}} <-
+           Connection.call(page.conn, "Page.printToPDF", params, timeout),
+         {:ok, bytes} <- decode_base64(base64) do
+      write_or_return(bytes, Keyword.get(opts, :path))
+    end
+  end
+
   defp maybe_full_page(params, true), do: Map.put(params, "captureBeyondViewport", true)
   defp maybe_full_page(params, false), do: params
 
-  defp decode_screenshot(base64) do
+  defp decode_base64(base64) do
     case Base.decode64(base64) do
       {:ok, bytes} -> {:ok, bytes}
-      :error -> {:error, :invalid_screenshot_data}
+      :error -> {:error, :invalid_base64}
     end
   end
 
