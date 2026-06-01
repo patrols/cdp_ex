@@ -31,13 +31,9 @@ defmodule CDPEx.FixtureServer do
   end
 
   defp serve(socket) do
-    # Read the request so we can reflect a header back into the page, then respond.
-    request =
-      case :gen_tcp.recv(socket, 0, 5_000) do
-        {:ok, data} -> data
-        _ -> ""
-      end
-
+    # Read the full request headers (they may arrive across TCP segments) so the
+    # header reflection is deterministic, then respond.
+    request = recv_request(socket, "")
     body = render(request)
 
     response =
@@ -53,6 +49,8 @@ defmodule CDPEx.FixtureServer do
   # Reflects the X-CDPEx-Test request header into #echo-header so integration
   # tests can assert that extra headers were actually sent on the request.
   defp render(request) do
+    echo = html_escape(header_value(request, "x-cdpex-test"))
+
     """
     <!doctype html>
     <html>
@@ -60,7 +58,7 @@ defmodule CDPEx.FixtureServer do
       <body>
         <h1 id="greeting">Hello</h1>
         <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
-        <div id="echo-header">#{header_value(request, "x-cdpex-test")}</div>
+        <div id="echo-header">#{echo}</div>
       </body>
     </html>
     """
@@ -77,5 +75,31 @@ defmodule CDPEx.FixtureServer do
       [k, v] -> if String.downcase(String.trim(k)) == name, do: String.trim(v)
       _ -> nil
     end
+  end
+
+  # Read until the end-of-headers marker (or a sane cap), so a request split
+  # across TCP segments still yields the full headers for reflection.
+  defp recv_request(socket, acc) do
+    cond do
+      String.contains?(acc, "\r\n\r\n") ->
+        acc
+
+      byte_size(acc) > 65_536 ->
+        acc
+
+      true ->
+        case :gen_tcp.recv(socket, 0, 5_000) do
+          {:ok, data} -> recv_request(socket, acc <> data)
+          _ -> acc
+        end
+    end
+  end
+
+  defp html_escape(value) do
+    value
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+    |> String.replace("\"", "&quot;")
   end
 end

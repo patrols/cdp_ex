@@ -422,7 +422,7 @@ defmodule CDPEx.Page do
   """
   @spec set_viewport(t(), pos_integer(), pos_integer(), keyword()) :: :ok | {:error, term()}
   def set_viewport(%__MODULE__{} = page, width, height, opts \\ [])
-      when is_integer(width) and is_integer(height) do
+      when is_integer(width) and width > 0 and is_integer(height) and height > 0 do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
 
     params = %{
