@@ -113,6 +113,12 @@ defmodule CDPEx.IntegrationTest do
                Page.evaluate(page, "throw new Error('boom')")
     end
 
+    test "call_function applies JSON args and returns the result", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:ok, 5} = Page.call_function(page, "(a, b) => a + b", [2, 3])
+      assert {:ok, "HELLO"} = Page.call_function(page, "(s) => s.toUpperCase()", ["hello"])
+    end
+
     test "wait_for_selector resolves for present and times out for absent", %{
       page: page,
       fixture: fixture

@@ -131,6 +131,29 @@ defmodule CDPEx.Page do
   end
 
   @doc """
+  Calls a JavaScript function with `args` and returns its value.
+
+  `function_declaration` is a JS function expression (e.g. `"(a, b) => a + b"`).
+  `args` must be JSON-serializable; they are encoded and applied to the function,
+  so no untrusted data is string-interpolated into code. A thrown exception is
+  `{:error, {:evaluate_exception, details}}`; non-serializable `args` return
+  `{:error, {:invalid_args, reason}}`.
+
+  Options: `:timeout` (default 15_000), `:await_promise` (default `false`).
+  """
+  @spec call_function(t(), String.t(), [term()], keyword()) :: {:ok, term()} | {:error, term()}
+  def call_function(%__MODULE__{} = page, function_declaration, args \\ [], opts \\ [])
+      when is_binary(function_declaration) and is_list(args) do
+    case Jason.encode(args) do
+      {:ok, json} ->
+        evaluate(page, "(#{function_declaration}).apply(undefined, #{json})", opts)
+
+      {:error, reason} ->
+        {:error, {:invalid_args, reason}}
+    end
+  end
+
+  @doc """
   Polls until `css` matches an element, or `timeout` elapses.
 
   Returns `:ok` or `{:error, :timeout}`. Options: `:timeout` (default 5_000),
