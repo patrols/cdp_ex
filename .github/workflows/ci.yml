@@ -30,6 +30,8 @@ jobs:
             otp: "28.0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: erlef/setup-beam@v1
         with:
@@ -61,6 +63,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: erlef/setup-beam@v1
         with:
@@ -88,3 +92,23 @@ jobs:
         env:
           CDP_EX_CHROME_BINARY: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: mix test --only integration
+
+  # Static security audit of these workflow files (script injection, token
+  # permissions, dangerous triggers, action pinning). Fast; no Elixir/Chrome.
+  # The action-pinning policy lives in .github/zizmor.yml.
+  workflow-audit:
+    name: workflow audit (zizmor)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install zizmor==1.25.2
+
+      - name: Audit workflows
+        run: zizmor --offline .github/workflows/

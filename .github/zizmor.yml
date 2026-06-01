@@ -1,0 +1,13 @@
+# zizmor configuration (https://docs.zizmor.sh).
+#
+# These workflows pin actions to release tags (e.g. @v4), not commit SHAs.
+# That is a deliberate, proportionate choice for this repository: CI runs with
+# `contents: read`, uses no secrets, and never deploys or uploads artifacts, so
+# the blast radius of an upstream tag-move is minimal. `ref-pin` still rejects
+# mutable *branch* refs (e.g. @main), and every other (higher-value) audit —
+# template injection, dangerous triggers, excessive permissions — stays on.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin
