@@ -27,6 +27,14 @@ defmodule CDPEx.Chrome do
   Anti-bot flags (spoofed user-agent, `--disable-web-security`,
   `--disable-blink-features=AutomationControlled`, …) are **not** included — add
   them via `:extra_args` if you need them.
+
+  > #### Sandbox {: .warning}
+  >
+  > The defaults include `--no-sandbox` / `--disable-setuid-sandbox` so Chrome
+  > starts in the common container/CI setup (running as root), where the sandbox
+  > can't initialize. That is a security reduction when visiting untrusted pages —
+  > to keep the sandbox, run as a non-root user and override the flag list via
+  > `:args` (omitting the two sandbox flags).
   """
 
   import Bitwise, only: [band: 2]

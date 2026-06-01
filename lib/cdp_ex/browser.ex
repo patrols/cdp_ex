@@ -165,9 +165,12 @@ defmodule CDPEx.Browser do
 
   @impl true
   def terminate(_reason, state) do
-    # Stop page connections best-effort (a conn may already be dying — its exit
-    # must not abort us before Chrome.stop/1, which is the no-orphan guarantee).
+    # Stop the page and browser connections best-effort (a conn may already be
+    # dying — its exit must not abort us before Chrome.stop/1, the no-orphan
+    # guarantee). Closing browser_conn here makes teardown deterministic instead
+    # of leaving it to stop reactively when its socket drops on Chrome exit.
     Enum.each(state.pages, fn {_tid, conn} -> safe_close(conn) end)
+    safe_close(state.browser_conn)
     if state.chrome, do: Chrome.stop(state.chrome)
     :ok
   end
