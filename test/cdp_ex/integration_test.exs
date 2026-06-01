@@ -122,6 +122,52 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, :timeout} = Page.wait_for_selector(page, "#does-not-exist", timeout: 300)
     end
 
+    test "wait_for_function resolves when truthy and times out otherwise", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      assert :ok =
+               Page.wait_for_function(page, "document.title === 'CDPEx Fixture'", timeout: 2_000)
+
+      assert {:error, :timeout} =
+               Page.wait_for_function(page, "window.__never__ === 1", timeout: 300)
+    end
+
+    test "text returns element text, nil when absent", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#greeting")
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+      assert {:ok, nil} = Page.text(page, "#does-not-exist")
+    end
+
+    test "attribute returns an element attribute, nil when absent", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#greeting")
+      assert {:ok, "greeting"} = Page.attribute(page, "#greeting", "id")
+      assert {:ok, nil} = Page.attribute(page, "#greeting", "data-nope")
+    end
+
+    test "visible? reflects element visibility", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#greeting")
+      assert {:ok, true} = Page.visible?(page, "#greeting")
+      assert {:ok, false} = Page.visible?(page, "#does-not-exist")
+    end
+
+    test "wait_for_navigation: :none is immediate, a no-nav wait times out", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.wait_for_navigation(page, wait_until: :none)
+      assert {:error, :timeout} = Page.wait_for_navigation(page, wait_until: :load, timeout: 300)
+    end
+
     test "click toggles observable DOM state", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       :ok = Page.wait_for_selector(page, "#btn")

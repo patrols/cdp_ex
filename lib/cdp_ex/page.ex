@@ -76,6 +76,31 @@ defmodule CDPEx.Page do
   defp lifecycle_name(_), do: "networkAlmostIdle"
 
   @doc """
+  Waits for a navigation lifecycle milestone, without issuing a navigation.
+
+  Useful after a `click/3` (or other in-page action) that triggers navigation.
+
+  Options:
+    * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`
+    * `:timeout` — ms (default 30_000)
+
+  Returns `:ok`, `{:error, :timeout}`, or `{:error, reason}` if the connection
+  drops while waiting.
+  """
+  @spec wait_for_navigation(t(), keyword()) :: :ok | {:error, term()}
+  def wait_for_navigation(%__MODULE__{} = page, opts \\ []) do
+    case Keyword.get(opts, :wait_until, :network_almost_idle) do
+      :none ->
+        :ok
+
+      wait_until ->
+        name = lifecycle_name(wait_until)
+        timeout = Keyword.get(opts, :timeout, @navigate_timeout)
+        Connection.await_event(page.conn, &(&1["name"] == name), timeout)
+    end
+  end
+
+  @doc """
   Evaluates a JavaScript expression and returns its value (`returnByValue`).
 
   A thrown JS exception is `{:error, {:evaluate_exception, details}}`.
@@ -112,42 +137,119 @@ defmodule CDPEx.Page do
   """
   @spec wait_for_selector(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_selector(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
+    wait_for_function(page, "document.querySelector(#{Jason.encode!(css)}) !== null", opts)
+  end
+
+  @doc """
+  Polls a JavaScript expression until it is truthy, or `timeout` elapses.
+
+  The expression is coerced with `!!(...)`, so JS truthiness applies. Returns
+  `:ok` or `{:error, :timeout}`. Options: `:timeout` (default 5_000),
+  `:interval` (poll interval ms, default 100).
+  """
+  @spec wait_for_function(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def wait_for_function(%__MODULE__{} = page, js, opts \\ []) when is_binary(js) do
     timeout = Keyword.get(opts, :timeout, @selector_timeout)
     interval = Keyword.get(opts, :interval, 100)
     deadline = System.monotonic_time(:millisecond) + timeout
-    poll_selector(page, css, interval, deadline)
+    poll_truthy(page, "!!(#{js})", interval, deadline)
   end
 
-  defp poll_selector(page, css, interval, deadline) do
-    js = "document.querySelector(#{Jason.encode!(css)}) !== null"
-
-    case probe_selector(page, js) do
-      :found ->
+  defp poll_truthy(page, js, interval, deadline) do
+    case probe_truthy(page, js) do
+      :truthy ->
         :ok
 
       {:fatal, reason} ->
         {:error, reason}
 
-      :not_found ->
+      :falsy ->
         if System.monotonic_time(:millisecond) >= deadline do
           {:error, :timeout}
         else
           Process.sleep(interval)
-          poll_selector(page, css, interval, deadline)
+          poll_truthy(page, js, interval, deadline)
         end
     end
   end
 
-  defp probe_selector(page, js) do
+  defp probe_truthy(page, js) do
     case evaluate(page, js) do
-      {:ok, true} -> :found
-      {:ok, _} -> :not_found
+      {:ok, true} ->
+        :truthy
+
+      {:ok, _falsy} ->
+        :falsy
+
       # A CDP error here is typically transient (e.g. the execution context is
       # not ready mid-navigation). Keep polling until the deadline rather than
       # failing hard — that's the point of a wait.
-      {:error, {:cdp_error, _method, _info}} -> :not_found
-      {:error, reason} -> {:fatal, reason}
+      {:error, {:cdp_error, _method, _info}} ->
+        :falsy
+
+      {:error, reason} ->
+        {:fatal, reason}
     end
+  end
+
+  @doc """
+  Returns the `textContent` of the first element matching `css`, or `nil` when
+  no element matches.
+  """
+  @spec text(t(), String.t(), keyword()) :: {:ok, String.t() | nil} | {:error, term()}
+  def text(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
+    sel = Jason.encode!(css)
+
+    js = """
+    (() => {
+      const el = document.querySelector(#{sel});
+      return el ? el.textContent : null;
+    })()
+    """
+
+    evaluate(page, js, opts)
+  end
+
+  @doc """
+  Returns attribute `name` of the first element matching `css`, or `nil` when the
+  element or attribute is absent.
+  """
+  @spec attribute(t(), String.t(), String.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def attribute(%__MODULE__{} = page, css, name, opts \\ [])
+      when is_binary(css) and is_binary(name) do
+    sel = Jason.encode!(css)
+    attr = Jason.encode!(name)
+
+    js = """
+    (() => {
+      const el = document.querySelector(#{sel});
+      return el ? el.getAttribute(#{attr}) : null;
+    })()
+    """
+
+    evaluate(page, js, opts)
+  end
+
+  @doc """
+  Returns `{:ok, true}` when the first element matching `css` is rendered and
+  visible (has layout boxes, not `display: none` / `visibility: hidden`),
+  `{:ok, false}` otherwise — including when no element matches.
+  """
+  @spec visible?(t(), String.t(), keyword()) :: {:ok, boolean()} | {:error, term()}
+  def visible?(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
+    sel = Jason.encode!(css)
+
+    js = """
+    (() => {
+      const el = document.querySelector(#{sel});
+      if (!el) return false;
+      const s = window.getComputedStyle(el);
+      return el.getClientRects().length > 0 && s.visibility !== "hidden" && s.display !== "none";
+    })()
+    """
+
+    evaluate(page, js, opts)
   end
 
   @doc """
