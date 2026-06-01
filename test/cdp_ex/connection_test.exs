@@ -1,0 +1,145 @@
+defmodule CDPEx.ConnectionTest do
+  use ExUnit.Case, async: true
+
+  alias CDPEx.Connection
+  alias CDPEx.FakeCDP
+
+  setup do
+    # The test process owns linked connections (via start_link), so it must trap
+    # exits — exactly as a supervisor would. Without this, a test that drops a
+    # socket sends its {:shutdown, {:ws_closed, _}} exit down the link and kills
+    # whatever async sibling test is running, producing flaky, misattributed
+    # failures.
+    Process.flag(:trap_exit, true)
+
+    {:ok, server} = FakeCDP.start()
+    {:ok, conn} = Connection.start_link(server.url)
+    assert_receive {:fake_cdp_connected, fake}, 2_000
+
+    on_exit(fn ->
+      # The conn is linked to the test process; ExUnit exits that process with
+      # :shutdown, which can be racing this teardown. Tolerate an already-dying
+      # process rather than letting the stop exit propagate as a test failure.
+      try do
+        if Process.alive?(conn), do: Connection.close(conn)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    %{conn: conn, fake: fake}
+  end
+
+  test "matches a reply to its caller", %{conn: conn, fake: fake} do
+    task = Task.async(fn -> Connection.call(conn, "Page.enable", %{}) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Page.enable"}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"ok":true}}))
+    assert {:ok, %{"ok" => true}} = Task.await(task)
+  end
+
+  test "demultiplexes concurrent callers, even when replies arrive out of order", %{
+    conn: conn,
+    fake: fake
+  } do
+    a = Task.async(fn -> Connection.call(conn, "A", %{}) end)
+    b = Task.async(fn -> Connection.call(conn, "B", %{}) end)
+    c = Task.async(fn -> Connection.call(conn, "C", %{}) end)
+
+    ids =
+      for _ <- 1..3, into: %{} do
+        assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => m}}, 2_000
+        {m, id}
+      end
+
+    # Reply in a deliberately scrambled order.
+    FakeCDP.send_text(fake, ~s({"id":#{ids["C"]},"result":{"who":"C"}}))
+    FakeCDP.send_text(fake, ~s({"id":#{ids["A"]},"result":{"who":"A"}}))
+    FakeCDP.send_text(fake, ~s({"id":#{ids["B"]},"result":{"who":"B"}}))
+
+    assert {:ok, %{"who" => "A"}} = Task.await(a)
+    assert {:ok, %{"who" => "B"}} = Task.await(b)
+    assert {:ok, %{"who" => "C"}} = Task.await(c)
+  end
+
+  test "wraps a CDP error reply with the originating method", %{conn: conn, fake: fake} do
+    task = Task.async(fn -> Connection.call(conn, "Bad.method", %{}) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32601,"message":"not found"}}))
+
+    assert {:error, {:cdp_error, "Bad.method", %{"code" => -32601, "message" => "not found"}}} =
+             Task.await(task)
+  end
+
+  test "times out a call that never gets a reply", %{conn: conn, fake: fake} do
+    task = Task.async(fn -> Connection.call(conn, "Slow", %{}, 100) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Slow"}}, 2_000
+    assert {:error, {:timeout, "Slow"}} = Task.await(task)
+  end
+
+  test "routes an event to a subscriber", %{conn: conn, fake: fake} do
+    :ok = Connection.subscribe(conn, "Page.lifecycleEvent")
+    FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
+
+    assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}}, 2_000
+  end
+
+  test ":all subscribers receive every event", %{conn: conn, fake: fake} do
+    :ok = Connection.subscribe(conn, :all)
+    FakeCDP.send_text(fake, ~s({"method":"Network.requestWillBeSent","params":{"x":1}}))
+
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"x" => 1}}, 2_000
+  end
+
+  test "await_event resolves when a matching event arrives", %{conn: conn, fake: fake} do
+    task =
+      Task.async(fn ->
+        Connection.await_event(conn, &(&1["name"] == "networkAlmostIdle"), 2_000)
+      end)
+
+    # A non-matching event first, then the match.
+    FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+    )
+
+    assert :ok = Task.await(task)
+  end
+
+  test "await_event times out when no event matches", %{conn: conn} do
+    assert {:error, :timeout} = Connection.await_event(conn, fn _ -> false end, 100)
+  end
+
+  test "answering a server ping leaves the connection usable", %{conn: conn, fake: fake} do
+    FakeCDP.send_ping(fake, "ping-payload")
+
+    # The connection must still serve a normal call after handling the ping.
+    task = Task.async(fn -> Connection.call(conn, "Still.alive", %{}) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Still.alive"}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+    assert {:ok, %{}} = Task.await(task)
+  end
+
+  test "an abrupt socket drop fails pending callers and stops the connection", %{
+    conn: conn,
+    fake: fake
+  } do
+    ref = Process.monitor(conn)
+    task = Task.async(fn -> Connection.call(conn, "Hang", %{}, 5_000) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Hang"}}, 2_000
+
+    FakeCDP.hard_close(fake)
+
+    assert {:error, {:ws_closed, _}} = Task.await(task)
+    assert_receive {:DOWN, ^ref, :process, ^conn, {:shutdown, {:ws_closed, _}}}, 2_000
+  end
+
+  test "calling an already-stopped connection returns :noproc", %{conn: conn} do
+    Connection.close(conn)
+    # Give the stop a beat to land.
+    ref = Process.monitor(conn)
+    assert_receive {:DOWN, ^ref, :process, ^conn, _}, 2_000
+    assert {:error, :noproc} = Connection.call(conn, "Page.enable", %{})
+  end
+end
