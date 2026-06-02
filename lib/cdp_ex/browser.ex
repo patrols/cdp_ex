@@ -40,6 +40,14 @@ defmodule CDPEx.Browser do
     GenServer.start_link(__MODULE__, launch_opts, gen_opts)
   end
 
+  @doc false
+  def child_spec(opts) do
+    # terminate/2 reaps Chrome (kill + busy-poll + temp-dir cleanup, up to ~3.5s);
+    # give it headroom over the GenServer default (5s) so a supervisor never
+    # :brutal_kills mid-teardown and orphans Chrome.
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, shutdown: 10_000}
+  end
+
   @doc """
   Opens a new page (tab) and returns a `CDPEx.Page` handle.
 

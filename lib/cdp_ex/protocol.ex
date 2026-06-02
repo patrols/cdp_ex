@@ -179,18 +179,30 @@ defmodule CDPEx.Protocol do
   def evaluate_result(other), do: {:error, {:unexpected_evaluate, other}}
 
   @doc """
-  Splits a Chrome DevTools websocket URL into `{host, port, path}`.
+  Splits a Chrome DevTools `ws://` (or `wss://`) URL into `{host, port, path}`.
+
+  Uses `URI.parse/1`, so IPv6 hosts, explicit ports, and paths are handled
+  correctly; a non-`ws(s)://` URL or one missing a host/port raises `ArgumentError`.
 
   ## Examples
 
       iex> CDPEx.Protocol.parse_ws_url("ws://127.0.0.1:9222/devtools/browser/abc-123")
       {"127.0.0.1", 9222, "/devtools/browser/abc-123"}
+
+      iex> CDPEx.Protocol.parse_ws_url("ws://[::1]:9222/devtools/browser/abc")
+      {"::1", 9222, "/devtools/browser/abc"}
   """
   @spec parse_ws_url(String.t()) :: {String.t(), pos_integer(), String.t()}
-  def parse_ws_url("ws://" <> rest) do
-    [host_port | path_parts] = String.split(rest, "/", parts: 2)
-    [host, port] = String.split(host_port, ":")
-    {host, String.to_integer(port), "/" <> (List.first(path_parts) || "")}
+  def parse_ws_url(ws_url) when is_binary(ws_url) do
+    case URI.parse(ws_url) do
+      %URI{scheme: scheme, host: host, port: port, path: path}
+      when scheme in ["ws", "wss"] and is_binary(host) and host != "" and is_integer(port) ->
+        {host, port, path || "/"}
+
+      _ ->
+        raise ArgumentError,
+              "expected a ws:// or wss:// URL with a host and port, got: #{inspect(ws_url)}"
+    end
   end
 
   @doc """

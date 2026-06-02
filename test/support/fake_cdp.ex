@@ -65,7 +65,7 @@ defmodule CDPEx.FakeCDP do
   defp accept_loop(listen, controller) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        pid = spawn(fn -> serve(socket, controller) end)
+        pid = spawn_link(fn -> serve(socket, controller) end)
         _ = :gen_tcp.controlling_process(socket, pid)
         send(pid, :go)
         accept_loop(listen, controller)
@@ -204,12 +204,14 @@ defmodule CDPEx.FakeCDP do
   end
 
   defp unmask(payload, mask) do
-    mask = :binary.bin_to_list(mask)
+    # elem/2 on a 4-tuple is O(1); Enum.at/2 on a list is O(n), making unmask
+    # O(payload x 4) — negligible for tiny unit frames, slow for large ones.
+    mask = mask |> :binary.bin_to_list() |> List.to_tuple()
 
     payload
     |> :binary.bin_to_list()
     |> Enum.with_index()
-    |> Enum.map(fn {byte, i} -> bxor(byte, Enum.at(mask, rem(i, 4))) end)
+    |> Enum.map(fn {byte, i} -> bxor(byte, elem(mask, rem(i, 4))) end)
     |> :erlang.list_to_binary()
   end
 

@@ -261,7 +261,13 @@ defmodule CDPEx.Connection do
   end
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
+    # Single fail point for every stop path (socket drop, close/1, owner exit):
+    # reply to in-flight callers/waiters with the documented {:ws_closed, _} shape
+    # (not the less precise :noproc they'd otherwise get from the dying process)
+    # and cancel their timers so none fire into a dead mailbox.
+    fail_all_pending(state, ws_closed_reason(reason))
+
     # Best-effort graceful close; the socket may already be gone.
     with %{websocket: ws, conn: conn, ref: ref} when not is_nil(ws) <- state,
          {:ok, _ws, data} <- WebSocket.encode(ws, :close),
@@ -274,12 +280,15 @@ defmodule CDPEx.Connection do
     _ -> :ok
   end
 
+  # Map a stop reason to the {:ws_closed, _} reason reported to in-flight callers.
+  defp ws_closed_reason({:shutdown, {:ws_closed, reason}}), do: {:ws_closed, reason}
+  defp ws_closed_reason(_), do: {:ws_closed, :closed}
+
   # A dropped socket is a controlled end of this connection's life, not a crash:
-  # fail pending callers with the clean `{:ws_closed, reason}` shape, then stop
-  # under `:shutdown` so OTP doesn't emit a crash report. The owning Browser sees
-  # the reason via its monitor and decides whether it's worth logging.
+  # stop under `:shutdown` (so OTP emits no crash report) carrying the clean
+  # `{:ws_closed, reason}` shape — terminate/2 is the single place that fails the
+  # pending callers. The owning Browser sees the reason via its monitor.
   defp stop_ws_closed(state, reason) do
-    fail_all_pending(state, {:ws_closed, reason})
     {:stop, {:shutdown, {:ws_closed, reason}}, state}
   end
 
@@ -533,10 +542,15 @@ defmodule CDPEx.Connection do
     end
   end
 
-  # Process.send_after/3 rejects :infinity; represent "no deadline" as a nil timer,
-  # which cancel_timer/1 already tolerates. Without this, an :infinity timeout —
-  # valid per the timeout() spec — raises inside the GenServer and crashes it.
+  # Process.send_after/3 only accepts a non-negative integer delay. Map :infinity
+  # to "no deadline" (a nil timer, which cancel_timer/1 tolerates) and a negative
+  # delay (an already-elapsed computed deadline) to an immediate 0 — so no
+  # bad-but-plausible timeout value can raise inside the GenServer and crash it.
   defp arm_timeout(_msg, :infinity), do: nil
+
+  defp arm_timeout(msg, timeout) when is_integer(timeout) and timeout < 0,
+    do: Process.send_after(self(), msg, 0)
+
   defp arm_timeout(msg, timeout), do: Process.send_after(self(), msg, timeout)
 
   defp cancel_timer(nil), do: :ok

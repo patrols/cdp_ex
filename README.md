@@ -63,6 +63,12 @@ You also need Chrome or Chromium installed. CDPEx finds it via, in order: the
 For reproducible setups, point it at a
 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) binary.
 
+> #### Sandbox {: .warning}
+>
+> CDPEx launches Chrome with `--no-sandbox` by default, since the sandbox can't
+> start in many CI/container environments. If you run as root or drive untrusted
+> pages, re-enable it by overriding `:args` — see `CDPEx.Chrome`.
+
 ## Usage
 
 ### Resource-safe (recommended)
