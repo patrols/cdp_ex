@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-02
+
+### Added
+- Documented `:launch_timeout` as a ceiling (not a fixed wait) on `CDPEx.launch/1` and `CDPEx.with_page/3`, plus a "Running in containers" README section (timeout tuning, the fresh-profile cold-start cost, `/dev/shm` sizing, `--remote-allow-origins`).
+
+### Changed
+- Chrome readiness is now **polled**: `CDPEx.Chrome` checks the `DevToolsActivePort` file throughout the wait (not only at the deadline), so launch returns as soon as Chrome is reachable and `:launch_timeout` acts as a ceiling rather than a fixed cost — robust to Chrome builds that don't print the `DevTools listening on ws://…` stderr line.
+- A launch that never exposes the DevTools endpoint now returns `{:error, {:debug_url_not_found, stderr_excerpt}}` (was the bare atom `:debug_url_not_found`), carrying Chrome's captured stderr so the failure is self-diagnosing. **Migration:** code matching the bare `:debug_url_not_found` atom (e.g. a retry classifier) must match `{:debug_url_not_found, _}` instead, or that error silently stops matching.
+- `CDPEx.with_page/3`, given launch options, now contains a throwaway-browser crash: it returns `{:error, reason}` instead of letting the browser's linked exit propagate to and kill the caller. It briefly traps exits in the calling process for the duration of the call (see the `with_page/3` docs for the foreign-EXIT caveat and escape hatch).
+
+### Fixed
+- `CDPEx.Connection` no longer ignores an owning-process exit that arrives during the WebSocket upgrade — it aborts the connect at once instead of lingering until the upgrade timeout.
+- `CDPEx.Connection` now stops when a WebSocket **pong** write fails (mirroring a failed command write), rather than continuing on a dead socket until the next command notices.
+- `CDPEx.Page.navigate/3` prefers a just-arrived connection `:DOWN` over a best-effort readiness timeout when the two tie at the deadline, so a connection death surfaces as an error rather than a stale `{:ok, page}`.
+
 ## [0.2.1] - 2026-06-02
 
 ### Changed
@@ -46,7 +61,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/patrols/cdp_ex/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/patrols/cdp_ex/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/patrols/cdp_ex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/patrols/cdp_ex/releases/tag/v0.1.0
