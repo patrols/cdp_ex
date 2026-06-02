@@ -259,6 +259,19 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, :timeout} = Page.wait_for_navigation(page, wait_until: :load, timeout: 300)
     end
 
+    test "wait_for_navigation resolves on a milestone from an out-of-band navigation", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      # Trigger a navigation WITHOUT navigate/3 (deferred so evaluate returns before
+      # the reload tears down the context), then await its lifecycle milestone — the
+      # subscribe-before-wait path. The ~50ms defer also lets wait_for_navigation
+      # subscribe before `load` fires, exercising the race fix.
+      {:ok, _} = Page.evaluate(page, "setTimeout(() => location.reload(), 50); true")
+      assert :ok = Page.wait_for_navigation(page, wait_until: :load, timeout: 5_000)
+    end
+
     test "click toggles observable DOM state", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       :ok = Page.wait_for_selector(page, "#btn")

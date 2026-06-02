@@ -72,10 +72,40 @@ defmodule CDPEx.Page do
   defp navigate_with_wait(page, url, wait_until, timeout) do
     name = lifecycle_name(wait_until)
 
-    # Subscribe to lifecycle events BEFORE issuing the navigate, so a fast event
-    # (e.g. `load` on a cached/local page) can't fire in the gap between the
-    # navigate reply and waiter registration — the old race. subscribe/2 is a
-    # synchronous call, so the subscription is in place before the command goes out.
+    # Issue the navigate (after subscribing — see subscribe_then_await/4) and wait
+    # for its lifecycle milestone. The readiness wait is best-effort: a timeout
+    # still returns {:ok, page} (the page may just be slow); a dead connection does not.
+    trigger = fn ->
+      case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+        {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
+        {:ok, _result} -> :ok
+        {:error, _} = error -> error
+      end
+    end
+
+    case subscribe_then_await(page, name, timeout, trigger) do
+      :reached ->
+        {:ok, page}
+
+      :timeout ->
+        Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
+        {:ok, page}
+
+      {:down, reason} ->
+        {:error, down_reason(reason)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # Subscribe to lifecycle events, run `trigger` (issue the navigation, or a no-op),
+  # then await the `name` milestone — always unsubscribing + draining on the way out.
+  # Subscribing BEFORE `trigger` closes the race where a fast event (e.g. `load` on
+  # a cached page) fires before the listener is in place. Returns await_lifecycle/4's
+  # outcome (`:reached` | `{:down, reason}` | `:timeout`), or `{:error, reason}` when
+  # subscription fails or `trigger` returns one.
+  defp subscribe_then_await(page, name, timeout, trigger) do
     case safe_subscribe(page.conn) do
       {:error, reason} ->
         {:error, reason}
@@ -86,9 +116,8 @@ defmodule CDPEx.Page do
         deadline = System.monotonic_time(:millisecond) + timeout
 
         try do
-          case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
-            {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
-            {:ok, _result} -> await_lifecycle(page, name, ref, deadline)
+          case trigger.() do
+            :ok -> await_lifecycle(page, name, ref, deadline)
             {:error, _} = error -> error
           end
         after
@@ -99,37 +128,30 @@ defmodule CDPEx.Page do
     end
   end
 
-  # Block until the named lifecycle event for this page's session arrives, the
-  # connection dies, or the deadline passes. Lifecycle events for other sessions
-  # or names on a shared connection are skipped (then drained by the caller).
+  # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
+  # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
+  # methods never arrive here) — the connection dying, or the deadline. Returns
+  # `:reached` | `{:down, reason}` | `:timeout`; callers map it to their own contract.
   defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => ^name}, ^sid} ->
-        {:ok, page}
+        :reached
 
       {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _session_id} ->
         await_lifecycle(page, name, ref, deadline)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
-        # The connection died mid-navigation — surface it rather than returning a
-        # stale handle as success.
-        {:error, down_reason(reason)}
+        {:down, reason}
     after
       remaining ->
         # Exact deadline-vs-DOWN tie: a {:DOWN} may have just landed but lost the
-        # race to `after`. Prefer it over a misleading best-effort {:ok} when the
-        # connection actually died.
+        # race to `after`. Prefer it over a misleading timeout.
         receive do
-          {:DOWN, ^ref, :process, ^conn, reason} ->
-            {:error, down_reason(reason)}
+          {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
         after
-          0 ->
-            # The page didn't signal readiness in time — navigation was still
-            # issued, so return the page (best-effort), as documented.
-            Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
-            {:ok, page}
+          0 -> :timeout
         end
     end
   end
@@ -180,13 +202,24 @@ defmodule CDPEx.Page do
   @spec wait_for_navigation(t(), keyword()) :: :ok | {:error, term()}
   def wait_for_navigation(%__MODULE__{} = page, opts \\ []) do
     case Keyword.get(opts, :wait_until, :network_almost_idle) do
-      :none ->
-        :ok
+      :none -> :ok
+      wait_until -> await_navigation(page, wait_until, opts)
+    end
+  end
 
-      wait_until ->
-        name = lifecycle_name(wait_until)
-        timeout = Keyword.get(opts, :timeout, @navigate_timeout)
-        do_await(page, &(&1["name"] == name), timeout)
+  # Same machinery as navigate/3 (subscribe-before-wait, scoped to this session +
+  # the Page.lifecycleEvent method) but without issuing a navigation — the caller
+  # already triggered one (e.g. a click). Unlike the previous await_event matcher,
+  # this can't be tripped by params from another event method carrying a "name".
+  defp await_navigation(page, wait_until, opts) do
+    name = lifecycle_name(wait_until)
+    timeout = Keyword.get(opts, :timeout, @navigate_timeout)
+
+    case subscribe_then_await(page, name, timeout, fn -> :ok end) do
+      :reached -> :ok
+      :timeout -> {:error, :timeout}
+      {:down, reason} -> {:error, down_reason(reason)}
+      {:error, _} = error -> error
     end
   end
 
@@ -579,9 +612,5 @@ defmodule CDPEx.Page do
   # code path serves both the one-socket-per-page and the multiplexed transports.
   defp do_call(%__MODULE__{conn: conn, session_id: session_id}, method, params, timeout) do
     Connection.call(conn, method, params, timeout, session_id: session_id)
-  end
-
-  defp do_await(%__MODULE__{conn: conn, session_id: session_id}, matcher, timeout) do
-    Connection.await_event(conn, matcher, timeout, session_id: session_id)
   end
 end

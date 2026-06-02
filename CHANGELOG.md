@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `CDPEx.Page.wait_for_navigation/2` now waits via the same lifecycle machinery as `navigate/3` (subscribe-before-wait, scoped to the page's session and the `Page.lifecycleEvent` method) rather than a generic event matcher — so it can no longer be falsely resolved by another event method whose params happen to carry a matching `"name"`.
+
 ## [0.2.2] - 2026-06-02
 
 ### Added
