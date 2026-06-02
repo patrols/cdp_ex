@@ -19,7 +19,10 @@ defmodule CDPEx.Chrome do
       stop) when omitted. A caller-supplied dir is left in place.
     * `:extra_args` — extra flags appended to the defaults
     * `:args` — full flag list that **replaces** the defaults entirely
-    * `:launch_timeout` — ms to wait for the DevTools URL (default `15_000`)
+    * `:launch_timeout` — ms to wait for the DevTools endpoint (default
+      `15_000`). A *ceiling*, not a fixed wait: readiness is polled and returns
+      as soon as Chrome is reachable, so a generous value is free. Raise it for
+      slow cold-start hosts (e.g. headless Chrome in a constrained container).
 
   ## Default flags
 
@@ -40,6 +43,9 @@ defmodule CDPEx.Chrome do
   import Bitwise, only: [band: 2]
 
   @launch_timeout 15_000
+  # How often to poll the DevToolsActivePort file while waiting for readiness, so
+  # a fast-ready Chrome returns promptly and @launch_timeout acts as a ceiling.
+  @devtools_poll_interval 150
   @stop_exit_timeout 3_000
   @default_window_size {1280, 1024}
 
@@ -240,12 +246,16 @@ defmodule CDPEx.Chrome do
   # ── DevTools URL discovery ──────────────────────────────────────────────────
 
   # Chrome prints `DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<uuid>`
-  # to stderr; if we miss it before the deadline, reconstruct from DevToolsActivePort.
+  # to stderr, but on some builds/configs (notably new-headless, or under load)
+  # that line is slow or never printed. So while waiting we also poll the
+  # DevToolsActivePort file every @devtools_poll_interval and return the instant
+  # it's readable — making @launch_timeout a ceiling rather than a fixed wait, and
+  # readiness detection robust to Chrome variants that don't print the stderr line.
   defp await_debug_url(port, dir, buffer, deadline) do
     remaining = remaining_ms(deadline)
 
     if remaining <= 0 do
-      read_devtools_file(dir)
+      read_devtools_file(dir, buffer)
     else
       receive do
         {^port, {:data, data}} ->
@@ -259,19 +269,28 @@ defmodule CDPEx.Chrome do
         {^port, {:exit_status, status}} ->
           {:error, {:chrome_exited, status, String.slice(buffer, 0, 500)}}
       after
-        remaining -> read_devtools_file(dir)
+        # A bounded tick (never past the deadline): try the file, else keep
+        # waiting and accumulating stderr. Only the `remaining <= 0` branch above
+        # surfaces an error, so a not-yet-written file here just polls again.
+        min(@devtools_poll_interval, remaining) ->
+          case read_devtools_file(dir, buffer) do
+            {:ok, url} -> {:ok, url}
+            {:error, _} -> await_debug_url(port, dir, buffer, deadline)
+          end
       end
     end
   end
 
   # DevToolsActivePort: line 1 is the port, line 2 is the /devtools/browser/<uuid> path.
-  defp read_devtools_file(dir) do
+  # On a missing file, carry the captured stderr excerpt so a launch that never
+  # exposed the endpoint is self-diagnosing instead of a context-free atom.
+  defp read_devtools_file(dir, buffer) do
     with {:ok, contents} <- File.read(Path.join(dir, "DevToolsActivePort")),
          [port_str, browser_path | _] <- String.split(String.trim(contents), "\n"),
          {port_num, _} <- Integer.parse(port_str) do
       {:ok, "ws://127.0.0.1:#{port_num}#{browser_path}"}
     else
-      {:error, _} -> {:error, :debug_url_not_found}
+      {:error, _} -> {:error, {:debug_url_not_found, String.slice(buffer, 0, 500)}}
       _ -> {:error, :devtools_file_malformed}
     end
   end
