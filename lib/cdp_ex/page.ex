@@ -118,10 +118,19 @@ defmodule CDPEx.Page do
         {:error, down_reason(reason)}
     after
       remaining ->
-        # The page didn't signal readiness in time — navigation was still issued,
-        # so return the page (best-effort), as documented.
-        Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
-        {:ok, page}
+        # Exact deadline-vs-DOWN tie: a {:DOWN} may have just landed but lost the
+        # race to `after`. Prefer it over a misleading best-effort {:ok} when the
+        # connection actually died.
+        receive do
+          {:DOWN, ^ref, :process, ^conn, reason} ->
+            {:error, down_reason(reason)}
+        after
+          0 ->
+            # The page didn't signal readiness in time — navigation was still
+            # issued, so return the page (best-effort), as documented.
+            Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
+            {:ok, page}
+        end
     end
   end
 

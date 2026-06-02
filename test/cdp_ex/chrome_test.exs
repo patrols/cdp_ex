@@ -112,6 +112,68 @@ defmodule CDPEx.ChromeTest do
       assert {:error, {:chrome_not_found, ^path}} = Chrome.launch(chrome_binary: path)
     end
 
+    @tag :tmp_dir
+    test "times out to {:debug_url_not_found, stderr} when the endpoint never appears", %{
+      tmp_dir: tmp_dir
+    } do
+      # A stand-in binary that prints to stderr and stays alive without ever
+      # exposing a DevTools endpoint (no ws:// line, no DevToolsActivePort file).
+      stub =
+        write_stub!(tmp_dir, "stub-no-endpoint", """
+        #!/bin/sh
+        # exec, so the shell flushes the buffered stderr line to the pipe before
+        # sleeping (a plain `sleep` would hold it unflushed past the timeout).
+        echo 'stub-chrome: no devtools endpoint here' 1>&2
+        exec sleep 30
+        """)
+
+      # A generous timeout: this path always waits it out (no endpoint ever
+      # appears), and the captured stderr must arrive before the deadline even
+      # under concurrent test load — a tight window races the port data delivery.
+      assert {:error, {:debug_url_not_found, excerpt}} =
+               Chrome.launch(chrome_binary: stub, launch_timeout: 2_000)
+
+      # The captured stderr is threaded into the error, so the failure is
+      # self-diagnosing rather than a context-free atom.
+      assert excerpt =~ "no devtools endpoint"
+    end
+
+    @tag :tmp_dir
+    test "returns as soon as DevToolsActivePort is readable, without the stderr line", %{
+      tmp_dir: tmp_dir
+    } do
+      # Writes a valid DevToolsActivePort into its --user-data-dir but never prints
+      # the "DevTools listening on ws://" line — the case that used to block for the
+      # full timeout. The poll must pick the file up and return promptly.
+      stub =
+        write_stub!(tmp_dir, "stub-writes-port", """
+        #!/bin/sh
+        dir=""
+        for arg in "$@"; do
+          case "$arg" in
+            --user-data-dir=*) dir="${arg#--user-data-dir=}" ;;
+          esac
+        done
+        {
+          echo '9222'
+          echo '/devtools/browser/stub-uuid'
+        } > "$dir/DevToolsActivePort"
+        echo 'stub-chrome: started without a listening line' 1>&2
+        sleep 30
+        """)
+
+      {elapsed_us, result} =
+        :timer.tc(fn -> Chrome.launch(chrome_binary: stub, launch_timeout: 5_000) end)
+
+      assert {:ok, handle} = result
+      assert handle.debug_url == "ws://127.0.0.1:9222/devtools/browser/stub-uuid"
+      # Returned on a poll tick, far under the 5s ceiling — not by waiting it out.
+      assert elapsed_us < 2_000_000
+
+      :ok = Chrome.stop(handle)
+      refute File.dir?(handle.user_data_dir)
+    end
+
     @tag :integration
     test "launches real Chrome, exposes a browser ws URL, and cleans up on stop" do
       assert {:ok, handle} = Chrome.launch([])
@@ -124,5 +186,14 @@ defmodule CDPEx.ChromeTest do
       # Temp profile dir we created is gone after stop.
       refute File.dir?(handle.user_data_dir)
     end
+  end
+
+  # Write an executable stand-in "chrome" script into a tmp dir for launch/1 tests
+  # that exercise the readiness path without a real browser.
+  defp write_stub!(dir, name, body) do
+    path = Path.join(dir, name)
+    File.write!(path, body)
+    File.chmod!(path, 0o755)
+    path
   end
 end

@@ -39,7 +39,8 @@ defmodule CDPEx.Connection do
     subscribers: %{},
     all_subscribers: MapSet.new(),
     monitors: %{},
-    waiters: []
+    waiters: [],
+    ws_send_error: nil
   ]
 
   @type t :: %__MODULE__{}
@@ -79,6 +80,10 @@ defmodule CDPEx.Connection do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
+    # Under scheduler starvation the outer GenServer.call deadline (timeout + 1s)
+    # can fire before our inner {:call_timeout} reply — return the documented
+    # timeout tuple rather than letting the raw exit crash the caller.
+    :exit, {:timeout, _} -> {:error, {:timeout, method}}
   end
 
   @doc """
@@ -118,6 +123,7 @@ defmodule CDPEx.Connection do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
+    :exit, {:timeout, _} -> {:error, :timeout}
   end
 
   @doc "Closes the WebSocket and stops the connection."
@@ -134,7 +140,6 @@ defmodule CDPEx.Connection do
 
   @impl true
   def init({ws_url, opts}) do
-    Process.flag(:trap_exit, true)
     {host, port, path} = Protocol.parse_ws_url(ws_url)
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)
 
@@ -144,6 +149,13 @@ defmodule CDPEx.Connection do
          {:ok, conn, ref} <- WebSocket.upgrade(:ws, conn, path, []),
          {:ok, conn, status, headers} <- recv_upgrade(conn, ref, upgrade_timeout),
          {:ok, conn, websocket} <- WebSocket.new(conn, ref, status, headers) do
+      # Trap exits only AFTER the handshake. During the upgrade, recv_upgrade's
+      # wildcard receive would otherwise swallow an owner {:EXIT} (it reaches
+      # WebSocket.stream → :unknown → loop), so a dying owner is ignored until the
+      # upgrade timeout. Deferred, a mid-handshake owner death takes this still-
+      # linked process down (aborting the connect); post-handshake we trap so an
+      # owner exit stops us cleanly via the {:EXIT, _, _} handler + terminate/2.
+      Process.flag(:trap_exit, true)
       {:ok, %__MODULE__{conn: conn, ref: ref, websocket: websocket}}
     else
       {:error, reason} -> {:stop, {:ws_connect, reason}}
@@ -299,13 +311,21 @@ defmodule CDPEx.Connection do
   # fail remaining callers with {:ws_closed, _} and stop — otherwise a graceful
   # close would be silently dropped and callers would only time out.
   defp dispatch_frames(frames, state) do
-    case Enum.split_while(frames, &(not close_frame?(&1))) do
-      {pre, []} ->
-        {:noreply, Enum.reduce(pre, state, &dispatch/2)}
+    {pre, rest} = Enum.split_while(frames, &(not close_frame?(&1)))
+    state = Enum.reduce(pre, state, &dispatch/2)
 
-      {pre, [close | _rest]} ->
-        state = Enum.reduce(pre, state, &dispatch/2)
-        stop_ws_closed(state, close_reason(close))
+    cond do
+      # A failed pong write (recorded by pong/2 during the reduce) means the
+      # socket is dead — stop now, mirroring a failed command write, rather than
+      # running on it until the next ws_send notices.
+      state.ws_send_error ->
+        stop_ws_closed(state, state.ws_send_error)
+
+      match?([_ | _], rest) ->
+        stop_ws_closed(state, close_reason(hd(rest)))
+
+      true ->
+        {:noreply, state}
     end
   end
 
@@ -463,12 +483,19 @@ defmodule CDPEx.Connection do
     case WebSocket.encode(state.websocket, {:pong, data}) do
       {:ok, websocket, frame} ->
         case WebSocket.stream_request_body(state.conn, state.ref, frame) do
-          {:ok, conn} -> %{state | websocket: websocket, conn: conn}
-          {:error, conn, _reason} -> %{state | conn: conn}
+          {:ok, conn} ->
+            %{state | websocket: websocket, conn: conn}
+
+          # A failed pong write means the socket is dead. Record it so
+          # dispatch_frames/2 stops the connection (mirroring ws_send/2's failure
+          # handling) rather than running on a broken socket until the next
+          # command write notices.
+          {:error, conn, reason} ->
+            %{state | websocket: websocket, conn: conn, ws_send_error: {:ws_send, reason}}
         end
 
-      {:error, websocket, _reason} ->
-        %{state | websocket: websocket}
+      {:error, websocket, reason} ->
+        %{state | websocket: websocket, ws_send_error: {:ws_encode, reason}}
     end
   end
 
@@ -512,7 +539,7 @@ defmodule CDPEx.Connection do
   defp apply_upgrade(responses, ref, acc) do
     Enum.reduce(responses, acc, fn
       {:status, ^ref, status}, {_s, h, d} -> {status, h, d}
-      {:headers, ^ref, headers}, {s, _h, d} -> {s, headers, d}
+      {:headers, ^ref, headers}, {s, h, d} -> {s, h ++ headers, d}
       {:done, ^ref}, {s, h, _d} -> {s, h, true}
       _other, acc -> acc
     end)

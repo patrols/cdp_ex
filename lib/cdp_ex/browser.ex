@@ -98,17 +98,28 @@ defmodule CDPEx.Browser do
         # Prune session entries when their target ends (tab closed/crashed, or our
         # own close_page) so long-lived browsers don't accumulate stale sessions —
         # parity with the dedicated path, which self-prunes on a page-conn EXIT.
-        Connection.subscribe(conn, "Target.detachedFromTarget")
+        # subscribe/2 is a GenServer.call: if the browser socket dropped in the
+        # window after start_link, it exits — and since the GenServer loop hasn't
+        # started, terminate/2 never runs, so reap Chrome (and the conn) here or
+        # leak the OS process and temp profile, same as the start_link path below.
+        try do
+          Connection.subscribe(conn, "Target.detachedFromTarget")
 
-        {:ok,
-         %__MODULE__{
-           chrome: chrome,
-           browser_conn: conn,
-           host: host,
-           port: port,
-           opts: launch_opts,
-           parent: parent_pid()
-         }}
+          {:ok,
+           %__MODULE__{
+             chrome: chrome,
+             browser_conn: conn,
+             host: host,
+             port: port,
+             opts: launch_opts,
+             parent: parent_pid()
+           }}
+        catch
+          :exit, reason ->
+            safe_close(conn)
+            Chrome.stop(chrome)
+            {:stop, reason}
+        end
 
       {:error, reason} ->
         Chrome.stop(chrome)

@@ -40,7 +40,9 @@ defmodule CDPEx do
   Launches a headless Chrome browser and returns its process pid.
 
   Accepts the launch options documented in `CDPEx.Chrome` (e.g. `:headless`,
-  `:chrome_binary`, `:extra_args`, `:window_size`). For long-lived use, prefer
+  `:chrome_binary`, `:extra_args`, `:window_size`, `:launch_timeout`). On slow
+  cold-start hosts (e.g. headless Chrome in a constrained container) raise
+  `:launch_timeout` — it is a ceiling, not a fixed wait. For long-lived use, prefer
   putting `CDPEx.Browser` under your own supervisor with a `:shutdown` timeout.
   """
   @spec launch(keyword()) :: GenServer.on_start()
@@ -69,6 +71,16 @@ defmodule CDPEx do
   Pass an existing browser pid to reuse it, or a keyword list of launch options
   to spin up a throwaway browser for the duration of the call. Returns whatever
   `fun` returns, or `{:error, reason}` if the page/browser could not be created.
+
+  With launch options, the throwaway browser is linked but **contained**: if it
+  crashes during the call (e.g. its connection drops) `with_page` returns
+  `{:error, reason}` instead of letting the crash propagate to the caller. To do
+  that it briefly traps exits in the calling process for the duration of the call.
+  Only the browser's own `{:EXIT, _, _}` is drained — a *foreign* process linked
+  to the caller that exits during this window has its exit delivered as a message
+  left in the caller's mailbox, so a caller that links other processes and relies
+  on un-trapped exit propagation should pass a pre-launched browser pid instead.
+  On slow cold-start hosts, raise `:launch_timeout` (a ceiling, not a fixed wait).
 
       # against an existing browser
       CDPEx.with_page(browser, fn page ->
@@ -103,10 +115,26 @@ defmodule CDPEx do
   def with_page(launch_opts, fun, opts) when is_list(launch_opts) and is_function(fun, 1) do
     case launch(launch_opts) do
       {:ok, browser} ->
+        # launch/1 links `browser` to us. Trap exits for the duration of this call
+        # so a browser crash (e.g. its connection dropping mid-call) arrives as a
+        # message — `fun`'s own {:error, _} returns first and is never masked —
+        # instead of a link exit that would kill the caller, breaking with_page's
+        # resource-safe contract. We keep the link (not just a monitor) so that if
+        # the *caller* dies, the browser is still reaped via Browser.terminate/2.
+        prev_trap = Process.flag(:trap_exit, true)
+
         try do
-          with_page(browser, fun, opts)
+          try do
+            with_page(browser, fun, opts)
+          after
+            safe(fn -> stop(browser) end)
+          end
         after
-          safe(fn -> stop(browser) end)
+          # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
+          # our own stop/1) so it can't surface to the caller once we restore the
+          # prior trap_exit flag. A foreign linked process's EXIT is left as-is.
+          drain_exit(browser)
+          Process.flag(:trap_exit, prev_trap)
         end
 
       {:error, _} = error ->
@@ -122,5 +150,17 @@ defmodule CDPEx do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Remove a single queued {:EXIT, browser, _} (delivered as a message because the
+  # throwaway-browser `with_page/3` clause traps exits) so it can't leak to the
+  # caller after the prior trap_exit flag is restored. At most one can exist — a
+  # process exits once.
+  defp drain_exit(browser) do
+    receive do
+      {:EXIT, ^browser, _reason} -> :ok
+    after
+      0 -> :ok
+    end
   end
 end
