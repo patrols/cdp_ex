@@ -168,7 +168,7 @@ defmodule CDPEx.Browser do
   end
 
   def handle_info({:EXIT, pid, reason}, %{browser_conn: pid} = state) do
-    {:stop, {:browser_connection_down, reason}, state}
+    {:stop, browser_down_reason(reason), state}
   end
 
   def handle_info({:EXIT, pid, reason}, %{parent: pid} = state) do
@@ -207,6 +207,15 @@ defmodule CDPEx.Browser do
     if state.chrome, do: Chrome.stop(state.chrome)
     :ok
   end
+
+  # The browser connection went down. A clean close — `{:shutdown, {:ws_closed, _}}`,
+  # the Connection's own graceful-stop contract when its socket drops (e.g. Chrome
+  # going away on teardown) — is expected, so stop with a :shutdown reason and the
+  # GenServer logs nothing. Any other reason is a genuine fault and stays loud.
+  defp browser_down_reason({:shutdown, {:ws_closed, _}} = reason),
+    do: {:shutdown, {:browser_connection_down, reason}}
+
+  defp browser_down_reason(reason), do: {:browser_connection_down, reason}
 
   # ── page creation ───────────────────────────────────────────────────────────
 
