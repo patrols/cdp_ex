@@ -24,8 +24,9 @@ defmodule CDPEx.Protocol do
 
   @typedoc "The result of classifying a single decoded frame."
   @type classification ::
-          {:reply, id :: pos_integer(), {:ok, map()} | {:error, map()}}
-          | {:event, method :: String.t(), params :: map()}
+          {:reply, id :: pos_integer(), session_id :: String.t() | nil,
+           {:ok, map()} | {:error, map()}}
+          | {:event, method :: String.t(), session_id :: String.t() | nil, params :: map()}
           | {:ping, binary()}
           | {:close, code :: integer() | nil, reason :: binary()}
           | :ignore
@@ -93,7 +94,8 @@ defmodule CDPEx.Protocol do
   Classifies one decoded frame into a CDP-level action.
 
   Text frames are parsed as JSON and split into replies (by `"id"`) and events
-  (by `"method"`). Ping frames surface so the connection can pong, and a peer
+  (by `"method"`), each carrying any `"sessionId"` (from flattened CDP sessions)
+  so the connection can route per session. Ping frames surface so the connection can pong, and a peer
   `close` frame surfaces so the connection can shut down and fail pending
   callers. Everything else (`pong`, unrecognised JSON) is `:ignore`.
 
@@ -103,16 +105,19 @@ defmodule CDPEx.Protocol do
   ## Examples
 
       iex> CDPEx.Protocol.classify({:text, ~s({"id":1,"result":{"frameId":"A"}})})
-      {:reply, 1, {:ok, %{"frameId" => "A"}}}
+      {:reply, 1, nil, {:ok, %{"frameId" => "A"}}}
 
       iex> CDPEx.Protocol.classify({:text, ~s({"id":2,"error":{"code":-32000,"message":"boom"}})})
-      {:reply, 2, {:error, %{"code" => -32000, "message" => "boom"}}}
+      {:reply, 2, nil, {:error, %{"code" => -32000, "message" => "boom"}}}
 
       iex> CDPEx.Protocol.classify({:text, ~s({"method":"Page.loadEventFired","params":{"t":1}})})
-      {:event, "Page.loadEventFired", %{"t" => 1}}
+      {:event, "Page.loadEventFired", nil, %{"t" => 1}}
 
       iex> CDPEx.Protocol.classify({:text, ~s({"method":"Inspector.detached"})})
-      {:event, "Inspector.detached", %{}}
+      {:event, "Inspector.detached", nil, %{}}
+
+      iex> CDPEx.Protocol.classify({:text, ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"x":1}})})
+      {:event, "Page.lifecycleEvent", "S", %{"x" => 1}}
 
       iex> CDPEx.Protocol.classify({:ping, "hi"})
       {:ping, "hi"}
@@ -126,10 +131,17 @@ defmodule CDPEx.Protocol do
   @spec classify(frame()) :: classification()
   def classify({:text, text}) do
     case Jason.decode(text) do
-      {:ok, %{"id" => id, "result" => result}} -> {:reply, id, {:ok, result}}
-      {:ok, %{"id" => id, "error" => error}} -> {:reply, id, {:error, error}}
-      {:ok, %{"method" => method} = msg} -> {:event, method, Map.get(msg, "params", %{})}
-      _other -> :ignore
+      {:ok, %{"id" => id, "result" => result} = msg} ->
+        {:reply, id, Map.get(msg, "sessionId"), {:ok, result}}
+
+      {:ok, %{"id" => id, "error" => error} = msg} ->
+        {:reply, id, Map.get(msg, "sessionId"), {:error, error}}
+
+      {:ok, %{"method" => method} = msg} ->
+        {:event, method, Map.get(msg, "sessionId"), Map.get(msg, "params", %{})}
+
+      _other ->
+        :ignore
     end
   end
 

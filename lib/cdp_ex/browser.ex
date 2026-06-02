@@ -27,7 +27,7 @@ defmodule CDPEx.Browser do
   @create_timeout 10_000
   @bootstrap_timeout 10_000
 
-  defstruct [:chrome, :browser_conn, :host, :port, :opts, :parent, pages: %{}]
+  defstruct [:chrome, :browser_conn, :host, :port, :opts, :parent, pages: %{}, sessions: %{}]
 
   @type t :: %__MODULE__{}
 
@@ -44,6 +44,11 @@ defmodule CDPEx.Browser do
   Opens a new page (tab) and returns a `CDPEx.Page` handle.
 
   Options:
+    * `:transport` — `:dedicated` (default, one WebSocket per page, strong crash
+      isolation) or `:session` (multiplexed over the browser socket via a
+      flattened CDP session — fewer sockets, but all session pages share the
+      browser connection's fate: if it drops, they all go). Any other value
+      returns `{:error, {:invalid_transport, value}}`.
     * `:prevent_alerts` — inject no-op `alert`/`confirm`/`prompt` (default `true`)
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
@@ -82,6 +87,11 @@ defmodule CDPEx.Browser do
 
     case Connection.start_link(chrome.debug_url) do
       {:ok, conn} ->
+        # Prune session entries when their target ends (tab closed/crashed, or our
+        # own close_page) so long-lived browsers don't accumulate stale sessions —
+        # parity with the dedicated path, which self-prunes on a page-conn EXIT.
+        Connection.subscribe(conn, "Target.detachedFromTarget")
+
         {:ok,
          %__MODULE__{
            chrome: chrome,
@@ -111,12 +121,25 @@ defmodule CDPEx.Browser do
 
   @impl true
   def handle_call({:new_page, opts}, _from, state) do
-    case open_page(state, opts) do
-      {:ok, page} ->
-        {:reply, {:ok, page}, %{state | pages: Map.put(state.pages, page.target_id, page.conn)}}
+    case Keyword.get(opts, :transport, :dedicated) do
+      :dedicated -> reply_dedicated_page(state, opts)
+      :session -> reply_session_page(state, opts)
+      other -> {:reply, {:error, {:invalid_transport, other}}, state}
+    end
+  end
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+  def handle_call({:close_page, %Page{target_id: tid, session_id: sid}}, _from, state)
+      when not is_nil(sid) do
+    case Map.get(state.sessions, tid) do
+      ^sid ->
+        # The page rides the shared browser connection; detach the session and
+        # close the tab, but NEVER close that connection (other sessions use it).
+        detach_session(state.browser_conn, sid)
+        close_target(state.browser_conn, tid)
+        {:reply, :ok, %{state | sessions: Map.delete(state.sessions, tid)}}
+
+      _ ->
+        {:reply, {:error, :unknown_page}, state}
     end
   end
 
@@ -161,6 +184,16 @@ defmodule CDPEx.Browser do
     {:noreply, %{state | pages: drop_conn(state.pages, pid)}}
   end
 
+  def handle_info(
+        {:cdp_event, conn, "Target.detachedFromTarget", params, _session_id},
+        %{browser_conn: conn} = state
+      ) do
+    # A flattened session ended. Drop its entry so it doesn't linger for the life
+    # of the browser. Idempotent: our own close_page may have removed it already,
+    # and a targetId we don't track is simply a no-op delete.
+    {:noreply, %{state | sessions: Map.delete(state.sessions, params["targetId"])}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
@@ -176,6 +209,27 @@ defmodule CDPEx.Browser do
   end
 
   # ── page creation ───────────────────────────────────────────────────────────
+
+  defp reply_dedicated_page(state, opts) do
+    case open_page(state, opts) do
+      {:ok, page} ->
+        {:reply, {:ok, page}, %{state | pages: Map.put(state.pages, page.target_id, page.conn)}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp reply_session_page(state, opts) do
+    case open_session_page(state, opts) do
+      {:ok, page} ->
+        sessions = Map.put(state.sessions, page.target_id, page.session_id)
+        {:reply, {:ok, page}, %{state | sessions: sessions}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
 
   defp open_page(state, opts) do
     case Connection.call(
@@ -213,30 +267,80 @@ defmodule CDPEx.Browser do
     end
   end
 
-  defp bootstrap_page(conn, opts) do
-    with {:ok, _} <- Connection.call(conn, "Page.enable", %{}, @bootstrap_timeout),
-         {:ok, _} <- Connection.call(conn, "Runtime.enable", %{}, @bootstrap_timeout),
-         {:ok, _} <-
-           Connection.call(
-             conn,
-             "Page.setLifecycleEventsEnabled",
-             %{"enabled" => true},
-             @bootstrap_timeout
-           ) do
-      maybe_prevent_alerts(conn, opts)
+  # The session transport: create a target, attach with `flatten: true` (its
+  # frames then arrive on the browser connection tagged with the sessionId), and
+  # bootstrap it over that shared connection. On any failure NEVER `safe_close`
+  # browser_conn — it is shared by every other session.
+  defp open_session_page(state, opts) do
+    case Connection.call(
+           state.browser_conn,
+           "Target.createTarget",
+           %{"url" => "about:blank"},
+           @create_timeout
+         ) do
+      {:ok, %{"targetId" => tid}} -> attach_session(state, tid, opts)
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp maybe_prevent_alerts(conn, opts) do
+  defp attach_session(state, tid, opts) do
+    case Connection.call(
+           state.browser_conn,
+           "Target.attachToTarget",
+           %{"targetId" => tid, "flatten" => true},
+           @create_timeout
+         ) do
+      {:ok, %{"sessionId" => sid}} ->
+        case bootstrap_page(state.browser_conn, sid, opts) do
+          :ok ->
+            {:ok, %Page{browser: self(), conn: state.browser_conn, target_id: tid, session_id: sid}}
+
+          {:error, reason} ->
+            detach_session(state.browser_conn, sid)
+            close_target(state.browser_conn, tid)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        close_target(state.browser_conn, tid)
+        {:error, reason}
+    end
+  end
+
+  # Detach a session on the browser connection, ignoring failures.
+  defp detach_session(browser_conn, session_id) do
+    _ =
+      Connection.call(
+        browser_conn,
+        "Target.detachFromTarget",
+        %{"sessionId" => session_id},
+        @create_timeout
+      )
+
+    :ok
+  end
+
+  defp bootstrap_page(conn, opts), do: bootstrap_page(conn, nil, opts)
+
+  defp bootstrap_page(conn, session_id, opts) do
+    with {:ok, _} <- bcall(conn, session_id, "Page.enable", %{}),
+         {:ok, _} <- bcall(conn, session_id, "Runtime.enable", %{}),
+         {:ok, _} <-
+           bcall(conn, session_id, "Page.setLifecycleEventsEnabled", %{"enabled" => true}) do
+      maybe_prevent_alerts(conn, session_id, opts)
+    end
+  end
+
+  # One bootstrap CDP call, scoped to `session_id` (nil for a dedicated page).
+  defp bcall(conn, session_id, method, params) do
+    Connection.call(conn, method, params, @bootstrap_timeout, session_id: session_id)
+  end
+
+  defp maybe_prevent_alerts(conn, session_id, opts) do
     if Keyword.get(opts, :prevent_alerts, true) do
       params = %{"source" => Protocol.prevent_alerts_js()}
 
-      case Connection.call(
-             conn,
-             "Page.addScriptToEvaluateOnNewDocument",
-             params,
-             @bootstrap_timeout
-           ) do
+      case bcall(conn, session_id, "Page.addScriptToEvaluateOnNewDocument", params) do
         {:ok, _} -> :ok
         error -> error
       end

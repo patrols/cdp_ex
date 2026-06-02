@@ -28,26 +28,37 @@ defmodule CDPEx.ProtocolTest do
   describe "classify/1" do
     test "ok reply" do
       assert Protocol.classify({:text, ~s({"id":10,"result":{"k":"v"}})}) ==
-               {:reply, 10, {:ok, %{"k" => "v"}}}
+               {:reply, 10, nil, {:ok, %{"k" => "v"}}}
     end
 
     test "error reply returns the raw CDP error object" do
       frame = {:text, ~s({"id":11,"error":{"code":-32000,"message":"nope"}})}
 
       assert Protocol.classify(frame) ==
-               {:reply, 11, {:error, %{"code" => -32_000, "message" => "nope"}}}
+               {:reply, 11, nil, {:error, %{"code" => -32_000, "message" => "nope"}}}
     end
 
     test "event with params" do
       frame = {:text, ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})}
 
       assert Protocol.classify(frame) ==
-               {:event, "Page.lifecycleEvent", %{"name" => "networkAlmostIdle"}}
+               {:event, "Page.lifecycleEvent", nil, %{"name" => "networkAlmostIdle"}}
     end
 
     test "event without params defaults to an empty map" do
       assert Protocol.classify({:text, ~s({"method":"Inspector.detached"})}) ==
-               {:event, "Inspector.detached", %{}}
+               {:event, "Inspector.detached", nil, %{}}
+    end
+
+    test "surfaces the sessionId from flattened-session frames" do
+      reply = {:text, ~s({"id":5,"sessionId":"S1","result":{"ok":true}})}
+      assert Protocol.classify(reply) == {:reply, 5, "S1", {:ok, %{"ok" => true}}}
+
+      event =
+        {:text, ~s({"method":"Page.lifecycleEvent","sessionId":"S1","params":{"name":"load"}})}
+
+      assert Protocol.classify(event) ==
+               {:event, "Page.lifecycleEvent", "S1", %{"name" => "load"}}
     end
 
     test "a reply is never misread as an event even if it lacks result/error" do

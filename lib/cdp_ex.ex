@@ -27,9 +27,10 @@ defmodule CDPEx do
 
   > #### Status {: .info}
   >
-  > v0.1 is single-browser, one-WebSocket-per-page, headless-Chrome only.
-  > Connection pooling, `sessionId` multiplexing, and network interception are
-  > out of scope for this release.
+  > Pages default to one WebSocket each (strong crash isolation); opt into
+  > `sessionId` multiplexing (many pages over the one browser socket) with
+  > `new_page(browser, transport: :session)`, trading isolation for fewer sockets.
+  > Connection pooling, network interception, and stealth remain out of scope.
   """
 
   alias CDPEx.Browser

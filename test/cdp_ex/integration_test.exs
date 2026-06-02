@@ -10,6 +10,7 @@ defmodule CDPEx.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias CDPEx.Connection
   alias CDPEx.FixtureServer
   alias CDPEx.Page
 
@@ -81,6 +82,72 @@ defmodule CDPEx.IntegrationTest do
       # B still owns the page: it works and closes cleanly.
       assert {:ok, _} = Page.evaluate(page_b, "1 + 1")
       assert :ok = CDPEx.close_page(browser_b, page_b)
+    end
+  end
+
+  describe "session transport" do
+    test "two session pages share one browser connection and stay isolated", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+
+      # Both ride the SAME browser connection, with distinct session ids.
+      browser_conn = :sys.get_state(browser).browser_conn
+      assert p1.conn == browser_conn and p2.conn == browser_conn
+      assert is_binary(p1.session_id) and is_binary(p2.session_id)
+      assert p1.session_id != p2.session_id
+      assert map_size(:sys.get_state(browser).sessions) == 2
+
+      {:ok, _} = Page.navigate(p1, fixture)
+      {:ok, _} = Page.navigate(p2, fixture)
+
+      # Separate execution contexts: a global set in one session is invisible to
+      # the other (no cross-talk on the shared socket).
+      assert {:ok, "one"} = Page.evaluate(p1, "window.__id = 'one'; window.__id")
+      assert {:ok, "two"} = Page.evaluate(p2, "window.__id = 'two'; window.__id")
+      assert {:ok, "one"} = Page.evaluate(p1, "window.__id")
+      assert {:ok, "Hello"} = Page.text(p1, "#greeting")
+    end
+
+    test "closing a session page detaches it without harming siblings", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+      {:ok, _} = Page.navigate(p1, fixture)
+      {:ok, _} = Page.navigate(p2, fixture)
+
+      assert :ok = CDPEx.close_page(browser, p1)
+      assert map_size(:sys.get_state(browser).sessions) == 1
+
+      # p1 is detached; p2 still works on the shared connection.
+      assert {:error, _} = Page.evaluate(p1, "1 + 1")
+      assert {:ok, 4} = Page.evaluate(p2, "2 + 2")
+    end
+
+    test "an externally-closed session target is pruned from state.sessions", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+      {:ok, _} = Page.navigate(p1, fixture)
+      {:ok, _} = Page.navigate(p2, fixture)
+      assert map_size(:sys.get_state(browser).sessions) == 2
+
+      # Close p1's target OUT OF BAND — directly on the browser connection, NOT via
+      # close_page. Chrome emits Target.detachedFromTarget; the Browser must act on
+      # it to prune the dead session, or it leaks for the life of the browser.
+      browser_conn = :sys.get_state(browser).browser_conn
+      {:ok, _} = Connection.call(browser_conn, "Target.closeTarget", %{"targetId" => p1.target_id})
+
+      assert eventually(fn -> map_size(:sys.get_state(browser).sessions) == 1 end)
+
+      # The surviving session is unaffected.
+      assert {:ok, 4} = Page.evaluate(p2, "2 + 2")
     end
   end
 
@@ -284,5 +351,21 @@ defmodule CDPEx.IntegrationTest do
     if Process.alive?(browser), do: CDPEx.stop(browser)
   catch
     :exit, _ -> :ok
+  end
+
+  # Poll until `fun` is true or the deadline passes — for event-driven state (e.g.
+  # a CDP event pruning a map) that settles asynchronously after the triggering call.
+  defp eventually(fun, retries \\ 50) do
+    cond do
+      fun.() ->
+        true
+
+      retries == 0 ->
+        false
+
+      true ->
+        Process.sleep(20)
+        eventually(fun, retries - 1)
+    end
   end
 end

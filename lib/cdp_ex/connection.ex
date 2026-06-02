@@ -14,7 +14,9 @@ defmodule CDPEx.Connection do
       if the socket drops — no caller is left hanging.
 
   One connection backs one socket: the browser endpoint, or a page endpoint at
-  `/devtools/page/<targetId>`. `CDPEx.Browser` starts and monitors these.
+  `/devtools/page/<targetId>`. A single connection may carry both untagged
+  browser/page frames and many flattened sessions' frames, demultiplexed by
+  `sessionId`. `CDPEx.Browser` starts and monitors these.
   """
 
   use GenServer, restart: :temporary
@@ -62,13 +64,16 @@ defmodule CDPEx.Connection do
   Returns `{:ok, result}`, `{:error, {:cdp_error, method, error}}` on a protocol
   error, `{:error, {:timeout, method}}`, or `{:error, {:ws_closed, reason}}` /
   `{:error, :noproc}` if the connection drops or is already gone.
+
+  Pass `opts` with `session_id: sid` to address a flattened CDP session.
   """
-  @spec call(GenServer.server(), String.t(), map(), timeout()) ::
+  @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
           {:ok, map()} | {:error, term()}
-  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout) do
+  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ []) do
+    session_id = Keyword.get(opts, :session_id)
     # Outer GenServer deadline is slightly longer than the CDP timeout so our own
     # `{:timeout, method}` reply wins over a raw GenServer.call timeout.
-    GenServer.call(conn, {:cdp_call, method, params, timeout}, call_deadline(timeout))
+    GenServer.call(conn, {:cdp_call, method, params, timeout, session_id}, call_deadline(timeout))
   catch
     :exit, {:noproc, _} -> {:error, :noproc}
     :exit, {:normal, _} -> {:error, :noproc}
@@ -79,7 +84,8 @@ defmodule CDPEx.Connection do
   @doc """
   Subscribes the calling process to a CDP event method (e.g.
   `"Page.lifecycleEvent"`) or to `:all` events. Delivered as
-  `{:cdp_event, conn_pid, method, params}`.
+  `{:cdp_event, conn_pid, method, params, session_id}` — `session_id` is `nil`
+  for browser/page-level events.
 
   The subscription is removed automatically if the subscribing process exits, so
   a crashed subscriber can't accumulate in the connection.
@@ -98,11 +104,15 @@ defmodule CDPEx.Connection do
   `{:error, reason}` where reason is `:timeout` (no matching event in time) or
   `:noproc` / `{:ws_closed, _}` (the connection itself went away) — callers must
   be able to tell those apart.
+
+  Pass `opts` with `session_id: sid` to only match events from that session.
   """
-  @spec await_event(GenServer.server(), (map() -> boolean()), timeout()) ::
+  @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
           :ok | {:error, :timeout | :noproc | {:ws_closed, term()}}
-  def await_event(conn, matcher, timeout \\ @default_call_timeout) when is_function(matcher, 1) do
-    GenServer.call(conn, {:await_event, matcher, timeout}, call_deadline(timeout))
+  def await_event(conn, matcher, timeout \\ @default_call_timeout, opts \\ [])
+      when is_function(matcher, 1) do
+    session_id = Keyword.get(opts, :session_id)
+    GenServer.call(conn, {:await_event, matcher, timeout, session_id}, call_deadline(timeout))
   catch
     :exit, {:noproc, _} -> {:error, :noproc}
     :exit, {:normal, _} -> {:error, :noproc}
@@ -142,14 +152,15 @@ defmodule CDPEx.Connection do
   end
 
   @impl true
-  def handle_call({:cdp_call, method, params, timeout}, from, state) do
+  def handle_call({:cdp_call, method, params, timeout, session_id}, from, state) do
     id = state.next_id
-    payload = Protocol.encode(method, params, id)
+    payload = Protocol.encode(method, params, id, session_id)
+    key = {id, session_id}
 
     case ws_send(state, payload) do
       {:ok, state} ->
-        timer = Process.send_after(self(), {:call_timeout, id}, timeout)
-        pending = Map.put(state.pending, id, {from, method, timer})
+        timer = Process.send_after(self(), {:call_timeout, key}, timeout)
+        pending = Map.put(state.pending, key, {from, method, timer})
         {:noreply, %{state | next_id: id + 1, pending: pending}}
 
       {:error, state, reason} ->
@@ -184,14 +195,14 @@ defmodule CDPEx.Connection do
     {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
 
-  def handle_call({:await_event, matcher, timeout}, from, state) do
+  def handle_call({:await_event, matcher, timeout, session_id}, from, state) do
     timer = Process.send_after(self(), {:waiter_timeout, from}, timeout)
-    {:noreply, %{state | waiters: [{matcher, from, timer} | state.waiters]}}
+    {:noreply, %{state | waiters: [{matcher, session_id, from, timer} | state.waiters]}}
   end
 
   @impl true
-  def handle_info({:call_timeout, id}, state) do
-    case Map.pop(state.pending, id) do
+  def handle_info({:call_timeout, key}, state) do
+    case Map.pop(state.pending, key) do
       {nil, _} ->
         {:noreply, state}
 
@@ -288,15 +299,15 @@ defmodule CDPEx.Connection do
 
   defp dispatch(frame, state) do
     case Protocol.classify(frame) do
-      {:reply, id, result} -> dispatch_reply(id, result, state)
-      {:event, method, params} -> dispatch_event(method, params, state)
+      {:reply, id, session_id, result} -> dispatch_reply({id, session_id}, result, state)
+      {:event, method, session_id, params} -> dispatch_event(method, session_id, params, state)
       {:ping, data} -> pong(state, data)
       :ignore -> state
     end
   end
 
-  defp dispatch_reply(id, result, state) do
-    case Map.pop(state.pending, id) do
+  defp dispatch_reply(key, result, state) do
+    case Map.pop(state.pending, key) do
       {nil, _} ->
         state
 
@@ -310,17 +321,19 @@ defmodule CDPEx.Connection do
   defp normalize_reply({:ok, result}, _method), do: {:ok, result}
   defp normalize_reply({:error, error}, method), do: {:error, {:cdp_error, method, error}}
 
-  defp dispatch_event(method, params, state) do
+  defp dispatch_event(method, session_id, params, state) do
     state
-    |> notify_waiters(params)
-    |> notify_subscribers(method, params)
+    |> notify_waiters(session_id, params)
+    |> notify_subscribers(method, session_id, params)
   end
 
-  defp notify_waiters(state, params) do
+  defp notify_waiters(state, event_session_id, params) do
     {matched, kept} =
-      Enum.split_with(state.waiters, fn {matcher, _from, _timer} -> safe_match(matcher, params) end)
+      Enum.split_with(state.waiters, fn {matcher, want_session_id, _from, _timer} ->
+        session_match?(want_session_id, event_session_id) and safe_match(matcher, params)
+      end)
 
-    Enum.each(matched, fn {_matcher, from, timer} ->
+    Enum.each(matched, fn {_matcher, _sid, from, timer} ->
       cancel_timer(timer)
       GenServer.reply(from, :ok)
     end)
@@ -328,12 +341,18 @@ defmodule CDPEx.Connection do
     %{state | waiters: kept}
   end
 
-  defp notify_subscribers(state, method, params) do
+  # A session-less waiter (`nil`) matches any event — preserving the default
+  # behavior; a session-scoped waiter only matches its own session's events.
+  defp session_match?(nil, _event_session_id), do: true
+  defp session_match?(session_id, session_id), do: true
+  defp session_match?(_want, _event), do: false
+
+  defp notify_subscribers(state, method, session_id, params) do
     method_subs = Map.get(state.subscribers, method, MapSet.new())
 
     method_subs
     |> MapSet.union(state.all_subscribers)
-    |> Enum.each(fn pid -> send(pid, {:cdp_event, self(), method, params}) end)
+    |> Enum.each(fn pid -> send(pid, {:cdp_event, self(), method, params, session_id}) end)
 
     state
   end
@@ -485,7 +504,7 @@ defmodule CDPEx.Connection do
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp fail_all_pending(state, reason) do
-    Enum.each(state.pending, fn {_id, {from, _method, timer}} ->
+    Enum.each(state.pending, fn {_key, {from, _method, timer}} ->
       cancel_timer(timer)
       GenServer.reply(from, {:error, reason})
     end)
@@ -493,14 +512,14 @@ defmodule CDPEx.Connection do
     # Reply waiters with the real failure reason (e.g. {:ws_closed, _}), not
     # {:error, :timeout} — a dropped socket must be distinguishable from a page
     # that simply never fired the awaited event.
-    Enum.each(state.waiters, fn {_matcher, from, timer} ->
+    Enum.each(state.waiters, fn {_matcher, _session_id, from, timer} ->
       cancel_timer(timer)
       GenServer.reply(from, {:error, reason})
     end)
   end
 
   defp pop_waiter(waiters, from) do
-    case Enum.split_with(waiters, fn {_m, f, _t} -> f == from end) do
+    case Enum.split_with(waiters, fn {_m, _sid, f, _t} -> f == from end) do
       {[waiter | _], rest} -> {waiter, rest}
       {[], rest} -> {nil, rest}
     end
