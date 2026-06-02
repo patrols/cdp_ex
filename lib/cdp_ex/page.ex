@@ -330,7 +330,7 @@ defmodule CDPEx.Page do
 
     with {:ok, %{"data" => base64}} <-
            Connection.call(page.conn, "Page.captureScreenshot", params, timeout),
-         {:ok, bytes} <- decode_base64(base64) do
+         {:ok, bytes} <- decode_base64(base64, :invalid_screenshot_data) do
       write_or_return(bytes, Keyword.get(opts, :path))
     end
   end
@@ -458,7 +458,7 @@ defmodule CDPEx.Page do
 
     with {:ok, %{"data" => base64}} <-
            Connection.call(page.conn, "Page.printToPDF", params, timeout),
-         {:ok, bytes} <- decode_base64(base64) do
+         {:ok, bytes} <- decode_base64(base64, :invalid_pdf_data) do
       write_or_return(bytes, Keyword.get(opts, :path))
     end
   end
@@ -466,10 +466,10 @@ defmodule CDPEx.Page do
   defp maybe_full_page(params, true), do: Map.put(params, "captureBeyondViewport", true)
   defp maybe_full_page(params, false), do: params
 
-  defp decode_base64(base64) do
+  defp decode_base64(base64, error) do
     case Base.decode64(base64) do
       {:ok, bytes} -> {:ok, bytes}
-      :error -> {:error, :invalid_base64}
+      :error -> {:error, error}
     end
   end
 
