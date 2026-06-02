@@ -37,6 +37,31 @@ defmodule CDPEx.ConnectionTest do
     assert {:ok, %{"ok" => true}} = Task.await(task)
   end
 
+  test "call/5 with an :infinity timeout doesn't crash the connection", %{conn: conn, fake: fake} do
+    ref = Process.monitor(conn)
+    task = Task.async(fn -> Connection.call(conn, "Slow.op", %{}, :infinity) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Slow.op"}}, 2_000
+    # Arming the timer is where Process.send_after(:infinity) would have raised.
+    refute_received {:DOWN, ^ref, :process, ^conn, _}
+    FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"ok":true}}))
+    assert {:ok, %{"ok" => true}} = Task.await(task)
+  end
+
+  test "await_event/4 with an :infinity timeout doesn't crash the connection", %{conn: conn} do
+    ref = Process.monitor(conn)
+    spawn(fn -> Connection.await_event(conn, fn _ -> false end, :infinity) end)
+    Process.sleep(50)
+    refute_received {:DOWN, ^ref, :process, ^conn, _}
+    assert Process.alive?(conn)
+  end
+
+  test "stops when a linked owner exits (so terminate/2 closes the socket)" do
+    # Connection traps exits; an owner's death must stop it rather than leave an
+    # orphaned open socket. Driven directly — the handler doesn't read state.
+    assert {:stop, :boom, %Connection{}} =
+             Connection.handle_info({:EXIT, self(), :boom}, %Connection{})
+  end
+
   test "demultiplexes concurrent callers, even when replies arrive out of order", %{
     conn: conn,
     fake: fake
