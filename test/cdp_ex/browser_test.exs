@@ -30,4 +30,26 @@ defmodule CDPEx.BrowserTest do
       assert {:noreply, %Browser{sessions: %{"T2" => "S2"}}} = Browser.handle_info(event, state)
     end
   end
+
+  describe "browser connection teardown reason" do
+    test "a clean ws-closed connection exit stops quietly (a :shutdown reason)" do
+      # The Connection stops with {:shutdown, {:ws_closed, _}} when its socket drops
+      # cleanly (e.g. Chrome going away). The Browser must propagate that as a
+      # :shutdown reason so OTP logs no crash report for expected teardown.
+      conn = self()
+      state = %Browser{browser_conn: conn}
+      reason = {:shutdown, {:ws_closed, :closed}}
+
+      assert {:stop, {:shutdown, {:browser_connection_down, ^reason}}, ^state} =
+               Browser.handle_info({:EXIT, conn, reason}, state)
+    end
+
+    test "an abnormal connection exit stays loud (a non-shutdown reason)" do
+      conn = self()
+      state = %Browser{browser_conn: conn}
+
+      assert {:stop, {:browser_connection_down, :boom}, ^state} =
+               Browser.handle_info({:EXIT, conn, :boom}, state)
+    end
+  end
 end

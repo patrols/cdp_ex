@@ -56,7 +56,9 @@ defmodule CDPEx.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       # Style enforcer; runs as a `mix format` plugin (see .formatter.exs).
-      {:styler, "~> 1.11", only: [:dev, :test], runtime: false}
+      {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
+      # Audits the locked dep tree against known security advisories (`mix deps.audit`).
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -68,6 +70,7 @@ defmodule CDPEx.MixProject do
       ci: [
         "format --check-formatted",
         "deps.unlock --check-unused",
+        "deps.audit",
         "compile --warnings-as-errors",
         "credo",
         "dialyzer",
