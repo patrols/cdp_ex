@@ -36,6 +36,19 @@ defmodule CDPEx.FakeCDP do
     {:ok, %{port: port, url: "ws://127.0.0.1:#{port}/devtools/browser/fake", listen: listen}}
   end
 
+  # Like start/1, but the server accepts the connection and reads the upgrade
+  # request, then never sends the 101 — leaving CDPEx.Connection blocked in
+  # recv_upgrade. Notifies the controller {:fake_cdp_stalled, conn_pid} once the
+  # request is in, and {:fake_cdp_client_gone, conn_pid} when the client socket
+  # closes (how a Connection that died mid-handshake surfaces).
+  @spec start_stalling(pid()) :: {:ok, %{port: non_neg_integer(), url: String.t(), listen: port()}}
+  def start_stalling(controller \\ self()) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+    spawn_link(fn -> accept_loop_stalling(listen, controller) end)
+    {:ok, %{port: port, url: "ws://127.0.0.1:#{port}/devtools/browser/fake", listen: listen}}
+  end
+
   @spec send_text(pid(), iodata()) :: :ok
   def send_text(conn, text) do
     send(conn, {:send_frame, 0x1, IO.iodata_to_binary(text)})
@@ -84,6 +97,39 @@ defmodule CDPEx.FakeCDP do
     send(controller, {:fake_cdp_connected, self()})
     _ = :inet.setopts(socket, active: :once)
     loop(socket, controller, <<>>)
+  end
+
+  defp accept_loop_stalling(listen, controller) do
+    case :gen_tcp.accept(listen) do
+      {:ok, socket} ->
+        pid = spawn_link(fn -> serve_stalling(socket, controller) end)
+        _ = :gen_tcp.controlling_process(socket, pid)
+        send(pid, :go)
+        accept_loop_stalling(listen, controller)
+
+      {:error, :closed} ->
+        :ok
+    end
+  end
+
+  defp serve_stalling(socket, controller) do
+    receive do
+      :go -> :ok
+    end
+
+    {:ok, _request} = recv_request(socket, "")
+    send(controller, {:fake_cdp_stalled, self()})
+
+    # Never send the 101. Watch for the client's TCP socket closing — which is how
+    # a CDPEx.Connection that died mid-handshake (its owner exited) surfaces.
+    _ = :inet.setopts(socket, active: :once)
+
+    receive do
+      {:tcp_closed, ^socket} -> send(controller, {:fake_cdp_client_gone, self()})
+      :hard_close -> :gen_tcp.close(socket)
+    after
+      30_000 -> :gen_tcp.close(socket)
+    end
   end
 
   defp loop(socket, controller, buffer) do

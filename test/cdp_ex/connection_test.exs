@@ -336,6 +336,39 @@ defmodule CDPEx.ConnectionTest do
     refute Map.has_key?(:sys.get_state(conn).monitors, self())
   end
 
+  test "an owner death during the upgrade brings the connection down promptly" do
+    # A stalling server accepts the socket but never finishes the upgrade, so the
+    # connection sits in recv_upgrade. With trap_exit deferred past the handshake,
+    # the owner's death (via the link) aborts the connect at once. The regressed
+    # version trapped during the handshake and swallowed the {:EXIT}, lingering
+    # until the (here generous) upgrade timeout.
+    {:ok, server} = FakeCDP.start_stalling()
+
+    owner =
+      spawn(fn ->
+        Connection.start_link(server.url, upgrade_timeout: 10_000)
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:fake_cdp_stalled, _fake}, 2_000
+    Process.exit(owner, :kill)
+    assert_receive {:fake_cdp_client_gone, _fake}, 2_000
+  end
+
+  test "a server ping then an abrupt drop stops the connection (never runs on a dead socket)", %{
+    conn: conn,
+    fake: fake
+  } do
+    # Exercises the ping → pong path on a failing socket. A failed pong write now
+    # stops the connection (mirroring ws_send/2); and even if the write wins the
+    # race before the drop, the close still tears it down. Either way it must not
+    # be left running on a dead socket.
+    ref = Process.monitor(conn)
+    FakeCDP.send_ping(fake, "ka")
+    FakeCDP.hard_close(fake)
+    assert_receive {:DOWN, ^ref, :process, ^conn, {:shutdown, {:ws_closed, _}}}, 2_000
+  end
+
   # Poll until `fun` returns true, or fail — for asserting an async state change
   # (here: the connection processing a subscriber's :DOWN) without a fixed sleep.
   defp eventually(fun, retries \\ 100) do
