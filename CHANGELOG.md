@@ -13,6 +13,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Protocol.parse_ws_url/1` parses IPv6 hosts and raises a clear `ArgumentError` on a malformed URL (previously a `MatchError`).
 - `CDPEx.Connection` no longer crashes when `call/5` / `await_event/4` is given a negative timeout (it fires immediately).
 - `CDPEx.Connection` teardown fails in-flight callers with `{:error, {:ws_closed, _}}` instead of `{:error, :noproc}` on `close/1`.
+- `CDPEx.Page.navigate/3` subscribes to lifecycle events before issuing the navigate, so a fast readiness event (e.g. `load` on a cached/local page) can no longer be dropped — a register-after-navigate race.
 
 ## [0.2.0] - 2026-06-02
 

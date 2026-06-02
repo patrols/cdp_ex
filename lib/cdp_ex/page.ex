@@ -58,33 +58,98 @@ defmodule CDPEx.Page do
   def navigate(%__MODULE__{} = page, url, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @navigate_timeout)
     wait_until = Keyword.get(opts, :wait_until, :network_almost_idle)
+    navigate_with_wait(page, url, wait_until, timeout)
+  end
 
+  defp navigate_with_wait(page, url, :none, timeout) do
     case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
       {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
-      {:ok, _result} -> await_navigation(page, wait_until, timeout)
+      {:ok, _result} -> {:ok, page}
       {:error, _} = error -> error
     end
   end
 
-  defp await_navigation(page, :none, _timeout), do: {:ok, page}
-
-  defp await_navigation(page, wait_until, timeout) do
+  defp navigate_with_wait(page, url, wait_until, timeout) do
     name = lifecycle_name(wait_until)
 
-    case do_await(page, &(&1["name"] == name), timeout) do
+    # Subscribe to lifecycle events BEFORE issuing the navigate, so a fast event
+    # (e.g. `load` on a cached/local page) can't fire in the gap between the
+    # navigate reply and waiter registration — the old race. subscribe/2 is a
+    # synchronous call, so the subscription is in place before the command goes out.
+    case safe_subscribe(page.conn) do
+      {:error, reason} ->
+        {:error, reason}
+
       :ok ->
+        drain_lifecycle(page.conn)
+        ref = Process.monitor(page.conn)
+        deadline = System.monotonic_time(:millisecond) + timeout
+
+        try do
+          case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+            {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
+            {:ok, _result} -> await_lifecycle(page, name, ref, deadline)
+            {:error, _} = error -> error
+          end
+        after
+          Process.demonitor(ref, [:flush])
+          safe_unsubscribe(page.conn)
+          drain_lifecycle(page.conn)
+        end
+    end
+  end
+
+  # Block until the named lifecycle event for this page's session arrives, the
+  # connection dies, or the deadline passes. Lifecycle events for other sessions
+  # or names on a shared connection are skipped (then drained by the caller).
+  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => ^name}, ^sid} ->
         {:ok, page}
 
-      {:error, :timeout} ->
-        # The page just didn't signal readiness in time — navigation was still
-        # issued, so return the page (best-effort), as documented.
+      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _session_id} ->
+        await_lifecycle(page, name, ref, deadline)
+
+      {:DOWN, ^ref, :process, ^conn, reason} ->
+        # The connection died mid-navigation — surface it rather than returning a
+        # stale handle as success.
+        {:error, down_reason(reason)}
+    after
+      remaining ->
+        # The page didn't signal readiness in time — navigation was still issued,
+        # so return the page (best-effort), as documented.
         Logger.debug("[CDPEx.Page] readiness wait (#{name}) timed out; returning best-effort")
         {:ok, page}
+    end
+  end
 
-      {:error, reason} ->
-        # The connection died during navigation (:noproc / {:ws_closed, _}).
-        # Surface it instead of returning a stale page handle as success.
-        {:error, reason}
+  defp down_reason({:shutdown, {:ws_closed, reason}}), do: {:ws_closed, reason}
+  defp down_reason(_), do: :noproc
+
+  # subscribe/unsubscribe are GenServer.calls; a connection that's already dead (or
+  # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
+  # which must instead return {:error, _}. Treat (un)subscription as best-effort.
+  defp safe_subscribe(conn) do
+    Connection.subscribe(conn, "Page.lifecycleEvent")
+  catch
+    :exit, _ -> {:error, :noproc}
+  end
+
+  defp safe_unsubscribe(conn) do
+    Connection.unsubscribe(conn, "Page.lifecycleEvent")
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Flush lifecycle events left in our mailbox (other sessions/names, or stragglers
+  # from a prior navigation) so they don't leak to the caller.
+  defp drain_lifecycle(conn) do
+    receive do
+      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _sid} -> drain_lifecycle(conn)
+    after
+      0 -> :ok
     end
   end
 

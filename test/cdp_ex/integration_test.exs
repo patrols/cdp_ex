@@ -167,6 +167,16 @@ defmodule CDPEx.IntegrationTest do
       assert html =~ "CDPEx Fixture" or html =~ "greeting"
     end
 
+    test "navigate/3 with wait_until: :load resolves (race-free) on a fast page", %{
+      page: page,
+      fixture: fixture
+    } do
+      # :load fires fast on a local page — the case most exposed to the old
+      # register-after-navigate race. Subscribing before navigate must catch it.
+      assert {:ok, ^page} = Page.navigate(page, fixture, wait_until: :load)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
     test "evaluate returns a JS value", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert {:ok, "CDPEx Fixture"} = Page.evaluate(page, "document.title")
