@@ -76,21 +76,26 @@ defmodule CDPEx.Page do
     # (e.g. `load` on a cached/local page) can't fire in the gap between the
     # navigate reply and waiter registration — the old race. subscribe/2 is a
     # synchronous call, so the subscription is in place before the command goes out.
-    :ok = Connection.subscribe(page.conn, "Page.lifecycleEvent")
-    drain_lifecycle(page.conn)
-    ref = Process.monitor(page.conn)
-    deadline = System.monotonic_time(:millisecond) + timeout
+    case safe_subscribe(page.conn) do
+      {:error, reason} ->
+        {:error, reason}
 
-    try do
-      case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
-        {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
-        {:ok, _result} -> await_lifecycle(page, name, ref, deadline)
-        {:error, _} = error -> error
-      end
-    after
-      Process.demonitor(ref, [:flush])
-      Connection.unsubscribe(page.conn, "Page.lifecycleEvent")
-      drain_lifecycle(page.conn)
+      :ok ->
+        drain_lifecycle(page.conn)
+        ref = Process.monitor(page.conn)
+        deadline = System.monotonic_time(:millisecond) + timeout
+
+        try do
+          case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+            {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
+            {:ok, _result} -> await_lifecycle(page, name, ref, deadline)
+            {:error, _} = error -> error
+          end
+        after
+          Process.demonitor(ref, [:flush])
+          safe_unsubscribe(page.conn)
+          drain_lifecycle(page.conn)
+        end
     end
   end
 
@@ -104,7 +109,7 @@ defmodule CDPEx.Page do
       {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => ^name}, ^sid} ->
         {:ok, page}
 
-      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _other_sid} ->
+      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _session_id} ->
         await_lifecycle(page, name, ref, deadline)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
@@ -122,6 +127,21 @@ defmodule CDPEx.Page do
 
   defp down_reason({:shutdown, {:ws_closed, reason}}), do: {:ws_closed, reason}
   defp down_reason(_), do: :noproc
+
+  # subscribe/unsubscribe are GenServer.calls; a connection that's already dead (or
+  # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
+  # which must instead return {:error, _}. Treat (un)subscription as best-effort.
+  defp safe_subscribe(conn) do
+    Connection.subscribe(conn, "Page.lifecycleEvent")
+  catch
+    :exit, _ -> {:error, :noproc}
+  end
+
+  defp safe_unsubscribe(conn) do
+    Connection.unsubscribe(conn, "Page.lifecycleEvent")
+  catch
+    :exit, _ -> :ok
+  end
 
   # Flush lifecycle events left in our mailbox (other sessions/names, or stragglers
   # from a prior navigation) so they don't leak to the caller.
