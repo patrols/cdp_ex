@@ -10,6 +10,7 @@ defmodule CDPEx.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias CDPEx.Connection
   alias CDPEx.FixtureServer
   alias CDPEx.Page
 
@@ -124,6 +125,28 @@ defmodule CDPEx.IntegrationTest do
 
       # p1 is detached; p2 still works on the shared connection.
       assert {:error, _} = Page.evaluate(p1, "1 + 1")
+      assert {:ok, 4} = Page.evaluate(p2, "2 + 2")
+    end
+
+    test "an externally-closed session target is pruned from state.sessions", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+      {:ok, _} = Page.navigate(p1, fixture)
+      {:ok, _} = Page.navigate(p2, fixture)
+      assert map_size(:sys.get_state(browser).sessions) == 2
+
+      # Close p1's target OUT OF BAND — directly on the browser connection, NOT via
+      # close_page. Chrome emits Target.detachedFromTarget; the Browser must act on
+      # it to prune the dead session, or it leaks for the life of the browser.
+      browser_conn = :sys.get_state(browser).browser_conn
+      {:ok, _} = Connection.call(browser_conn, "Target.closeTarget", %{"targetId" => p1.target_id})
+
+      assert eventually(fn -> map_size(:sys.get_state(browser).sessions) == 1 end)
+
+      # The surviving session is unaffected.
       assert {:ok, 4} = Page.evaluate(p2, "2 + 2")
     end
   end
@@ -328,5 +351,21 @@ defmodule CDPEx.IntegrationTest do
     if Process.alive?(browser), do: CDPEx.stop(browser)
   catch
     :exit, _ -> :ok
+  end
+
+  # Poll until `fun` is true or the deadline passes — for event-driven state (e.g.
+  # a CDP event pruning a map) that settles asynchronously after the triggering call.
+  defp eventually(fun, retries \\ 50) do
+    cond do
+      fun.() ->
+        true
+
+      retries == 0 ->
+        false
+
+      true ->
+        Process.sleep(20)
+        eventually(fun, retries - 1)
+    end
   end
 end

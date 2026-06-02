@@ -87,6 +87,11 @@ defmodule CDPEx.Browser do
 
     case Connection.start_link(chrome.debug_url) do
       {:ok, conn} ->
+        # Prune session entries when their target ends (tab closed/crashed, or our
+        # own close_page) so long-lived browsers don't accumulate stale sessions —
+        # parity with the dedicated path, which self-prunes on a page-conn EXIT.
+        Connection.subscribe(conn, "Target.detachedFromTarget")
+
         {:ok,
          %__MODULE__{
            chrome: chrome,
@@ -177,6 +182,16 @@ defmodule CDPEx.Browser do
     # A page connection exited (closed or crashed). Drop it; the page handle the
     # caller holds becomes stale and its next op returns {:error, :noproc}.
     {:noreply, %{state | pages: drop_conn(state.pages, pid)}}
+  end
+
+  def handle_info(
+        {:cdp_event, conn, "Target.detachedFromTarget", params, _session_id},
+        %{browser_conn: conn} = state
+      ) do
+    # A flattened session ended. Drop its entry so it doesn't linger for the life
+    # of the browser. Idempotent: our own close_page may have removed it already,
+    # and a targetId we don't track is simply a no-op delete.
+    {:noreply, %{state | sessions: Map.delete(state.sessions, params["targetId"])}}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
