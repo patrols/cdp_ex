@@ -80,6 +80,10 @@ defmodule CDPEx.Connection do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
+    # Under scheduler starvation the outer GenServer.call deadline (timeout + 1s)
+    # can fire before our inner {:call_timeout} reply — return the documented
+    # timeout tuple rather than letting the raw exit crash the caller.
+    :exit, {:timeout, _} -> {:error, {:timeout, method}}
   end
 
   @doc """
@@ -119,6 +123,7 @@ defmodule CDPEx.Connection do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
+    :exit, {:timeout, _} -> {:error, :timeout}
   end
 
   @doc "Closes the WebSocket and stops the connection."
@@ -534,7 +539,7 @@ defmodule CDPEx.Connection do
   defp apply_upgrade(responses, ref, acc) do
     Enum.reduce(responses, acc, fn
       {:status, ^ref, status}, {_s, h, d} -> {status, h, d}
-      {:headers, ^ref, headers}, {s, _h, d} -> {s, headers, d}
+      {:headers, ^ref, headers}, {s, h, d} -> {s, h ++ headers, d}
       {:done, ^ref}, {s, h, _d} -> {s, h, true}
       _other, acc -> acc
     end)

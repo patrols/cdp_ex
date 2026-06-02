@@ -20,6 +20,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Connection` no longer ignores an owning-process exit that arrives during the WebSocket upgrade — it aborts the connect at once instead of lingering until the upgrade timeout.
 - `CDPEx.Connection` now stops when a WebSocket **pong** write fails (mirroring a failed command write), rather than continuing on a dead socket until the next command notices.
 - `CDPEx.Page.navigate/3` prefers a just-arrived connection `:DOWN` over a best-effort readiness timeout when the two tie at the deadline, so a connection death surfaces as an error rather than a stale `{:ok, page}`.
+- `CDPEx.Browser` no longer leaks Chrome if the browser connection drops in the window between connecting and its first subscribe — the init-time exit is caught and Chrome is reaped.
+- `CDPEx.Chrome` launch-failure cleanup waits for the OS process to exit before removing the temp profile (matching `stop/1`), closing a `kill`/`rm` race.
+- `CDPEx.Connection.call/5` and `await_event/4` return the documented timeout tuple instead of crashing the caller if the outer `GenServer.call` deadline fires first under scheduler starvation.
+- `CDPEx.Connection` accumulates WebSocket upgrade headers across response chunks instead of replacing them (defensive; dormant for single-response `101` upgrades).
 
 ## [0.2.1] - 2026-06-02
 

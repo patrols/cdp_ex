@@ -102,9 +102,13 @@ defmodule CDPEx.Chrome do
          }}
 
       {:error, reason} ->
+        # Align with stop/1: kill -9 is async, so wait for the OS process to exit
+        # before removing the temp profile (a still-alive Chrome can recreate files
+        # between the rm and the reap), and use remove_dir/1's retry loop.
         kill(os_pid)
         close_port(port)
-        _ = if owns?, do: File.rm_rf(user_data_dir)
+        await_exit(os_pid, deadline(@stop_exit_timeout))
+        if owns?, do: remove_dir(user_data_dir)
         {:error, reason}
     end
   end
