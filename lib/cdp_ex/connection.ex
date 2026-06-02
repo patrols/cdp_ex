@@ -159,7 +159,7 @@ defmodule CDPEx.Connection do
 
     case ws_send(state, payload) do
       {:ok, state} ->
-        timer = Process.send_after(self(), {:call_timeout, key}, timeout)
+        timer = arm_timeout({:call_timeout, key}, timeout)
         pending = Map.put(state.pending, key, {from, method, timer})
         {:noreply, %{state | next_id: id + 1, pending: pending}}
 
@@ -196,7 +196,7 @@ defmodule CDPEx.Connection do
   end
 
   def handle_call({:await_event, matcher, timeout, session_id}, from, state) do
-    timer = Process.send_after(self(), {:waiter_timeout, from}, timeout)
+    timer = arm_timeout({:waiter_timeout, from}, timeout)
     {:noreply, %{state | waiters: [{matcher, session_id, from, timer} | state.waiters]}}
   end
 
@@ -228,6 +228,14 @@ defmodule CDPEx.Connection do
   # before the catch-all clause, which would otherwise feed it to WebSocket.stream.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     {:noreply, drop_subscriber(state, pid)}
+  end
+
+  # A linked process — our owner (e.g. CDPEx.Browser) — went down. Stop too, so
+  # terminate/2 closes the socket. This makes cleanup unconditional even when the
+  # owner skips its own terminate/2 (a :brutal_kill, or a crash before cleanup);
+  # otherwise the connection would linger with an open socket until Chrome drops it.
+  def handle_info({:EXIT, _pid, reason}, state) do
+    {:stop, reason, state}
   end
 
   # Any other message is an inbound WebSocket transport frame.
@@ -524,6 +532,12 @@ defmodule CDPEx.Connection do
       {[], rest} -> {nil, rest}
     end
   end
+
+  # Process.send_after/3 rejects :infinity; represent "no deadline" as a nil timer,
+  # which cancel_timer/1 already tolerates. Without this, an :infinity timeout —
+  # valid per the timeout() spec — raises inside the GenServer and crashes it.
+  defp arm_timeout(_msg, :infinity), do: nil
+  defp arm_timeout(msg, timeout), do: Process.send_after(self(), msg, timeout)
 
   defp cancel_timer(nil), do: :ok
 
