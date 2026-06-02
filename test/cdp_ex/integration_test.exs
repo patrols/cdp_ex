@@ -42,6 +42,14 @@ defmodule CDPEx.IntegrationTest do
       assert_receive {:DOWN, ^ref, :process, ^browser, _}, 5_000
     end
 
+    test "launch/1 returns well under the timeout ceiling (readiness is polled)" do
+      {elapsed_us, {:ok, browser}} = :timer.tc(fn -> CDPEx.launch() end)
+      on_exit(fn -> stop_quietly(browser) end)
+      # Real Chrome is reachable in ~1s locally; :launch_timeout (15s default) is a
+      # ceiling, not a fixed wait. Assert comfortably under it (loose, non-flaky).
+      assert elapsed_us < 10_000_000
+    end
+
     test "new_page/2 then close_page/2" do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)
@@ -350,6 +358,29 @@ defmodule CDPEx.IntegrationTest do
       # No orphaned Chrome from the raising run is asserted at the suite level
       # (see the no-orphan check in the test command); here we just confirm the
       # raise propagates rather than being swallowed.
+    end
+
+    test "with_page contains a browser crash without killing a non-trapping caller" do
+      parent = self()
+
+      # A caller that does NOT trap exits. Pre-fix, with_page linked the throwaway
+      # browser to it, so killing Chrome would take this process down with the
+      # browser's exit. The fix traps inside with_page, so the caller instead gets
+      # {:error, _} and exits :normal.
+      {caller, ref} =
+        spawn_monitor(fn ->
+          result =
+            CDPEx.with_page([], fn page ->
+              %{chrome: %{os_pid: os_pid}} = :sys.get_state(page.browser)
+              System.cmd("kill", ["-9", to_string(os_pid)])
+              Page.evaluate(page, "1 + 1")
+            end)
+
+          send(parent, {:with_page_result, result})
+        end)
+
+      assert_receive {:with_page_result, {:error, _}}, 30_000
+      assert_receive {:DOWN, ^ref, :process, ^caller, :normal}, 5_000
     end
   end
 
