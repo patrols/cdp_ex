@@ -39,9 +39,12 @@ you don't want a ChromeDriver process or a Node sidecar — that's the gap CDPEx
 
 > #### Status {: .info}
 >
-> **v0.1** is single-browser, one-WebSocket-per-page, headless Chrome only.
-> Connection pooling, `sessionId` multiplexing, network interception, and stealth
-> are intentionally out of scope for this release.
+> **Transports:** pages default to one WebSocket each (strong crash isolation).
+> Opt into `sessionId` multiplexing — many pages over the one browser socket —
+> with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
+> dropped browser connection drops all of its session pages).
+>
+> Connection pooling, network interception, and stealth remain out of scope for now.
 
 ## Installation
 

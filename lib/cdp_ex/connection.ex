@@ -14,7 +14,9 @@ defmodule CDPEx.Connection do
       if the socket drops — no caller is left hanging.
 
   One connection backs one socket: the browser endpoint, or a page endpoint at
-  `/devtools/page/<targetId>`. `CDPEx.Browser` starts and monitors these.
+  `/devtools/page/<targetId>`. A single connection may carry both untagged
+  browser/page frames and many flattened sessions' frames, demultiplexed by
+  `sessionId`. `CDPEx.Browser` starts and monitors these.
   """
 
   use GenServer, restart: :temporary
