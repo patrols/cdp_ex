@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current. Grouped into one PR per run to
+  # keep the noise down; the `# vX` comment on each pin tells Dependabot the
+  # version line to track.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
