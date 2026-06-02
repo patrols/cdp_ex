@@ -34,9 +34,14 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
 
   @enforce_keys [:browser, :conn, :target_id]
-  defstruct [:browser, :conn, :target_id]
+  defstruct [:browser, :conn, :target_id, :session_id]
 
-  @type t :: %__MODULE__{browser: pid(), conn: pid(), target_id: String.t()}
+  @type t :: %__MODULE__{
+          browser: pid(),
+          conn: pid(),
+          target_id: String.t(),
+          session_id: String.t() | nil
+        }
 
   @doc """
   Navigates to `url` and (by default) waits until the network is almost idle.
@@ -54,7 +59,7 @@ defmodule CDPEx.Page do
     timeout = Keyword.get(opts, :timeout, @navigate_timeout)
     wait_until = Keyword.get(opts, :wait_until, :network_almost_idle)
 
-    case Connection.call(page.conn, "Page.navigate", %{"url" => url}, timeout) do
+    case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
       {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
       {:ok, _result} -> await_navigation(page, wait_until, timeout)
       {:error, _} = error -> error
@@ -66,7 +71,7 @@ defmodule CDPEx.Page do
   defp await_navigation(page, wait_until, timeout) do
     name = lifecycle_name(wait_until)
 
-    case Connection.await_event(page.conn, &(&1["name"] == name), timeout) do
+    case do_await(page, &(&1["name"] == name), timeout) do
       :ok ->
         {:ok, page}
 
@@ -107,7 +112,7 @@ defmodule CDPEx.Page do
       wait_until ->
         name = lifecycle_name(wait_until)
         timeout = Keyword.get(opts, :timeout, @navigate_timeout)
-        Connection.await_event(page.conn, &(&1["name"] == name), timeout)
+        do_await(page, &(&1["name"] == name), timeout)
     end
   end
 
@@ -128,7 +133,7 @@ defmodule CDPEx.Page do
       "awaitPromise" => Keyword.get(opts, :await_promise, false)
     }
 
-    case Connection.call(page.conn, "Runtime.evaluate", params, timeout) do
+    case do_call(page, "Runtime.evaluate", params, timeout) do
       {:ok, result} -> Protocol.evaluate_result(result)
       {:error, _} = error -> error
     end
@@ -329,7 +334,7 @@ defmodule CDPEx.Page do
     params = maybe_full_page(%{"format" => "png"}, Keyword.get(opts, :full_page, false))
 
     with {:ok, %{"data" => base64}} <-
-           Connection.call(page.conn, "Page.captureScreenshot", params, timeout),
+           do_call(page, "Page.captureScreenshot", params, timeout),
          {:ok, bytes} <- decode_base64(base64, :invalid_screenshot_data) do
       write_or_return(bytes, Keyword.get(opts, :path))
     end
@@ -346,7 +351,7 @@ defmodule CDPEx.Page do
 
     with :ok <- ensure_network(page, timeout),
          {:ok, %{"cookies" => cookies}} <-
-           Connection.call(page.conn, "Network.getAllCookies", %{}, timeout) do
+           do_call(page, "Network.getAllCookies", %{}, timeout) do
       {:ok, cookies}
     end
   end
@@ -361,7 +366,7 @@ defmodule CDPEx.Page do
 
     with :ok <- ensure_network(page, timeout),
          {:ok, _} <-
-           Connection.call(page.conn, "Network.setCookies", %{"cookies" => cookies}, timeout) do
+           do_call(page, "Network.setCookies", %{"cookies" => cookies}, timeout) do
       :ok
     end
   end
@@ -372,7 +377,7 @@ defmodule CDPEx.Page do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
 
     with :ok <- ensure_network(page, timeout),
-         {:ok, _} <- Connection.call(page.conn, "Network.clearBrowserCookies", %{}, timeout) do
+         {:ok, _} <- do_call(page, "Network.clearBrowserCookies", %{}, timeout) do
       :ok
     end
   end
@@ -390,8 +395,8 @@ defmodule CDPEx.Page do
 
     with :ok <- ensure_network(page, timeout),
          {:ok, _} <-
-           Connection.call(
-             page.conn,
+           do_call(
+             page,
              "Network.setExtraHTTPHeaders",
              %{"headers" => headers},
              timeout
@@ -410,7 +415,7 @@ defmodule CDPEx.Page do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
     params = %{"userAgent" => user_agent}
 
-    case Connection.call(page.conn, "Emulation.setUserAgentOverride", params, timeout) do
+    case do_call(page, "Emulation.setUserAgentOverride", params, timeout) do
       {:ok, _} -> :ok
       {:error, _} = error -> error
     end
@@ -434,7 +439,7 @@ defmodule CDPEx.Page do
       "mobile" => Keyword.get(opts, :mobile, false)
     }
 
-    case Connection.call(page.conn, "Emulation.setDeviceMetricsOverride", params, timeout) do
+    case do_call(page, "Emulation.setDeviceMetricsOverride", params, timeout) do
       {:ok, _} -> :ok
       {:error, _} = error -> error
     end
@@ -457,7 +462,7 @@ defmodule CDPEx.Page do
     }
 
     with {:ok, %{"data" => base64}} <-
-           Connection.call(page.conn, "Page.printToPDF", params, timeout),
+           do_call(page, "Page.printToPDF", params, timeout),
          {:ok, bytes} <- decode_base64(base64, :invalid_pdf_data) do
       write_or_return(bytes, Keyword.get(opts, :path))
     end
@@ -485,9 +490,19 @@ defmodule CDPEx.Page do
   # Lazily enable the Network domain (idempotent in CDP) so cookie/header ops
   # work without callers opting in at page creation — keeps Page stateless.
   defp ensure_network(page, timeout) do
-    case Connection.call(page.conn, "Network.enable", %{}, timeout) do
+    case do_call(page, "Network.enable", %{}, timeout) do
       {:ok, _} -> :ok
       {:error, _} = error -> error
     end
+  end
+
+  # Page ops thread the page's session id (`nil` for a dedicated page) so the same
+  # code path serves both the one-socket-per-page and the multiplexed transports.
+  defp do_call(%__MODULE__{conn: conn, session_id: session_id}, method, params, timeout) do
+    Connection.call(conn, method, params, timeout, session_id: session_id)
+  end
+
+  defp do_await(%__MODULE__{conn: conn, session_id: session_id}, matcher, timeout) do
+    Connection.await_event(conn, matcher, timeout, session_id: session_id)
   end
 end
