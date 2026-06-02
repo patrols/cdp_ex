@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-02
+
 ### Changed
 - `CDPEx.Browser` sets `shutdown: 10_000` in `child_spec/1` so a supervisor gives `terminate/2` enough time to reap Chrome.
 
@@ -44,6 +46,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/patrols/cdp_ex/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/patrols/cdp_ex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/patrols/cdp_ex/releases/tag/v0.1.0
