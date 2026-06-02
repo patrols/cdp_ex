@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `CDPEx.Browser` sets `shutdown: 10_000` in `child_spec/1` so a supervisor gives `terminate/2` enough time to reap Chrome.
+
+### Fixed
+- `CDPEx.Protocol.parse_ws_url/1` parses IPv6 hosts and raises a clear `ArgumentError` on a malformed URL (previously a `MatchError`).
+- `CDPEx.Connection` no longer crashes when `call/5` / `await_event/4` is given a negative timeout (it fires immediately).
+- `CDPEx.Connection` teardown fails in-flight callers with `{:error, {:ws_closed, _}}` instead of `{:error, :noproc}` on `close/1`.
+
 ## [0.2.0] - 2026-06-02
 
 ### Added

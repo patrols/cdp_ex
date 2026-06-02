@@ -149,11 +149,15 @@ defmodule CDPEx.Page do
   Calls a JavaScript function with `args` and returns its value.
 
   `function_declaration` is a JS function expression (e.g. `"(a, b) => a + b"`).
-  It is interpolated into the page script **verbatim**, so treat it as trusted
-  code — never build it from untrusted input. `args`, by contrast, are JSON-encoded
-  (not string-interpolated) before being applied, so passing data values through
-  them is safe. A thrown exception is `{:error, {:evaluate_exception, details}}`;
-  non-serializable `args` return `{:error, {:invalid_args, reason}}`.
+  `args` are JSON-encoded (not string-interpolated) before being applied, so
+  passing data values through them is safe. A thrown exception is
+  `{:error, {:evaluate_exception, details}}`; non-serializable `args` return
+  `{:error, {:invalid_args, reason}}`.
+
+  > #### Trusted input {: .warning}
+  >
+  > `function_declaration` is interpolated into the page script **verbatim** —
+  > treat it as trusted code and never build it from untrusted input.
 
   Options: `:timeout` (default 15_000), `:await_promise` (default `false`).
   """

@@ -62,6 +62,30 @@ defmodule CDPEx.ConnectionTest do
              Connection.handle_info({:EXIT, self(), :boom}, %Connection{})
   end
 
+  test "an owner exit with :normal stops the connection quietly" do
+    assert {:stop, :normal, %Connection{}} =
+             Connection.handle_info({:EXIT, self(), :normal}, %Connection{})
+  end
+
+  test "call/5 with a negative (elapsed) timeout fires immediately, not a crash", %{conn: conn} do
+    ref = Process.monitor(conn)
+    # Process.send_after rejects negatives; arm_timeout clamps to an immediate 0.
+    assert {:error, {:timeout, "Late.op"}} = Connection.call(conn, "Late.op", %{}, -1)
+    refute_received {:DOWN, ^ref, :process, ^conn, _}
+  end
+
+  test "close/1 fails an in-flight caller with {:ws_closed, _}, not :noproc", %{
+    conn: conn,
+    fake: fake
+  } do
+    # terminate/2 drains pending callers with the precise {:ws_closed, _} shape
+    # rather than letting them fall back to :noproc from the dying process.
+    task = Task.async(fn -> Connection.call(conn, "Hang.forever", %{}) end)
+    assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Hang.forever"}}, 2_000
+    Connection.close(conn)
+    assert {:error, {:ws_closed, _}} = Task.await(task)
+  end
+
   test "demultiplexes concurrent callers, even when replies arrive out of order", %{
     conn: conn,
     fake: fake
