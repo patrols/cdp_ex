@@ -47,7 +47,8 @@ defmodule CDPEx.Browser do
     * `:transport` — `:dedicated` (default, one WebSocket per page, strong crash
       isolation) or `:session` (multiplexed over the browser socket via a
       flattened CDP session — fewer sockets, but all session pages share the
-      browser connection's fate: if it drops, they all go)
+      browser connection's fate: if it drops, they all go). Any other value
+      returns `{:error, {:invalid_transport, value}}`.
     * `:prevent_alerts` — inject no-op `alert`/`confirm`/`prompt` (default `true`)
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
@@ -118,6 +119,7 @@ defmodule CDPEx.Browser do
     case Keyword.get(opts, :transport, :dedicated) do
       :dedicated -> reply_dedicated_page(state, opts)
       :session -> reply_session_page(state, opts)
+      other -> {:reply, {:error, {:invalid_transport, other}}, state}
     end
   end
 
