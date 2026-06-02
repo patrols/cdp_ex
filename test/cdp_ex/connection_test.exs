@@ -80,14 +80,69 @@ defmodule CDPEx.ConnectionTest do
     :ok = Connection.subscribe(conn, "Page.lifecycleEvent")
     FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
 
-    assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}}, 2_000
+    assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, nil}, 2_000
   end
 
   test ":all subscribers receive every event", %{conn: conn, fake: fake} do
     :ok = Connection.subscribe(conn, :all)
     FakeCDP.send_text(fake, ~s({"method":"Network.requestWillBeSent","params":{"x":1}}))
 
-    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"x" => 1}}, 2_000
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"x" => 1}, nil}, 2_000
+  end
+
+  test "demultiplexes two sessions' replies on one connection", %{conn: conn, fake: fake} do
+    a = Task.async(fn -> Connection.call(conn, "Page.enable", %{}, 2_000, session_id: "A") end)
+    b = Task.async(fn -> Connection.call(conn, "Page.enable", %{}, 2_000, session_id: "B") end)
+
+    ids =
+      for _ <- 1..2, into: %{} do
+        assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "sessionId" => sid}}, 2_000
+        {sid, id}
+      end
+
+    # Reply scrambled, each tagged with its own session.
+    FakeCDP.send_text(fake, ~s({"id":#{ids["B"]},"sessionId":"B","result":{"who":"B"}}))
+    FakeCDP.send_text(fake, ~s({"id":#{ids["A"]},"sessionId":"A","result":{"who":"A"}}))
+
+    assert {:ok, %{"who" => "A"}} = Task.await(a)
+    assert {:ok, %{"who" => "B"}} = Task.await(b)
+  end
+
+  test "events carry their sessionId to subscribers", %{conn: conn, fake: fake} do
+    :ok = Connection.subscribe(conn, "Page.lifecycleEvent")
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Page.lifecycleEvent","sessionId":"A","params":{"name":"load"}})
+    )
+
+    assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, "A"}, 2_000
+  end
+
+  test "await_event with a session gate ignores other sessions", %{conn: conn, fake: fake} do
+    # A waiter scoped to session A must NOT resolve on a matching event from B.
+    task =
+      Task.async(fn -> Connection.await_event(conn, &(&1["name"] == "x"), 300, session_id: "A") end)
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Page.lifecycleEvent","sessionId":"B","params":{"name":"x"}})
+    )
+
+    assert {:error, :timeout} = Task.await(task)
+
+    # The same matcher resolves when the event is from session A.
+    task2 =
+      Task.async(fn ->
+        Connection.await_event(conn, &(&1["name"] == "x"), 2_000, session_id: "A")
+      end)
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Page.lifecycleEvent","sessionId":"A","params":{"name":"x"}})
+    )
+
+    assert :ok = Task.await(task2)
   end
 
   test "await_event resolves when a matching event arrives", %{conn: conn, fake: fake} do
