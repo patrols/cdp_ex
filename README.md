@@ -69,6 +69,46 @@ For reproducible setups, point it at a
 > start in many CI/container environments. If you run as root or drive untrusted
 > pages, re-enable it by overriding `:args` — see `CDPEx.Chrome`.
 
+## Running in containers
+
+CDPEx is validated on macOS, but its defaults already target Linux containers:
+`--no-sandbox`, `--disable-dev-shm-usage`, and `--disable-setuid-sandbox` are on
+by default, so headless Chrome starts out of the box on a constrained host (e.g.
+2 vCPU / 2 GB). A few things smooth the path further:
+
+- **Tune `:launch_timeout` for cold starts.** Chrome's first launch in a fresh
+  container is slower than on a warm dev machine. `:launch_timeout` is a *ceiling*,
+  not a fixed wait (readiness is polled and returns as soon as Chrome is
+  reachable), so a generous value costs nothing on a fast launch:
+
+  ```elixir
+  CDPEx.launch(launch_timeout: 30_000)
+  ```
+
+- **Fresh-profile cost.** Each launch creates a new `--user-data-dir` (removed on
+  stop), so there's no warm disk cache between launches and the *first* navigation
+  pays a cold-start cost. For throughput, prefer one long-lived browser (`launch/1`
+  + reuse) over a throwaway `with_page([...])` per request, or pass a persistent
+  `:user_data_dir`.
+
+- **`/dev/shm` sizing.** Docker defaults `/dev/shm` to 64 MB, which Chrome can
+  exhaust (crashing tabs). CDPEx ships `--disable-dev-shm-usage` by default (Chrome
+  writes to `/tmp` instead), so it works on a small `/dev/shm` as-is. To size it up
+  instead (`--shm-size=1g`), drop that flag via a custom `:args`.
+
+- **Memory.** On a 2 GB host a single browser with a few pages is comfortable; each
+  open page and large screenshots/PDFs add transient memory. Close pages promptly,
+  or use `transport: :session` to cut per-page socket/process overhead when you
+  don't need crash isolation.
+
+- **`--remote-allow-origins`.** Some Chrome builds enforce an `Origin` check on the
+  DevTools WebSocket upgrade and may reject a CDP client with a 403. CDPEx doesn't
+  set this by default; if you hit `{:error, {:ws_upgrade, _}}` at connect, add it:
+
+  ```elixir
+  CDPEx.launch(launch_timeout: 30_000, extra_args: ["--remote-allow-origins=*"])
+  ```
+
 ## Usage
 
 ### Resource-safe (recommended)
