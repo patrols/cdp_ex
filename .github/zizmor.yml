@@ -1,13 +1,12 @@
 # zizmor configuration (https://docs.zizmor.sh).
 #
-# These workflows pin actions to release tags (e.g. @v4), not commit SHAs.
-# That is a deliberate, proportionate choice for this repository: CI runs with
-# `contents: read`, uses no secrets, and never deploys or uploads artifacts, so
-# the blast radius of an upstream tag-move is minimal. `ref-pin` still rejects
-# mutable *branch* refs (e.g. @main), and every other (higher-value) audit —
-# template injection, dangerous triggers, excessive permissions — stays on.
+# Actions are pinned to commit SHAs in the workflows; Dependabot
+# (.github/dependabot.yml) bumps the pins. This enforces zizmor's strict default
+# `hash-pin` policy explicitly — every `uses:` must be a full commit SHA, not a
+# mutable tag or branch. All other audits (template injection, dangerous
+# triggers, excessive permissions) stay on.
 rules:
   unpinned-uses:
     config:
       policies:
-        "*": ref-pin
+        "*": hash-pin
