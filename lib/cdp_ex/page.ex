@@ -185,7 +185,15 @@ defmodule CDPEx.Page do
   end
 
   defp lifecycle_name(:load), do: "load"
-  defp lifecycle_name(_), do: "networkAlmostIdle"
+  defp lifecycle_name(:network_almost_idle), do: "networkAlmostIdle"
+
+  # Both navigate/3 and wait_for_navigation/2 route through here. Fail fast on an
+  # unknown value rather than silently waiting for the wrong milestone (`:none` is
+  # handled by the callers before this point).
+  defp lifecycle_name(other) do
+    raise ArgumentError,
+          "invalid :wait_until #{inspect(other)} (expected :network_almost_idle, :load, or :none)"
+  end
 
   @doc """
   Waits for a navigation lifecycle milestone, without issuing a navigation.

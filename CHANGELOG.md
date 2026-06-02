@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `CDPEx.Page.navigate/3` and `wait_for_navigation/2` raise `ArgumentError` on an unknown `:wait_until` value instead of silently treating it as `:network_almost_idle`.
+
 ### Fixed
 - `CDPEx.Page.wait_for_navigation/2` now waits via the same lifecycle machinery as `navigate/3` (subscribe-before-wait, scoped to the page's session and the `Page.lifecycleEvent` method) rather than a generic event matcher — so it can no longer be falsely resolved by another event method whose params happen to carry a matching `"name"`.
 
