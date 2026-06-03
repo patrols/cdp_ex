@@ -10,6 +10,7 @@ defmodule CDPEx.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.FixtureServer
   alias CDPEx.Page
@@ -388,6 +389,79 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "authentication" do
+    test "authenticate answers an HTTP Basic challenge so a gated page loads", %{fixture: fixture} do
+      auth_url = fixture <> "basic-auth"
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      # Without credentials the navigation is rejected outright — Chrome can't
+      # answer the 401 challenge (net::ERR_INVALID_AUTH_CREDENTIALS).
+      {:ok, blocked} = CDPEx.new_page(browser)
+      assert {:error, {:navigate, _}} = Page.navigate(blocked, auth_url)
+
+      # Armed with authenticate/4, the challenge is answered and the page loads —
+      # which also proves the paused requests were auto-continued.
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+      {:ok, _} = Page.navigate(page, auth_url)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
+    test "rejects a :session page rather than leak its handler" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, session_page} = CDPEx.new_page(browser, transport: :session)
+
+      assert {:error, {:unsupported_transport, :session}} =
+               Page.authenticate(session_page, "cdpex", "secret")
+    end
+
+    test "the Fetch handler self-stops when the page's connection goes down" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      before = fetch_handlers()
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+
+      assert [handler] = fetch_handlers() -- before
+      ref = Process.monitor(handler)
+
+      # Closing the dedicated page stops its connection; the handler monitors that
+      # connection and must stop with it — no lingering GenServer, no armed Fetch.
+      :ok = CDPEx.close_page(browser, page)
+      assert_receive {:DOWN, ^ref, :process, ^handler, _reason}, 5_000
+    end
+
+    test "refuses to authenticate a page belonging to another browser" do
+      {:ok, browser_a} = CDPEx.launch()
+      {:ok, browser_b} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser_a) end)
+      on_exit(fn -> stop_quietly(browser_b) end)
+
+      {:ok, page_b} = CDPEx.new_page(browser_b)
+
+      # Arming B's page through A must refuse (mirrors close_page) rather than link a
+      # handler to a connection A doesn't own.
+      assert {:error, :unknown_page} =
+               Browser.authenticate(browser_a, page_b, username: "u", password: "p")
+
+      # B's page is unharmed and still authenticates on its own browser.
+      assert :ok = Page.authenticate(page_b, "cdpex", "secret")
+    end
+
+    test "refuses a second authenticate on an already-armed page" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+      assert {:error, :already_authenticated} = Page.authenticate(page, "cdpex", "secret")
+    end
+  end
+
   describe "tracer bullet" do
     test "with_page reproduces the spike's fetch end-to-end", %{fixture: fixture} do
       # The whole point: one call launches Chrome, opens a page, runs the fun,
@@ -482,6 +556,15 @@ defmodule CDPEx.IntegrationTest do
     after
       0 -> :ok
     end
+  end
+
+  # The Fetch handlers currently alive (matched by their initial call), so a test
+  # can isolate the one a given authenticate/4 started.
+  defp fetch_handlers do
+    for pid <- Process.list(),
+        {:dictionary, dict} <- [Process.info(pid, :dictionary)],
+        Keyword.get(dict, :"$initial_call") == {CDPEx.Fetch, :init, 1},
+        do: pid
   end
 
   defp stop_quietly(browser) do
