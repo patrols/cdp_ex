@@ -115,15 +115,16 @@ defmodule CDPEx.Connection do
   @doc """
   Blocks until an event for which `matcher.(params)` returns true, or `timeout`.
 
-  `matcher` receives the event params map. Returns `:ok` on a match, or
-  `{:error, reason}` where reason is `{:timeout, :await_event}` (no matching event
-  in time) or `:noproc` / `{:ws_closed, _}` (the connection itself went away) —
-  callers must be able to tell those apart.
+  `matcher` receives the event params map. Returns `{:ok, params}` (the matched
+  event's params) on a match, or `{:error, reason}` where reason is
+  `{:timeout, :await_event}` (no matching event in time) or `:noproc` /
+  `{:ws_closed, _}` (the connection itself went away) — callers must be able to
+  tell those apart.
 
   Pass `opts` with `session_id: sid` to only match events from that session.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
-          :ok | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}
+          {:ok, map()} | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}
   def await_event(conn, matcher, timeout \\ @default_call_timeout, opts \\ [])
       when is_function(matcher, 1) do
     session_id = Keyword.get(opts, :session_id)
@@ -382,7 +383,7 @@ defmodule CDPEx.Connection do
 
     Enum.each(matched, fn {_matcher, _sid, from, timer} ->
       cancel_timer(timer)
-      GenServer.reply(from, :ok)
+      GenServer.reply(from, {:ok, params})
     end)
 
     %{state | waiters: kept}

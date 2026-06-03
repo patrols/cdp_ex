@@ -47,6 +47,8 @@ defmodule CDPEx.FixtureServer do
   #   /redirect   — 302 to "/", so navigate(response: true) can prove it reports the
   #     FINAL (post-redirect) 200, not the redirect hop.
   #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
+  #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
+  #     wait_for_response/3 and wait_for_network_idle/2 paths.
   #   anything else serves the page.
   defp respond(request) do
     path = request_path(request)
@@ -62,6 +64,9 @@ defmodule CDPEx.FixtureServer do
       String.starts_with?(path, "/missing") ->
         body = ~s(<!doctype html><html><body><p id="status">404</p></body></html>)
         http_response("404 Not Found", body, [])
+
+      String.starts_with?(path, "/data") ->
+        http_response("200 OK", "fetched-data", [])
 
       true ->
         http_response("200 OK", render(request), [])
@@ -99,6 +104,8 @@ defmodule CDPEx.FixtureServer do
       <body>
         <h1 id="greeting">Hello</h1>
         <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
+        <button id="fetch-btn" onclick="fetch('/data').then(r => r.text()).then(t => { document.getElementById('greeting').textContent = t; })">Fetch</button>
+        <button id="redirect-fetch-btn" onclick="fetch('/redirect')">RedirectFetch</button>
         <div id="echo-header">#{echo}</div>
       </body>
     </html>

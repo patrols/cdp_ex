@@ -38,8 +38,14 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
 
   @lifecycle_method "Page.lifecycleEvent"
+  @request_will_be_sent "Network.requestWillBeSent"
   @response_received "Network.responseReceived"
-  @network_events ["Network.requestWillBeSent", @response_received]
+  @loading_finished "Network.loadingFinished"
+  @loading_failed "Network.loadingFailed"
+  @network_events [@request_will_be_sent, @response_received]
+  # In-flight accounting for wait_for_network_idle/2: requestWillBeSent (+1),
+  # loadingFinished / loadingFailed (−1). responseReceived is deliberately excluded.
+  @idle_events [@request_will_be_sent, @loading_finished, @loading_failed]
   @fetch_paused "Fetch.requestPaused"
 
   @enforce_keys [:browser, :conn, :target_id]
@@ -309,10 +315,10 @@ defmodule CDPEx.Page do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => ^name}, ^sid} ->
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^name}, ^sid} ->
         :reached
 
-      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _session_id} ->
+      {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
         await_lifecycle(page, name, ref, deadline)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
@@ -336,13 +342,13 @@ defmodule CDPEx.Page do
   # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
   # which must instead return {:error, _}. Treat (un)subscription as best-effort.
   defp safe_subscribe(conn) do
-    Connection.subscribe(conn, "Page.lifecycleEvent")
+    Connection.subscribe(conn, @lifecycle_method)
   catch
     :exit, _ -> {:error, :noproc}
   end
 
   defp safe_unsubscribe(conn) do
-    Connection.unsubscribe(conn, "Page.lifecycleEvent")
+    Connection.unsubscribe(conn, @lifecycle_method)
   catch
     :exit, _ -> :ok
   end
@@ -788,6 +794,228 @@ defmodule CDPEx.Page do
         error
     end
   end
+
+  @doc """
+  Blocks until a network response whose URL matches `matcher` arrives, or `timeout`.
+
+  Useful after a `click/3` (or other in-page action) that triggers an XHR/`fetch`:
+  wait for the specific response, then read it with `response_body/3` (the returned
+  params carry the `"requestId"`).
+
+  `matcher` selects on the response URL and may be:
+
+    * a **function** `(url :: String.t() -> boolean())`,
+    * a **`Regex`** (matched against the URL), or
+    * a **binary** substring (matched with `String.contains?/2`).
+
+  Returns `{:ok, params}` — the full `Network.responseReceived` params (HTTP status
+  under `params["response"]["status"]`, request id under `params["requestId"]`) — or
+  `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
+  connection drops. Lazily enables the `Network` domain. Only responses observed
+  **after** this call are considered, so call it before triggering the request.
+
+  > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}
+  >
+  > Unlike `wait_for_navigation/2` / `wait_for_selector/3` / `wait_for_network_idle/2`
+  > (which return `:ok`), this returns the matched event — match on `{:ok, params}`.
+
+  Options: `:timeout` — ms (default 30_000).
+  """
+  @spec wait_for_response(t(), (String.t() -> boolean()) | Regex.t() | String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def wait_for_response(%__MODULE__{} = page, matcher, opts \\ []) do
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
+    predicate = response_url_predicate(matcher)
+
+    # One deadline for the whole call so :timeout is a true overall ceiling: the lazy
+    # Network.enable and the await draw from the same budget.
+    with :ok <- ensure_network(page, remaining(deadline)) do
+      case Connection.await_event(page.conn, predicate, remaining(deadline),
+             session_id: page.session_id
+           ) do
+        {:ok, params} -> {:ok, params}
+        {:error, {:timeout, :await_event}} -> {:error, :timeout}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  # Build a params-predicate from the public URL matcher (function / Regex / substring),
+  # always guarding that the event actually carries a response URL — so it fires only on
+  # a Network.responseReceived, never a request or lifecycle event.
+  defp response_url_predicate(fun) when is_function(fun, 1) do
+    fn params -> match_response_url(params, fun) end
+  end
+
+  defp response_url_predicate(%Regex{} = regex) do
+    fn params -> match_response_url(params, &Regex.match?(regex, &1)) end
+  end
+
+  defp response_url_predicate(substring) when is_binary(substring) do
+    fn params -> match_response_url(params, &String.contains?(&1, substring)) end
+  end
+
+  defp match_response_url(%{"response" => %{"url" => url}}, fun) when is_binary(url), do: fun.(url)
+  defp match_response_url(_params, _fun), do: false
+
+  @doc """
+  Blocks until the network has been idle — at most `:max_inflight` in-flight requests —
+  for `:idle_time` ms continuously, or `timeout`.
+
+  The Puppeteer "networkidle" primitive: use it after a `click/3` (or other action)
+  that kicks off XHR/`fetch` hydration to wait for the page to settle. Idleness is
+  measured **from the call onward** — requests already in flight when you call are not
+  counted — so call it right after triggering the work.
+
+  Returns `:ok` once idle, `{:error, :timeout}` if it never settles within `timeout`
+  (e.g. a streaming / SSE / long-poll connection that never closes), or
+  `{:error, reason}` if the connection drops. Lazily enables the `Network` domain.
+
+  > #### Don't combine with `observe_network/2` on the same page {: .warning}
+  >
+  > This subscribes the calling process to the `Network` request-lifecycle events for
+  > the duration of the call, then unsubscribes on the way out. If the *same process*
+  > is also running `observe_network/2` on this page, that subscription is torn down.
+  > Drive the idle wait from a process that isn't also observing the network.
+
+  Options:
+    * `:idle_time` — ms of continuous idleness required (default 500)
+    * `:max_inflight` — in-flight requests still considered idle (default 0; 2 is
+      Puppeteer's `networkidle2`)
+    * `:timeout` — overall ceiling in ms (default 30_000)
+  """
+  @spec wait_for_network_idle(t(), keyword()) :: :ok | {:error, term()}
+  def wait_for_network_idle(%__MODULE__{} = page, opts \\ []) do
+    idle_time = Keyword.get(opts, :idle_time, 500)
+    max_inflight = Keyword.get(opts, :max_inflight, 0)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
+
+    # Subscribe BEFORE enabling so a request that starts the instant the domain turns on
+    # is counted (mirrors observe_network/2); roll the subscriptions back if enable fails.
+    # One deadline spans enable + the idle wait, so :timeout is a true overall ceiling.
+    with :ok <- subscribe_each(page.conn, @idle_events),
+         :ok <- ensure_network(page, remaining(deadline)) do
+      Enum.each(@idle_events, &drain_events(page.conn, &1))
+      ref = Process.monitor(page.conn)
+
+      ctx = %{
+        conn: page.conn,
+        sid: page.session_id,
+        max_inflight: max_inflight,
+        idle_time: idle_time,
+        mon: ref,
+        deadline: deadline
+      }
+
+      try do
+        # Idle from the call onward: arm immediately (0 in-flight <= max_inflight).
+        case await_network_idle(ctx, %{}, arm_idle(idle_time)) do
+          :idle -> :ok
+          :timeout -> {:error, :timeout}
+          {:down, reason} -> {:error, down_reason(reason)}
+        end
+      after
+        Process.demonitor(ref, [:flush])
+        unsubscribe_each(page.conn, @idle_events)
+        Enum.each(@idle_events, &drain_events(page.conn, &1))
+        drain_idle_ticks()
+      end
+    else
+      {:error, _} = error ->
+        unsubscribe_each(page.conn, @idle_events)
+        error
+    end
+  end
+
+  # Track in-flight requests in a map keyed by request id, used as a set (`inflight`), not
+  # a counter: requestWillBeSent adds, loadingFinished/Failed removes; responseReceived is
+  # ignored. A set (vs a +1/−1 delta) is robust to the two ways CDP breaks a naive counter:
+  #   * a redirect re-emits requestWillBeSent for the SAME id (a no-op re-add) yet fires
+  #     only one terminal event, and
+  #   * a request that started BEFORE this call (its requestWillBeSent never seen) fires a
+  #     terminal event whose id isn't tracked (a no-op remove) — so it can't clear a live
+  #     request's slot and trigger a false idle.
+  # The idle timer is armed while the size is at/below the threshold and cancelled above;
+  # when the live timer fires, the network stayed idle the whole window. Scoped to this
+  # page's session (`^sid`); the connection dying or the overall deadline ends it. (A plain
+  # map, not MapSet, keeps Dialyzer happy with this unspecced recursive helper.)
+  defp await_network_idle(
+         %{conn: conn, sid: sid, max_inflight: max_inflight, mon: mon, deadline: deadline} = ctx,
+         inflight,
+         {timer, tag} = idle
+       ) do
+    receive do
+      {:cdp_event, ^conn, @request_will_be_sent, %{"requestId" => id}, ^sid} ->
+        inflight = Map.put(inflight, id, true)
+        idle = if map_size(inflight) > max_inflight, do: disarm_idle(idle), else: idle
+        await_network_idle(ctx, inflight, idle)
+
+      {:cdp_event, ^conn, method, %{"requestId" => id}, ^sid}
+      when method in [@loading_finished, @loading_failed] ->
+        inflight = Map.delete(inflight, id)
+
+        idle =
+          if map_size(inflight) <= max_inflight and timer == nil,
+            do: arm_idle(ctx.idle_time),
+            else: idle
+
+        await_network_idle(ctx, inflight, idle)
+
+      {:cdp_event, ^conn, _method, _params, _other_sid} ->
+        # Another session's event on a shared :session connection — ignore.
+        await_network_idle(ctx, inflight, idle)
+
+      {:idle_tick, ^tag} ->
+        :idle
+
+      {:idle_tick, _stale} ->
+        # A cancelled timer that had already fired — ignore.
+        await_network_idle(ctx, inflight, idle)
+
+      {:DOWN, ^mon, :process, ^conn, reason} ->
+        _ = disarm_idle(idle)
+        {:down, reason}
+    after
+      remaining(deadline) ->
+        # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} over a stale timeout.
+        receive do
+          {:DOWN, ^mon, :process, ^conn, reason} ->
+            _ = disarm_idle(idle)
+            {:down, reason}
+        after
+          0 ->
+            _ = disarm_idle(idle)
+            :timeout
+        end
+    end
+  end
+
+  # A ref-tagged one-shot timer; the tag identifies *this* arming, so a stale fire from a
+  # cancelled-but-already-delivered timer is ignored by the receive. A non-positive
+  # idle_time is clamped to 0 (Process.send_after would raise on a negative).
+  defp arm_idle(idle_time) do
+    tag = make_ref()
+    {Process.send_after(self(), {:idle_tick, tag}, max(idle_time, 0)), tag}
+  end
+
+  # Cancel the idle timer and return the disarmed state ({nil, nil}); idempotent, so it is
+  # safe on a teardown path or when already disarmed.
+  defp disarm_idle({nil, _tag}), do: {nil, nil}
+
+  defp disarm_idle({timer, _tag}) do
+    _ = Process.cancel_timer(timer)
+    {nil, nil}
+  end
+
+  defp drain_idle_ticks do
+    receive do
+      {:idle_tick, _tag} -> drain_idle_ticks()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   @doc """
   Enables request interception: pauses matching requests and delivers a

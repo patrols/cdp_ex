@@ -191,7 +191,7 @@ defmodule CDPEx.ConnectionTest do
       ~s({"method":"Page.lifecycleEvent","sessionId":"A","params":{"name":"x"}})
     )
 
-    assert :ok = Task.await(task2)
+    assert {:ok, %{"name" => "x"}} = Task.await(task2)
   end
 
   test "await_event resolves when a matching event arrives", %{conn: conn, fake: fake} do
@@ -208,7 +208,7 @@ defmodule CDPEx.ConnectionTest do
       ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
     )
 
-    assert :ok = Task.await(task)
+    assert {:ok, %{"name" => "networkAlmostIdle"}} = Task.await(task)
   end
 
   test "await_event times out when no event matches", %{conn: conn} do

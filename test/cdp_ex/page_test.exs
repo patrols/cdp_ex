@@ -33,6 +33,7 @@ defmodule CDPEx.PageTest do
   alias CDPEx.PageTest.StubBrowser
 
   @network_methods ["Network.requestWillBeSent", "Network.responseReceived"]
+  @idle_methods ["Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed"]
 
   setup do
     # The test process owns the linked connection (via start_link), so trap exits
@@ -640,6 +641,282 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "wait_for_response/3" do
+    test "resolves on the first response whose URL matches, returning its params", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_response(page, "/api/data", timeout: 2_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      # await_event registers a connection-side waiter (no subscription) — wait for it,
+      # then feed a non-matching response before the match.
+      wait_until_waiting(conn)
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"requestId":"R0","response":{"url":"http://x/other","status":200}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"requestId":"R1","response":{"url":"http://x/api/data","status":201}}})
+      )
+
+      assert {:ok,
+              %{"requestId" => "R1", "response" => %{"status" => 201, "url" => "http://x/api/data"}}} =
+               Task.await(task)
+    end
+
+    test "accepts a function matcher over the response URL", %{page: page, conn: conn, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, &String.ends_with?(&1, ".json"), timeout: 2_000)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+      wait_until_waiting(conn)
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"requestId":"R1","response":{"url":"http://x/feed.json","status":200}}})
+      )
+
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task)
+    end
+
+    test "maps the await timeout to a bare {:error, :timeout}", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_response(page, ~r/never-matches/, timeout: 150) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      assert {:error, :timeout} = Task.await(task)
+    end
+
+    test "accepts a Regex matcher over the response URL", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_response(page, ~r{/api/v\d+/data}, timeout: 2_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+      wait_until_waiting(conn)
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"requestId":"R1","response":{"url":"http://x/api/v2/data","status":200}}})
+      )
+
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task)
+    end
+
+    test "errors if the connection drops while awaiting", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_response(page, "/never", timeout: 3_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+      wait_until_waiting(conn)
+
+      Connection.close(conn)
+
+      assert {:error, reason} = Task.await(task, 2_000)
+      assert reason == :noproc or match?({:ws_closed, _}, reason)
+    end
+  end
+
+  describe "wait_for_network_idle/2" do
+    test "resolves when nothing is in flight from the call onward", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
+      enable_network_idle(fake)
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "resolves once in-flight requests complete and the network goes quiet", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 3_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # Two requests start (in-flight 2 > 0 → busy, idle timer cancelled), then both end.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      send_network_event(fake, "Network.requestWillBeSent", "R2")
+      send_network_event(fake, "Network.loadingFinished", "R1")
+      send_network_event(fake, "Network.loadingFailed", "R2")
+
+      # Back to 0 in flight → the idle timer rearms and fires after idle_time.
+      assert :ok = Task.await(task, 3_000)
+    end
+
+    test "clamps in-flight at zero on extra completions", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # One request, three completions: the counter must clamp at 0 (never negative)
+      # and still resolve.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      send_network_event(fake, "Network.loadingFinished", "R1")
+      send_network_event(fake, "Network.loadingFinished", "R1")
+      send_network_event(fake, "Network.loadingFailed", "R1")
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "times out while a request stays in flight", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 200, timeout: 500) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # A request that never completes keeps in-flight at 1 (> 0), so it never idles.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+
+      assert {:error, :timeout} = Task.await(task, 2_000)
+    end
+
+    test "errors if the connection drops while waiting", %{page: page, conn: conn, fake: fake} do
+      task =
+        Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 1_000, timeout: 3_000) end)
+
+      enable_network_idle(fake, conn, task.pid)
+
+      # Keep it busy so the idle timer can't fire, then drop the connection.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      Connection.close(conn)
+
+      assert {:error, reason} = Task.await(task, 2_000)
+      assert reason == :noproc or match?({:ws_closed, _}, reason)
+    end
+
+    test "does not count redirect hops (requestWillBeSent carrying redirectResponse)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 3_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # A redirecting request: the initial requestWillBeSent (+1), then a redirect hop
+      # (requestWillBeSent carrying redirectResponse — must NOT add another +1), then the
+      # single terminal loadingFinished (−1). Net 0 → idle. Pre-fix this stuck at +1 →
+      # {:error, :timeout}.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.requestWillBeSent","params":{"requestId":"R1","redirectResponse":{"status":302}}})
+      )
+
+      send_network_event(fake, "Network.loadingFinished", "R1")
+
+      assert :ok = Task.await(task, 3_000)
+    end
+
+    test "a completion for a request started before the call doesn't cause a false idle", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 5_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # A NEW request (seen after the call) is in flight.
+      send_network_event(fake, "Network.requestWillBeSent", "NEW")
+
+      # A request that started BEFORE the call completes during the wait. Its id was never
+      # tracked, so its terminal event must NOT clear NEW's slot — the wait stays busy.
+      send_network_event(fake, "Network.loadingFinished", "PRECALL")
+      refute Task.yield(task, 300), "false idle: a pre-call completion cleared a live request"
+
+      # NEW completes → genuinely idle.
+      send_network_event(fake, "Network.loadingFinished", "NEW")
+      assert :ok = Task.await(task, 3_000)
+    end
+
+    test "max_inflight: 2 stays idle at the threshold, busies above it", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          Page.wait_for_network_idle(page, max_inflight: 2, idle_time: 150, timeout: 5_000)
+        end)
+
+      enable_network_idle(fake, conn, task.pid)
+
+      # 3 in flight (> max_inflight 2) → busy: must not resolve even past idle_time.
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      send_network_event(fake, "Network.requestWillBeSent", "R2")
+      send_network_event(fake, "Network.requestWillBeSent", "R3")
+      refute Task.yield(task, 300), "resolved while 3 requests were in flight (max_inflight: 2)"
+
+      # Drop back to 2 (≤ threshold) → the idle timer rearms and resolves.
+      send_network_event(fake, "Network.loadingFinished", "R3")
+      assert :ok = Task.await(task, 3_000)
+    end
+
+    test "a new request resets the idle timer (armed → cancelled → rearmed)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 200, timeout: 5_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # Request then complete → the idle timer arms (in-flight 0).
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      send_network_event(fake, "Network.loadingFinished", "R1")
+      Process.sleep(60)
+
+      # A new request before idle_time elapses must cancel the armed timer (busy again).
+      send_network_event(fake, "Network.requestWillBeSent", "R2")
+      refute Task.yield(task, 300), "resolved despite a new request before idle_time"
+
+      # Complete it → rearm → resolve.
+      send_network_event(fake, "Network.loadingFinished", "R2")
+      assert :ok = Task.await(task, 3_000)
+    end
+
+    test "rolls back idle subscriptions when Network.enable fails", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      # Run from a long-lived helper (not a Task that exits) so post-rollback state
+      # reflects the explicit unsubscribe, not the connection's dead-subscriber prune.
+      runner =
+        spawn_link(fn ->
+          send(
+            test,
+            {:idle_result, Page.wait_for_network_idle(page, idle_time: 100, timeout: 1_000)}
+          )
+
+          receive do
+            :stop -> :ok
+          after
+            5_000 -> :ok
+          end
+        end)
+
+      for m <- @idle_methods, do: wait_until_subscribed(conn, runner, m)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"error":{"code":-32000,"message":"boom"}}))
+
+      assert_receive {:idle_result, {:error, {:cdp_error, "Network.enable", _}}}, 2_000
+
+      # The enable failed → the subscribe-before-enable subscriptions were rolled back.
+      for m <- @idle_methods, do: refute(subscribed?(conn, runner, m))
+
+      send(runner, :stop)
+    end
+  end
+
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent
   # afterward are guaranteed to be delivered to it (no send/subscribe race).
   defp wait_until_subscribed(conn, pid, method \\ "Page.lifecycleEvent", retries \\ 100) do
@@ -658,5 +935,31 @@ defmodule CDPEx.PageTest do
 
   defp subscribed?(conn, pid, method) do
     MapSet.member?(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new()), pid)
+  end
+
+  # Poll until at least one await_event waiter is registered on `conn` (waiters are not
+  # subscriptions, so they can't be observed via `subscribed?/3`).
+  defp wait_until_waiting(conn, retries \\ 100) do
+    cond do
+      :sys.get_state(conn).waiters != [] -> :ok
+      retries == 0 -> flunk("await_event waiter not registered in time")
+      true -> Process.sleep(10) && wait_until_waiting(conn, retries - 1)
+    end
+  end
+
+  # Answer the Network.enable that wait_for_network_idle/2 issues. When `conn`/`pid` are
+  # given, first wait until the three idle subscriptions are registered (subscribe runs
+  # before enable), so events sent afterward are delivered rather than dropped by the drain.
+  defp enable_network_idle(fake, conn \\ nil, pid \\ nil) do
+    if conn && pid, do: for(m <- @idle_methods, do: wait_until_subscribed(conn, pid, m))
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+    # Let the task drain stale events and enter the receive loop before the caller sends
+    # events, so they land in the loop rather than being swallowed by the pre-loop drain.
+    if conn && pid, do: Process.sleep(50)
+  end
+
+  defp send_network_event(fake, method, request_id) do
+    FakeCDP.send_text(fake, ~s({"method":"#{method}","params":{"requestId":"#{request_id}"}}))
   end
 end
