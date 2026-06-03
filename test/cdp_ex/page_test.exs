@@ -98,6 +98,149 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "navigate/3 with response: true" do
+    test "reports the main document's status + final URL, correlated by loaderId", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      # response: true enables the Network domain first (responseReceived needs it).
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      # Both the lifecycle and responseReceived subscriptions are in place before navigate.
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+      wait_until_subscribed(conn, task.pid, "Page.lifecycleEvent")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # Two Document responses share this navigation's loaderId — a redirect hop, then
+      # the landing. The last one wins, so the post-redirect 200 is reported, not the 302.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":302,"url":"http://example.test/"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/landed"}}})
+      )
+
+      # The readiness milestone closes the capture window.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {:ok, %Page{}, %{status: 200, url: "http://example.test/landed"}} = Task.await(task)
+    end
+
+    test "ignores a Document response from another navigation (loaderId mismatch)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, timeout: 1_000)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # A Document response carrying a *different* loaderId must not be mistaken for
+      # ours; with no matching response by the deadline, navigate reports the miss.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"OTHER","frameId":"F","response":{"status":200,"url":"http://example.test/other"}}})
+      )
+
+      assert {:error, {:no_document_response, "http://example.test/"}} = Task.await(task)
+    end
+
+    test "the default navigate/3 still returns a bare {:ok, page} (no response capture)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/") end)
+
+      # No Network.enable on the default path — it only subscribes to lifecycle.
+      wait_until_subscribed(conn, task.pid, "Page.lifecycleEvent")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {:ok, %Page{}} = Task.await(task)
+    end
+
+    test "wait_until: :none returns on the document response itself (no milestone wait)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, wait_until: :none)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # With :none there is NO lifecycle milestone — the matching Document response is
+      # itself the completion signal, so the call returns without a networkAlmostIdle.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/landed"}}})
+      )
+
+      assert {:ok, %Page{}, %{status: 200, url: "http://example.test/landed"}} = Task.await(task)
+    end
+
+    test "a connection death mid-capture surfaces as an error (never hangs)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # The task is now in await_capture (which monitors the conn). Drop the connection
+      # before any document response: the wait must end with an error, not hang. Either
+      # the await_capture {:DOWN} (-> {:ws_closed, _}) or the in-flight call (-> :noproc)
+      # wins the race; both are clean errors.
+      Connection.close(conn)
+
+      assert {:error, reason} = Task.await(task)
+      assert reason == :noproc or match?({:ws_closed, _}, reason)
+    end
+  end
+
   describe "authenticate/4 source validation" do
     # A bad :source short-circuits before Browser.authenticate, so these never touch
     # the (test-process) browser — they exercise the boundary guard in isolation.
