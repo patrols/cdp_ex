@@ -20,6 +20,7 @@ defmodule CDPEx.Page do
     * **Capture** — `screenshot/2`, `pdf/2`
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
+    * **Network** — `observe_network/2`, `stop_observing_network/2`, `response_body/3`
     * **Auth** — `authenticate/4` (proxy / HTTP Basic challenges)
   """
 
@@ -34,6 +35,8 @@ defmodule CDPEx.Page do
   @selector_timeout 5_000
   @screenshot_timeout 30_000
   @command_timeout 10_000
+
+  @network_events ["Network.requestWillBeSent", "Network.responseReceived"]
 
   @enforce_keys [:browser, :conn, :target_id]
   defstruct [:browser, :conn, :target_id, :session_id]
@@ -545,6 +548,88 @@ defmodule CDPEx.Page do
   end
 
   @doc """
+  Starts observing network traffic, delivering CDP `Network` events to the calling
+  process.
+
+  Subscribes the caller to `:events` (default the request + response lifecycle),
+  then enables the `Network` domain (idempotent). Each event arrives as
+  `{:cdp_event, conn, method, params, session_id}` — handle them in a `handle_info`.
+  Call `stop_observing_network/2` to unsubscribe.
+
+  Start observing **before** navigating: requests already in flight when you call
+  this are not captured. On a session-transport page the caller receives **every**
+  session's events on the shared connection (subscriptions are keyed by method, not
+  session); match on the `session_id` element to filter to this page.
+
+  Options:
+    * `:events` — `Network.*` method names (default request + response lifecycle)
+    * `:timeout` — ms for the enable call (default 10_000)
+  """
+  @spec observe_network(t(), keyword()) :: :ok | {:error, term()}
+  def observe_network(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+    methods = Keyword.get(opts, :events, @network_events)
+
+    # Subscribe BEFORE enabling so an event emitted the instant the domain turns on
+    # can't slip through before the caller is registered (mirrors navigate/3's
+    # subscribe-before-trigger).
+    with :ok <- subscribe_each(page.conn, methods),
+         :ok <- ensure_network(page, timeout) do
+      :ok
+    else
+      {:error, _} = error ->
+        # Enable failed — undo the subscriptions we just added. This drops every
+        # method in `methods`; if the caller had independently subscribed to one of
+        # them beforehand, that subscription goes too (an accepted edge case —
+        # observe_network owns the lifecycle of the methods it is given).
+        unsubscribe_each(page.conn, methods)
+        error
+    end
+  end
+
+  @doc """
+  Stops observing — unsubscribes the caller from the network `:events`. Leaves the
+  `Network` domain enabled.
+
+  Pass the **same** `:events` you gave `observe_network/2`. Both default to the
+  request + response lifecycle, but if you observed with a custom list you must
+  repeat it here — otherwise the original subscriptions are never removed and the
+  caller keeps receiving those events.
+  """
+  @spec stop_observing_network(t(), keyword()) :: :ok
+  def stop_observing_network(%__MODULE__{} = page, opts \\ []) do
+    unsubscribe_each(page.conn, Keyword.get(opts, :events, @network_events))
+  end
+
+  @doc """
+  Returns a response's body by its `request_id` (from a `Network.responseReceived`
+  event), via `Network.getResponseBody`.
+
+  Returns `{:ok, body}` (decoding base64 when Chrome sends it that way) or
+  `{:error, reason}`. The `Network` domain must have been enabled (e.g. via
+  `observe_network/2`) **when the request was captured** — unlike the other Network
+  ops this does not lazily enable it, since enabling now can't recover a past body.
+  If it wasn't enabled, the call surfaces as
+  `{:error, {:cdp_error, "Network.getResponseBody", _}}`. Options: `:timeout`
+  (default 10_000).
+  """
+  @spec response_body(t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def response_body(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    case do_call(page, "Network.getResponseBody", %{"requestId" => request_id}, timeout) do
+      {:ok, %{"body" => body, "base64Encoded" => true}} ->
+        decode_base64(body, :invalid_response_body)
+
+      {:ok, %{"body" => body}} ->
+        {:ok, body}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   Sets extra HTTP headers sent with every subsequent request on this page.
 
   `headers` is a map of header name => value; set them before navigating for
@@ -656,6 +741,23 @@ defmodule CDPEx.Page do
       {:ok, _} -> :ok
       {:error, _} = error -> error
     end
+  end
+
+  # Subscribe/unsubscribe the caller to a list of event methods, tolerating a
+  # connection that died mid-call so the observe ops surface {:error, :noproc} / :ok
+  # rather than crashing the caller.
+  defp subscribe_each(conn, methods) do
+    Enum.each(methods, &Connection.subscribe(conn, &1))
+    :ok
+  catch
+    :exit, _ -> {:error, :noproc}
+  end
+
+  defp unsubscribe_each(conn, methods) do
+    Enum.each(methods, &Connection.unsubscribe(conn, &1))
+    :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Page ops thread the page's session id (`nil` for a dedicated page) so the same

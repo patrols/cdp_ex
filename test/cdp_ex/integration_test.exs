@@ -349,6 +349,46 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "network observation" do
+    test "observe_network streams request/response events and response_body fetches the body", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      assert :ok = Page.observe_network(page)
+      {:ok, _} = Page.navigate(page, fixture)
+
+      conn = page.conn
+
+      assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent",
+                      %{"request" => %{"url" => req_url}}, _},
+                     5_000
+
+      assert req_url =~ "127.0.0.1"
+
+      # Match the DOCUMENT response specifically (not whichever lands first), so
+      # request_id points at the page itself — deterministic regardless of favicon
+      # or other sub-resource probes.
+      assert_receive {:cdp_event, ^conn, "Network.responseReceived",
+                      %{"requestId" => request_id, "type" => "Document"}, _},
+                     5_000
+
+      assert {:ok, body} = Page.response_body(page, request_id)
+      assert body =~ "Hello"
+
+      # Stopping must actually halt delivery. stop_observing_network/2 is a
+      # synchronous GenServer.call, so once it returns no new events are delivered —
+      # flush AFTER the stop (not before), or a late in-flight event from the first
+      # navigation could land post-flush and trip refute_receive.
+      assert :ok = Page.stop_observing_network(page)
+      flush_cdp_events()
+      {:ok, _} = Page.navigate(page, fixture <> "?after-stop")
+      refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", _, _}, 1_000
+    end
+  end
+
   describe "authentication" do
     test "authenticate answers an HTTP Basic challenge so a gated page loads", %{fixture: fixture} do
       auth_url = fixture <> "basic-auth"
@@ -509,6 +549,15 @@ defmodule CDPEx.IntegrationTest do
   # by the time on_exit runs it may already be stopping on its own — racing this
   # call. Tolerate an exit from the stop so a teardown race never fails a test
   # whose body already passed.
+  # Drain any buffered {:cdp_event, ...} messages from the mailbox.
+  defp flush_cdp_events do
+    receive do
+      {:cdp_event, _, _, _, _} -> flush_cdp_events()
+    after
+      0 -> :ok
+    end
+  end
+
   # The Fetch handlers currently alive (matched by their initial call), so a test
   # can isolate the one a given authenticate/4 started.
   defp fetch_handlers do

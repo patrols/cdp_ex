@@ -8,6 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `CDPEx.Pool` — a fixed-size pool of reusable browsers (`checkout/2`, `checkin/2`, `with_browser/3`, `with_page/3`) that keeps Chrome warm so a per-job fetch avoids a cold launch. Lazy launch up to `:size`, blocking checkout with timeout, automatic reclaim of a crashed caller's browser, and on-demand relaunch of a crashed one.
+- `CDPEx.Page.observe_network/2`, `stop_observing_network/2`, and `response_body/3` — observe a page's network traffic (subscribe the caller to `Network.requestWillBeSent` / `responseReceived` events) and fetch a response body by requestId. Builds on the existing event-subscription machinery and the lazy `Network.enable`.
 - `CDPEx.Page.authenticate/4` — answer proxy (`--proxy-server`) or HTTP Basic auth challenges with credentials, so authenticated proxies and Basic-auth-gated origins work. Backed by a per-page `CDPEx.Fetch` handler that enables the `Fetch` domain, auto-continues paused requests, and answers `authRequired` (with a `:source` filter and a bad-credentials loop guard). Supported on `:dedicated` pages only — a `:session` page returns `{:error, {:unsupported_transport, :session}}` (its handler would outlive the shared connection); an unknown `:source` returns `{:error, {:invalid_source, value}}`. Authenticating a page from another browser (or an already-closed one) returns `{:error, :unknown_page}`, and re-arming an already-authenticated page returns `{:error, :already_authenticated}`.
 
 ### Changed
