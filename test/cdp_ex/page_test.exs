@@ -157,7 +157,8 @@ defmodule CDPEx.PageTest do
         ~s({"id":#{id},"result":{"body":"!!!not base64!!!","base64Encoded":true}})
       )
 
-      assert {:error, :invalid_response_body} = Task.await(task)
+      # The error carries the offending (undecodable) payload, not just a bare atom.
+      assert {:error, {:invalid_response_body, "!!!not base64!!!"}} = Task.await(task)
     end
 
     test "observe_network rolls back its subscriptions when Network.enable fails", %{
@@ -425,6 +426,36 @@ defmodule CDPEx.PageTest do
       assert params["body"] == Base.encode64("<h1>hi</h1>")
       FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
       assert :ok = Task.await(task)
+    end
+  end
+
+  describe "pdf/2" do
+    test "reports an undecodable base64 payload, carrying the offending data", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.pdf(page) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Page.printToPDF"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"data":"!!!not base64!!!"}}))
+
+      assert {:error, {:invalid_pdf_data, "!!!not base64!!!"}} = Task.await(task)
+    end
+  end
+
+  describe "screenshot/2" do
+    test "reports an undecodable base64 payload, carrying the offending data", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.screenshot(page) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Page.captureScreenshot"}},
+                     2_000
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"data":"!!!not base64!!!"}}))
+
+      assert {:error, {:invalid_screenshot_data, "!!!not base64!!!"}} = Task.await(task)
     end
   end
 

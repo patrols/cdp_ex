@@ -36,6 +36,58 @@ defmodule CDPEx do
   alias CDPEx.Browser
   alias CDPEx.Page
 
+  @typedoc """
+  The `reason` shapes that appear in `{:error, reason}` across CDPEx.
+
+  Error reasons are part of the public contract — pattern-match the **tagged kinds**
+  (`{:cdp_error, …}`, `{:timeout, …}`, `{:ws_closed, …}`, …); their payloads (a CDP
+  method, an exit status, a stderr/contents excerpt) are open and may gain detail.
+
+  The only bare, context-free reasons are `:noproc`, the high-level `:timeout`,
+  `:unknown_page`, and `:already_authenticated` — self-describing control-flow
+  outcomes with no payload to carry, the way GenServer uses `:noproc`. Validation
+  failures that *do* have offending data to surface are tagged instead
+  (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
+  `{:invalid_screenshot_data, excerpt}`).
+
+  Only part of this union is machine-checked: `CDPEx.Connection.call_error/0` and
+  `CDPEx.Chrome.launch_error/0` are precisely specced on `call/5` / `launch/1`, so
+  Dialyzer catches a shape change in *those* at the source. The remaining members —
+  the page-level tagged kinds and bare atoms — are hand-maintained documentation:
+  `error_reason/0` itself is referenced by no `@spec`, so it is best-effort and
+  **not** closed (kinds such as `{:cdp_error, method, payload}` also wrap arbitrary
+  CDP data, and a renamed page-level producer would drift silently).
+
+  Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
+  `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
+  while the high-level `CDPEx.Page` `wait_for_*` functions and `CDPEx.Pool.checkout/2`
+  return a bare `:timeout` ("the awaited condition didn't happen in time").
+
+  A WebSocket frame that fails to decode is not a standalone reason: the connection
+  stops on the decode failure, so callers observe it nested, as
+  `{:ws_closed, {:ws_decode, _}}`.
+  """
+  @type error_reason ::
+          CDPEx.Connection.call_error()
+          | CDPEx.Chrome.launch_error()
+          | :timeout
+          | :unknown_page
+          | :already_authenticated
+          | {:timeout, :await_event}
+          | {:navigate, String.t()}
+          | {:selector_not_found, String.t()}
+          | {:evaluate_exception, term()}
+          | {:unexpected_evaluate, term()}
+          | {:invalid_args, term()}
+          | {:invalid_source, term()}
+          | {:invalid_error_reason, term()}
+          | {:invalid_transport, term()}
+          | {:unsupported_transport, term()}
+          | {:invalid_response_body, String.t()}
+          | {:invalid_pdf_data, String.t()}
+          | {:invalid_screenshot_data, String.t()}
+          | {:write_failed, term()}
+
   @doc """
   Launches a headless Chrome browser and returns its process pid.
 

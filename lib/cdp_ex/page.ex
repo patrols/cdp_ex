@@ -858,10 +858,10 @@ defmodule CDPEx.Page do
   defp maybe_full_page(params, true), do: Map.put(params, "captureBeyondViewport", true)
   defp maybe_full_page(params, false), do: params
 
-  defp decode_base64(base64, error) do
+  defp decode_base64(base64, error_tag) do
     case Base.decode64(base64) do
       {:ok, bytes} -> {:ok, bytes}
-      :error -> {:error, error}
+      :error -> {:error, {error_tag, String.slice(base64, 0, 500)}}
     end
   end
 

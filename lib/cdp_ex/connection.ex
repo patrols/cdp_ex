@@ -59,6 +59,16 @@ defmodule CDPEx.Connection do
     GenServer.start_link(__MODULE__, {ws_url, conn_opts}, gen_opts)
   end
 
+  @typedoc """
+  Error reasons from `call/5` — and from every `Network`/`Page` op layered on it.
+  Precisely specced (not `term()`) so Dialyzer flags drift at the source.
+  """
+  @type call_error ::
+          {:cdp_error, String.t(), term()}
+          | {:timeout, String.t()}
+          | {:ws_closed, term()}
+          | :noproc
+
   @doc """
   Sends a CDP command and blocks until its reply (or `timeout`).
 
@@ -69,7 +79,7 @@ defmodule CDPEx.Connection do
   Pass `opts` with `session_id: sid` to address a flattened CDP session.
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()} | {:error, call_error()}
   def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ []) do
     session_id = Keyword.get(opts, :session_id)
     # Outer GenServer deadline is slightly longer than the CDP timeout so our own
@@ -106,14 +116,14 @@ defmodule CDPEx.Connection do
   Blocks until an event for which `matcher.(params)` returns true, or `timeout`.
 
   `matcher` receives the event params map. Returns `:ok` on a match, or
-  `{:error, reason}` where reason is `:timeout` (no matching event in time) or
-  `:noproc` / `{:ws_closed, _}` (the connection itself went away) — callers must
-  be able to tell those apart.
+  `{:error, reason}` where reason is `{:timeout, :await_event}` (no matching event
+  in time) or `:noproc` / `{:ws_closed, _}` (the connection itself went away) —
+  callers must be able to tell those apart.
 
   Pass `opts` with `session_id: sid` to only match events from that session.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
-          :ok | {:error, :timeout | :noproc | {:ws_closed, term()}}
+          :ok | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}
   def await_event(conn, matcher, timeout \\ @default_call_timeout, opts \\ [])
       when is_function(matcher, 1) do
     session_id = Keyword.get(opts, :session_id)
@@ -123,7 +133,7 @@ defmodule CDPEx.Connection do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
-    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, {:timeout, _} -> {:error, {:timeout, :await_event}}
   end
 
   @doc "Closes the WebSocket and stops the connection."
@@ -230,7 +240,7 @@ defmodule CDPEx.Connection do
         {:noreply, state}
 
       {_waiter, waiters} ->
-        GenServer.reply(from, {:error, :timeout})
+        GenServer.reply(from, {:error, {:timeout, :await_event}})
         {:noreply, %{state | waiters: waiters}}
     end
   end

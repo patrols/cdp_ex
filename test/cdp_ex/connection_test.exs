@@ -178,7 +178,7 @@ defmodule CDPEx.ConnectionTest do
       ~s({"method":"Page.lifecycleEvent","sessionId":"B","params":{"name":"x"}})
     )
 
-    assert {:error, :timeout} = Task.await(task)
+    assert {:error, {:timeout, :await_event}} = Task.await(task)
 
     # The same matcher resolves when the event is from session A.
     task2 =
@@ -212,7 +212,7 @@ defmodule CDPEx.ConnectionTest do
   end
 
   test "await_event times out when no event matches", %{conn: conn} do
-    assert {:error, :timeout} = Connection.await_event(conn, fn _ -> false end, 100)
+    assert {:error, {:timeout, :await_event}} = Connection.await_event(conn, fn _ -> false end, 100)
   end
 
   test "answering a server ping leaves the connection usable", %{conn: conn, fake: fake} do
@@ -276,8 +276,8 @@ defmodule CDPEx.ConnectionTest do
     # safe_match catching throw/exit, the first one would take the socket owner down.
     FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
 
-    assert {:error, :timeout} = Task.await(throwing)
-    assert {:error, :timeout} = Task.await(exiting)
+    assert {:error, {:timeout, :await_event}} = Task.await(throwing)
+    assert {:error, {:timeout, :await_event}} = Task.await(exiting)
     refute_received {:DOWN, ^ref, :process, ^conn, _}
 
     # The connection survived both and still serves a normal call.
