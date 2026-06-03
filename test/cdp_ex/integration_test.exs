@@ -314,6 +314,42 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, {:selector_not_found, "#nope"}} = Page.click(page, "#nope")
     end
 
+    test "wait_for_network_idle settles after a click triggers a fetch", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#fetch-btn")
+
+      # Idleness is measured from the call onward, so arm it (in a task) and let it
+      # subscribe BEFORE the click kicks off the fetch.
+      waiter =
+        Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 300, timeout: 5_000) end)
+
+      Process.sleep(200)
+      assert :ok = Page.click(page, "#fetch-btn")
+
+      assert :ok = Task.await(waiter, 10_000)
+      # The fetch resolved during the idle wait — its handler writes the body into #greeting.
+      assert {:ok, "fetched-data"} = Page.text(page, "#greeting")
+    end
+
+    test "wait_for_response returns the matching fetch response", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#fetch-btn")
+
+      # Arm the waiter (it enables Network + registers) before triggering the fetch.
+      waiter = Task.async(fn -> Page.wait_for_response(page, "/data", timeout: 5_000) end)
+      Process.sleep(200)
+      assert :ok = Page.click(page, "#fetch-btn")
+
+      assert {:ok, %{"requestId" => req, "response" => %{"status" => 200, "url" => url}}} =
+               Task.await(waiter, 10_000)
+
+      assert url =~ "/data"
+      assert {:ok, "fetched-data"} = Page.response_body(page, req)
+    end
+
     test "screenshot returns PNG bytes and can write a file", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       :ok = Page.wait_for_selector(page, "#greeting")

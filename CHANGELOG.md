@@ -8,8 +8,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `CDPEx.Page.navigate/3` accepts `response: true` to return `{:ok, page, %{status, url}}` — the main document's HTTP status and final (post-redirect) URL, correlated to the navigation by its `loaderId`. Lets callers detect a 403 wall / 404 / login-redirect instead of treating every navigation as success. Lazily enables the `Network` domain; returns `{:error, {:no_document_response, url}}` when no document response arrives (#31).
+- `CDPEx.Page.wait_for_response/3` blocks until a network response whose URL matches a function / `Regex` / substring arrives, returning the `Network.responseReceived` params (HTTP status + `requestId` for a follow-up `response_body/3`) — for an XHR/`fetch` kicked off by a `click/3` (#32).
+- `CDPEx.Page.wait_for_network_idle/2` blocks until the network is idle (≤ `:max_inflight` in-flight requests for `:idle_time` ms continuously) — the Puppeteer "networkidle" primitive for waiting out SPA hydration (#32).
 
 ### Breaking
+- `CDPEx.Connection.await_event/4` now returns `{:ok, params}` (the matched event's params) on a match, instead of a bare `:ok` (#32).
 - Request interception ↔ `authenticate/4` mutual exclusion is now **enforced** (it previously failed silently — returning a misleading `:ok` while breaking the page, since both drive the `Fetch` domain). On the same page: `enable_request_interception/2` returns `{:error, {:conflict, :authenticated}}` when the page is authenticated, `authenticate/4` returns `{:error, {:conflict, :intercepting}}` when it's intercepting, and re-enabling interception returns `{:error, :already_intercepting}` (was `:ok`). Interception also now rejects a `:session`-transport page with `{:error, {:unsupported_transport, :session}}`, matching `authenticate/4`. Update any caller that only matched `:ok` on these paths (#30).
 
 ### Fixed
