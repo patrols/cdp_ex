@@ -184,6 +184,8 @@ automatically, and a crashed browser is relaunched on demand.
 | `click/3` | Synthetic `.click()` on the first match |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
 | `screenshot/2` | PNG bytes, or write to `:path` |
+| `observe_network/2` | Stream `Network` request/response events to the caller |
+| `response_body/3` | Fetch a response body by requestId (`Network.getResponseBody`) |
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).
 

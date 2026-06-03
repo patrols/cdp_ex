@@ -348,6 +348,38 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "network observation" do
+    test "observe_network streams request/response events and response_body fetches the body", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      assert :ok = Page.observe_network(page)
+      {:ok, _} = Page.navigate(page, fixture)
+
+      conn = page.conn
+
+      assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent",
+                      %{"request" => %{"url" => req_url}}, _},
+                     5_000
+
+      assert req_url =~ "127.0.0.1"
+
+      assert_receive {:cdp_event, ^conn, "Network.responseReceived", %{"requestId" => request_id},
+                      _},
+                     5_000
+
+      # The fixture serves the page for any path, so whichever response this is
+      # (document or a favicon probe), its body is the fixture HTML.
+      assert {:ok, body} = Page.response_body(page, request_id)
+      assert body =~ "Hello"
+
+      assert :ok = Page.stop_observing_network(page)
+    end
+  end
+
   describe "tracer bullet" do
     test "with_page reproduces the spike's fetch end-to-end", %{fixture: fixture} do
       # The whole point: one call launches Chrome, opens a page, runs the fun,
