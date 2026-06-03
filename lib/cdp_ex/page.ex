@@ -37,10 +37,10 @@ defmodule CDPEx.Page do
   @screenshot_timeout 30_000
   @command_timeout 10_000
 
-  @network_events ["Network.requestWillBeSent", "Network.responseReceived"]
-  @fetch_paused "Fetch.requestPaused"
   @lifecycle_method "Page.lifecycleEvent"
-  @response_method "Network.responseReceived"
+  @response_received "Network.responseReceived"
+  @network_events ["Network.requestWillBeSent", @response_received]
+  @fetch_paused "Fetch.requestPaused"
 
   @enforce_keys [:browser, :conn, :target_id]
   defstruct [:browser, :conn, :target_id, :session_id]
@@ -69,10 +69,18 @@ defmodule CDPEx.Page do
 
   `status` is the HTTP status and `url` is the **final** URL after redirects,
   correlated to *this* navigation's main document by its `loaderId` (not "the first
-  `Document` response seen"). This lazily enables the `Network` domain. If no main
-  document response arrives before the wait ends, it returns
-  `{:error, {:no_document_response, url}}` (e.g. a connection that never produced an
-  HTTP response — though those usually surface earlier as `{:navigate, _}`).
+  `Document` response seen"). This lazily enables the `Network` domain (and leaves it
+  enabled). If no main document response arrives before the wait ends, it returns
+  `{:error, {:no_document_response, url}}` (e.g. a same-document/hash navigation that
+  loads no new document, or a connection that never produced an HTTP response — though
+  the latter usually surfaces earlier as `{:navigate, _}`).
+
+  > #### Don't combine with `observe_network/2` on the same page {: .warning}
+  >
+  > `response: true` subscribes the calling process to `Network.responseReceived` for
+  > the duration of the call, then unsubscribes on the way out. If the *same process*
+  > is also running `observe_network/2` on this page, the navigation tears that
+  > subscription down. Observe from a separate process, or capture via `response: true`.
 
   Options:
     * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`
@@ -80,7 +88,9 @@ defmodule CDPEx.Page do
     * `:timeout` — ms (default 30_000)
   """
   @spec navigate(t(), String.t(), keyword()) ::
-          {:ok, t()} | {:ok, t(), map()} | {:error, term()}
+          {:ok, t()}
+          | {:ok, t(), %{status: non_neg_integer(), url: String.t()}}
+          | {:error, term()}
   def navigate(%__MODULE__{} = page, url, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @navigate_timeout)
     wait_until = Keyword.get(opts, :wait_until, :network_almost_idle)
@@ -134,7 +144,11 @@ defmodule CDPEx.Page do
   # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
   # stays untouched. Requires the Network domain; enables it lazily.
   defp navigate_capturing_response(page, url, wait_until, timeout) do
-    methods = [@lifecycle_method, @response_method]
+    # Validate :wait_until up front (lifecycle_name/1 raises on a bad value) so an
+    # invalid option never enables Network / fires the navigation first — matching the
+    # default path, which validates before any side effect.
+    milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
+    methods = [@lifecycle_method, @response_received]
 
     with :ok <- ensure_network(page, timeout),
          :ok <- subscribe_each(page.conn, methods) do
@@ -143,7 +157,7 @@ defmodule CDPEx.Page do
       deadline = System.monotonic_time(:millisecond) + timeout
 
       try do
-        capture_after_navigate(page, url, wait_until, timeout, ref, deadline)
+        capture_after_navigate(page, url, milestone, timeout, ref, deadline)
       after
         Process.demonitor(ref, [:flush])
         unsubscribe_each(page.conn, methods)
@@ -152,14 +166,12 @@ defmodule CDPEx.Page do
     end
   end
 
-  defp capture_after_navigate(page, url, wait_until, timeout, ref, deadline) do
+  defp capture_after_navigate(page, url, milestone, timeout, ref, deadline) do
     case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
       {:ok, %{"errorText" => error}} ->
         {:error, {:navigate, error}}
 
       {:ok, result} ->
-        milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
-
         case await_capture(
                page,
                milestone,
@@ -194,7 +206,7 @@ defmodule CDPEx.Page do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:cdp_event, ^conn, @response_method, params, ^sid} ->
+      {:cdp_event, ^conn, @response_received, params, ^sid} ->
         captured =
           if document_response?(params, lid, fid), do: response_summary(params), else: captured
 
@@ -226,18 +238,32 @@ defmodule CDPEx.Page do
     end
   end
 
-  defp document_response?(%{"type" => "Document", "loaderId" => loader} = params, lid, fid) do
+  # The main document response for THIS navigation: type "Document", matching loaderId
+  # (+ frameId when the navigate result carried one), and a well-formed response (an
+  # integer status and a URL). Requiring both keeps the {:ok, page, %{status, url}}
+  # contract honest — a degenerate response missing them is not reported as the landing,
+  # so the call falls through to {:error, {:no_document_response, _}} rather than
+  # returning nils. (Real Chrome always populates both on a Document response.)
+  defp document_response?(
+         %{
+           "type" => "Document",
+           "loaderId" => loader,
+           "response" => %{"status" => status, "url" => url}
+         } = params,
+         lid,
+         fid
+       )
+       when is_integer(status) and is_binary(url) do
     loader == lid and Map.get(params, "frameId", fid) == fid
   end
 
   defp document_response?(_params, _lid, _fid), do: false
 
-  defp response_summary(params) do
-    response = params["response"] || %{}
+  defp response_summary(%{"response" => response}) do
     %{status: response["status"], url: response["url"]}
   end
 
-  # Generic mailbox drain for one cdp method (parallel to drain_lifecycle/1).
+  # Generic mailbox drain for one cdp method.
   defp drain_events(conn, method) do
     receive do
       {:cdp_event, ^conn, ^method, _params, _sid} -> drain_events(conn, method)
@@ -258,7 +284,7 @@ defmodule CDPEx.Page do
         {:error, reason}
 
       :ok ->
-        drain_lifecycle(page.conn)
+        drain_events(page.conn, @lifecycle_method)
         ref = Process.monitor(page.conn)
         deadline = System.monotonic_time(:millisecond) + timeout
 
@@ -270,7 +296,7 @@ defmodule CDPEx.Page do
         after
           Process.demonitor(ref, [:flush])
           safe_unsubscribe(page.conn)
-          drain_lifecycle(page.conn)
+          drain_events(page.conn, @lifecycle_method)
         end
     end
   end
@@ -319,16 +345,6 @@ defmodule CDPEx.Page do
     Connection.unsubscribe(conn, "Page.lifecycleEvent")
   catch
     :exit, _ -> :ok
-  end
-
-  # Flush lifecycle events left in our mailbox (other sessions/names, or stragglers
-  # from a prior navigation) so they don't leak to the caller.
-  defp drain_lifecycle(conn) do
-    receive do
-      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _sid} -> drain_lifecycle(conn)
-    after
-      0 -> :ok
-    end
   end
 
   defp lifecycle_name(:load), do: "load"

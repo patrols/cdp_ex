@@ -145,7 +145,7 @@ defmodule CDPEx.PageTest do
     } do
       task =
         Task.async(fn ->
-          Page.navigate(page, "http://example.test/", response: true, timeout: 300)
+          Page.navigate(page, "http://example.test/", response: true, timeout: 1_000)
         end)
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
@@ -185,6 +185,59 @@ defmodule CDPEx.PageTest do
       )
 
       assert {:ok, %Page{}} = Task.await(task)
+    end
+
+    test "wait_until: :none returns on the document response itself (no milestone wait)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, wait_until: :none)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # With :none there is NO lifecycle milestone — the matching Document response is
+      # itself the completion signal, so the call returns without a networkAlmostIdle.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/landed"}}})
+      )
+
+      assert {:ok, %Page{}, %{status: 200, url: "http://example.test/landed"}} = Task.await(task)
+    end
+
+    test "a connection death mid-capture surfaces as an error (never hangs)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # The task is now in await_capture (which monitors the conn). Drop the connection
+      # before any document response: the wait must end with an error, not hang. Either
+      # the await_capture {:DOWN} (-> {:ws_closed, _}) or the in-flight call (-> :noproc)
+      # wins the race; both are clean errors.
+      Connection.close(conn)
+
+      assert {:error, reason} = Task.await(task)
+      assert reason == :noproc or match?({:ws_closed, _}, reason)
     end
   end
 
