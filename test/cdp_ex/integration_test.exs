@@ -13,6 +13,7 @@ defmodule CDPEx.IntegrationTest do
   alias CDPEx.Connection
   alias CDPEx.FixtureServer
   alias CDPEx.Page
+  alias CDPEx.Pool
 
   @moduletag :integration
   # Real Chrome launches are slower than the default 60s in aggregate.
@@ -397,12 +398,51 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "pool" do
+    test "with_page reuses a warm pooled browser across calls", %{fixture: fixture} do
+      {:ok, pool} = Pool.start_link(size: 1)
+      on_exit(fn -> stop_pool_quietly(pool) end)
+
+      used = fn ->
+        Pool.with_page(pool, fn page ->
+          {:ok, _} = Page.navigate(page, fixture)
+          page.browser
+        end)
+      end
+
+      b1 = used.()
+      b2 = used.()
+      assert is_pid(b1)
+      assert b1 == b2, "expected the pooled browser to be reused across with_page calls"
+      assert :sys.get_state(pool).count == 1
+    end
+
+    test "with_page runs on a pooled browser and returns the fun's value", %{fixture: fixture} do
+      {:ok, pool} = Pool.start_link(size: 1)
+      on_exit(fn -> stop_pool_quietly(pool) end)
+
+      result =
+        Pool.with_page(pool, fn page ->
+          {:ok, _} = Page.navigate(page, fixture)
+          Page.text(page, "#greeting")
+        end)
+
+      assert {:ok, "Hello"} = result
+    end
+  end
+
   # Teardown helper. The browser is linked to (and watches) the test process, so
   # by the time on_exit runs it may already be stopping on its own — racing this
   # call. Tolerate an exit from the stop so a teardown race never fails a test
   # whose body already passed.
   defp stop_quietly(browser) do
     if Process.alive?(browser), do: CDPEx.stop(browser)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp stop_pool_quietly(pool) do
+    if Process.alive?(pool), do: Pool.stop(pool)
   catch
     :exit, _ -> :ok
   end

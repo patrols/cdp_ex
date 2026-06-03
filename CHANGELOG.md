@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.Pool` — a fixed-size pool of reusable browsers (`checkout/2`, `checkin/2`, `with_browser/3`, `with_page/3`) that keeps Chrome warm so a per-job fetch avoids a cold launch. Lazy launch up to `:size`, blocking checkout with timeout, automatic reclaim of a crashed caller's browser, and on-demand relaunch of a crashed one.
+
 ### Changed
 - `CDPEx.Page.navigate/3` and `wait_for_navigation/2` raise `ArgumentError` on an unknown `:wait_until` value instead of silently treating it as `:network_almost_idle`.
 
