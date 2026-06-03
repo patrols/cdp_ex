@@ -62,6 +62,10 @@ defmodule CDPEx do
   `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
   while the high-level `CDPEx.Page` `wait_for_*` functions and `CDPEx.Pool.checkout/2`
   return a bare `:timeout` ("the awaited condition didn't happen in time").
+
+  A WebSocket frame that fails to decode is not a standalone reason: the connection
+  stops on the decode failure, so callers observe it nested, as
+  `{:ws_closed, {:ws_decode, _}}`.
   """
   @type error_reason ::
           CDPEx.Connection.call_error()
@@ -70,7 +74,6 @@ defmodule CDPEx do
           | :unknown_page
           | :already_authenticated
           | {:timeout, :await_event}
-          | {:ws_decode, term()}
           | {:navigate, String.t()}
           | {:selector_not_found, String.t()}
           | {:evaluate_exception, term()}
