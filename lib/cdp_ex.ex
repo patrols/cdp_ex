@@ -54,7 +54,7 @@ defmodule CDPEx do
   `t:CDPEx.Chrome.launch_error/0` are precisely specced on `call/5` / `launch/1`, so
   Dialyzer catches a shape change in *those* at the source. The remaining members —
   the page-level tagged kinds and bare atoms — are hand-maintained documentation:
-  `error_reason/0` itself is referenced by no `@spec`, so it is best-effort and
+  the union itself is referenced by no `@spec`, so it is best-effort and
   **not** closed (kinds such as `{:cdp_error, method, payload}` also wrap arbitrary
   CDP data, and a renamed page-level producer would drift silently).
 
