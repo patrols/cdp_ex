@@ -706,8 +706,8 @@ defmodule CDPEx.Page do
   `Accept`, `Cookie`, …). Omit `:headers` to leave the original request headers
   intact (the same gotcha as Puppeteer's `continueRequest({headers})`).
 
-  Options (all optional): `:url`, `:method`, `:headers` (a name => value map),
-  `:post_data` (a binary, base64-encoded for you), `:timeout`.
+  Options (all optional): `:url`, `:method`, `:headers` (a name => value map or
+  keyword list), `:post_data` (a binary or iodata, base64-encoded for you), `:timeout`.
   """
   @spec continue_request(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def continue_request(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
@@ -727,8 +727,8 @@ defmodule CDPEx.Page do
   Answers a paused request with a synthetic response (`Fetch.fulfillRequest`) — the
   page never hits the network for it.
 
-  Options: `:status` (response code, default 200), `:headers` (a name => value map),
-  `:body` (a binary, base64-encoded for you), `:timeout`.
+  Options: `:status` (response code, default 200), `:headers` (a name => value map or
+  keyword list), `:body` (a binary or iodata, base64-encoded for you), `:timeout`.
   """
   @spec fulfill_request(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def fulfill_request(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
@@ -912,14 +912,18 @@ defmodule CDPEx.Page do
 
   defp header_entries(nil), do: nil
 
-  defp header_entries(headers) when is_map(headers) do
+  # Accept a map or a keyword list (both are natural for headers); Enum.map handles
+  # either's {name, value} pairs. A genuinely-wrong shape still raises.
+  defp header_entries(headers) when is_map(headers) or is_list(headers) do
     Enum.map(headers, fn {name, value} ->
       %{"name" => to_string(name), "value" => to_string(value)}
     end)
   end
 
   defp encode64(nil), do: nil
-  defp encode64(bin) when is_binary(bin), do: Base.encode64(bin)
+  # Accept a binary or iodata — IO.iodata_to_binary/1 flattens either (and a
+  # genuinely-wrong type, e.g. an integer, still raises).
+  defp encode64(data), do: Base.encode64(IO.iodata_to_binary(data))
 
   @error_reasons %{
     failed: "Failed",

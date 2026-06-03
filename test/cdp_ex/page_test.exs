@@ -380,6 +380,52 @@ defmodule CDPEx.PageTest do
 
       send(observer, :stop)
     end
+
+    test "fulfill_request maps :headers to responseHeaders", %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.fulfill_request(page, "R1", headers: %{"Content-Type" => "text/html"})
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.fulfillRequest", "params" => params}},
+                     2_000
+
+      assert params["responseHeaders"] == [%{"name" => "Content-Type", "value" => "text/html"}]
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "continue_request accepts a keyword-list :headers", %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.continue_request(page, "R1", headers: [{"X-A", "1"}, {"X-B", "2"}])
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.continueRequest", "params" => params}},
+                     2_000
+
+      assert params["headers"] == [
+               %{"name" => "X-A", "value" => "1"},
+               %{"name" => "X-B", "value" => "2"}
+             ]
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "fulfill_request accepts an iodata :body", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.fulfill_request(page, "R1", body: ["<h1>", "hi", "</h1>"]) end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.fulfillRequest", "params" => params}},
+                     2_000
+
+      assert params["body"] == Base.encode64("<h1>hi</h1>")
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
   end
 
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent

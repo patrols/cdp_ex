@@ -491,6 +491,48 @@ defmodule CDPEx.IntegrationTest do
 
       assert :ok = Page.disable_request_interception(page)
     end
+
+    test "continue_request lets an intercepted navigation reach the real server", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      assert :ok = Page.enable_request_interception(page)
+      conn = page.conn
+
+      nav = Task.async(fn -> Page.navigate(page, fixture, wait_until: :load) end)
+
+      assert_receive {:cdp_event, ^conn, "Fetch.requestPaused", %{"requestId" => req_id}, _}, 5_000
+      assert :ok = Page.continue_request(page, req_id)
+
+      assert {:ok, _} = Task.await(nav, 10_000)
+      # Continued (not fulfilled), so the page shows the REAL fixture content.
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+
+      assert :ok = Page.disable_request_interception(page)
+    end
+
+    test "fail_request aborts an intercepted request", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      assert :ok = Page.enable_request_interception(page)
+      conn = page.conn
+
+      # The document request is paused; failing it aborts the navigation, which the
+      # Page.navigate command then reports as an error.
+      nav = Task.async(fn -> Page.navigate(page, fixture, wait_until: :none) end)
+
+      assert_receive {:cdp_event, ^conn, "Fetch.requestPaused", %{"requestId" => req_id}, _}, 5_000
+      assert :ok = Page.fail_request(page, req_id, reason: :aborted)
+
+      assert {:error, {:navigate, _}} = Task.await(nav, 10_000)
+
+      assert :ok = Page.disable_request_interception(page)
+    end
   end
 
   describe "tracer bullet" do
