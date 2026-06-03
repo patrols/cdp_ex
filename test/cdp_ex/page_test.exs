@@ -195,6 +195,86 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "request interception" do
+    test "enable_request_interception subscribes the caller and enables Fetch with patterns", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.enable_request_interception(page) end)
+
+      wait_until_subscribed(conn, task.pid, "Fetch.requestPaused")
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.enable", "params" => params}},
+                     2_000
+
+      assert params["patterns"] == [%{"urlPattern" => "*"}]
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "continue_request maps options to Fetch.continueRequest params", %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.continue_request(page, "R1",
+            url: "https://example.test/",
+            method: "POST",
+            headers: %{"X-Test" => "1"},
+            post_data: "hello"
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.continueRequest", "params" => params}},
+                     2_000
+
+      assert params["requestId"] == "R1"
+      assert params["url"] == "https://example.test/"
+      assert params["method"] == "POST"
+      assert params["headers"] == [%{"name" => "X-Test", "value" => "1"}]
+      assert params["postData"] == Base.encode64("hello")
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "fulfill_request base64-encodes the body and defaults the status", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.fulfill_request(page, "R1", body: "<h1>hi</h1>") end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.fulfillRequest", "params" => params}},
+                     2_000
+
+      assert params["requestId"] == "R1"
+      assert params["responseCode"] == 200
+      assert params["body"] == Base.encode64("<h1>hi</h1>")
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "fail_request maps a known reason to its CDP string", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.fail_request(page, "R1", reason: :aborted) end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.failRequest", "params" => params}},
+                     2_000
+
+      assert params == %{"requestId" => "R1", "errorReason" => "Aborted"}
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "fail_request rejects an unknown reason before calling CDP", %{page: page} do
+      assert {:error, {:invalid_error_reason, :bogus}} =
+               Page.fail_request(page, "R1", reason: :bogus)
+    end
+  end
+
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent
   # afterward are guaranteed to be delivered to it (no send/subscribe race).
   defp wait_until_subscribed(conn, pid, method \\ "Page.lifecycleEvent", retries \\ 100) do
