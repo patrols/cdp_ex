@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-03
+
 ### Added
 - `CDPEx.Pool` — a fixed-size pool of reusable browsers (`checkout/2`, `checkin/2`, `with_browser/3`, `with_page/3`) that keeps Chrome warm so a per-job fetch avoids a cold launch. Lazy launch up to `:size`, blocking checkout with timeout, automatic reclaim of a crashed caller's browser, and on-demand relaunch of a crashed one.
 - `CDPEx.Page.observe_network/2`, `stop_observing_network/2`, and `response_body/3` — observe a page's network traffic (subscribe the caller to `Network.requestWillBeSent` / `responseReceived` events) and fetch a response body by requestId. Builds on the existing event-subscription machinery and the lazy `Network.enable`.
@@ -85,7 +87,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/patrols/cdp_ex/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/patrols/cdp_ex/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/patrols/cdp_ex/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/patrols/cdp_ex/compare/v0.1.0...v0.2.0
