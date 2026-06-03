@@ -153,6 +153,27 @@ children = [
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
+### Pooling
+
+Reuse warm browsers instead of paying a cold launch per job with `CDPEx.Pool`:
+
+```elixir
+children = [
+  {CDPEx.Pool, name: MyPool, size: 4, launch_opts: [headless: true]}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+
+# Borrow a warm browser for one fetch (a pooled drop-in for with_page/3):
+CDPEx.Pool.with_page(MyPool, fn page ->
+  {:ok, _} = CDPEx.Page.navigate(page, "https://example.com")
+  CDPEx.Page.html(page)
+end)
+```
+
+Browsers launch lazily up to `:size` and are reused; `checkout/2` blocks (up to
+`:checkout_timeout`) when all are busy. A caller that crashes returns its browser
+automatically, and a crashed browser is relaunched on demand.
+
 ## Page operations
 
 | Function | Description |
