@@ -52,7 +52,7 @@ defmodule CDPEx.MixProject do
       {:jason, "~> 1.4"},
 
       # Dev/test tooling
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.34", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       # Style enforcer; runs as a `mix format` plugin (see .formatter.exs).
@@ -72,6 +72,10 @@ defmodule CDPEx.MixProject do
         "deps.unlock --check-unused",
         "deps.audit",
         "compile --warnings-as-errors",
+        # Build docs with warnings-as-errors so broken/typo'd doc references
+        # (e.g. a type linked as `Mod.t/0` instead of `t:Mod.t/0`) fail CI before
+        # they can reach a release. ex_doc must load in :test for this (see deps).
+        "docs --warnings-as-errors",
         "credo",
         "dialyzer",
         "test --exclude integration"
