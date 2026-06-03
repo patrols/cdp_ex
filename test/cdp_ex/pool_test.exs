@@ -65,6 +65,13 @@ defmodule CDPEx.PoolTest do
     assert {:ok, _b} = Pool.checkout(pool, 500)
   end
 
+  test "with_browser checks the browser back in even when the fun exits" do
+    pool = start_pool(size: 1)
+    # `after` runs on an exit too, so the browser is still returned.
+    catch_exit(Pool.with_browser(pool, fn _b -> exit(:boom) end))
+    assert {:ok, _b} = Pool.checkout(pool, 500)
+  end
+
   test "a checkout owner that crashes has its browser reclaimed" do
     pool = start_pool(size: 1)
     parent = self()

@@ -31,7 +31,9 @@ defmodule CDPEx.Pool do
 
     * `:size` — maximum number of browsers (default `1`)
     * `:launch_opts` — options passed to each `CDPEx.Browser` (see `CDPEx.Chrome`)
-    * `:checkout_timeout` — ms to wait for a free browser (default `5_000`)
+    * `:checkout_timeout` — ms to wait for a free browser (default `5_000`). While
+      the pool is still launching browsers to `:size`, keep this above your cold
+      Chrome launch time — launches are synchronous (see below)
     * `:name` — registers the pool process
   """
 
@@ -201,16 +203,16 @@ defmodule CDPEx.Pool do
 
   @impl true
   def terminate(_reason, state) do
-    Enum.each(state.available, &safe_stop/1)
-    Enum.each(Map.keys(state.busy), &safe_stop/1)
-
-    # Reply to anyone still blocked in checkout/2 so they get a clean
-    # {:error, :noproc} instead of an uncaught exit as the pool goes down.
+    # Reply to anyone still blocked in checkout/2 first, so they get a clean
+    # {:error, :noproc} without waiting on the (possibly multi-second) serial
+    # browser teardown below.
     Enum.each(:queue.to_list(state.waiting), fn {from, timer} ->
       _ = cancel_timer(timer)
       GenServer.reply(from, {:error, :noproc})
     end)
 
+    Enum.each(state.available, &safe_stop/1)
+    Enum.each(Map.keys(state.busy), &safe_stop/1)
     :ok
   end
 
