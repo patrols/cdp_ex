@@ -59,6 +59,16 @@ defmodule CDPEx.Connection do
     GenServer.start_link(__MODULE__, {ws_url, conn_opts}, gen_opts)
   end
 
+  @typedoc """
+  Error reasons from `call/5` — and from every `Network`/`Page` op layered on it.
+  Precisely specced (not `term()`) so Dialyzer flags drift at the source.
+  """
+  @type call_error ::
+          {:cdp_error, String.t(), term()}
+          | {:timeout, String.t()}
+          | {:ws_closed, term()}
+          | :noproc
+
   @doc """
   Sends a CDP command and blocks until its reply (or `timeout`).
 
@@ -69,7 +79,7 @@ defmodule CDPEx.Connection do
   Pass `opts` with `session_id: sid` to address a flattened CDP session.
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()} | {:error, call_error()}
   def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ []) do
     session_id = Keyword.get(opts, :session_id)
     # Outer GenServer deadline is slightly longer than the CDP timeout so our own

@@ -45,8 +45,11 @@ defmodule CDPEx do
   few reasons are bare, context-free atoms — a self-describing terminal state, the
   way GenServer uses `:noproc`.
 
-  Best-effort documentation, **not** a closed/exhaustive type: kinds such as
-  `{:cdp_error, method, payload}` wrap arbitrary CDP data.
+  The producer reasons are composed from `CDPEx.Connection.call_error/0` and
+  `CDPEx.Chrome.launch_error/0`, which **are** precisely specced on `call/5` /
+  `launch/1` — so Dialyzer catches a shape change at the source. The whole union
+  is still best-effort, **not** closed: kinds such as `{:cdp_error, method, payload}`
+  wrap arbitrary CDP data.
 
   Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
   `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
@@ -54,16 +57,15 @@ defmodule CDPEx do
   return a bare `:timeout` ("the awaited condition didn't happen in time").
   """
   @type error_reason ::
-          :noproc
+          CDPEx.Connection.call_error()
+          | CDPEx.Chrome.launch_error()
           | :timeout
           | :unknown_page
           | :already_authenticated
           | :invalid_response_body
           | :invalid_pdf_data
-          | {:timeout, term()}
-          | {:ws_closed, term()}
+          | {:timeout, :await_event}
           | {:ws_decode, term()}
-          | {:cdp_error, String.t(), term()}
           | {:navigate, String.t()}
           | {:selector_not_found, String.t()}
           | {:evaluate_exception, term()}
@@ -73,10 +75,6 @@ defmodule CDPEx do
           | {:invalid_transport, term()}
           | {:unsupported_transport, term()}
           | {:write_failed, term()}
-          | {:chrome_not_found, term()}
-          | {:chrome_exited, integer(), String.t()}
-          | {:debug_url_not_found, String.t()}
-          | {:devtools_file_malformed, String.t()}
 
   @doc """
   Launches a headless Chrome browser and returns its process pid.

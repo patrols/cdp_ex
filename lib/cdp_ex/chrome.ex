@@ -64,7 +64,17 @@ defmodule CDPEx.Chrome do
   The `Port` is owned by the calling process, which therefore receives the
   `{port, {:exit_status, _}}` message if Chrome dies.
   """
-  @spec launch(keyword()) :: {:ok, handle()} | {:error, term()}
+  @typedoc """
+  Error reasons from `launch/1`. Precisely specced (not `term()`) so Dialyzer flags
+  drift at the source.
+  """
+  @type launch_error ::
+          {:chrome_not_found, String.t()}
+          | {:debug_url_not_found, String.t()}
+          | {:devtools_file_malformed, String.t()}
+          | {:chrome_exited, integer(), String.t()}
+
+  @spec launch(keyword()) :: {:ok, handle()} | {:error, launch_error()}
   def launch(opts \\ []) do
     binary = resolve_binary(opts)
 
