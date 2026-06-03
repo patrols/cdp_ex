@@ -95,6 +95,23 @@ defmodule CDPEx.PoolTest do
     assert b2 != b1
   end
 
+  test "stopping the pool replies to blocked waiters instead of crashing them" do
+    pool = start_pool(size: 1)
+    {:ok, _b1} = Pool.checkout(pool)
+
+    task = Task.async(fn -> Pool.checkout(pool, 5_000) end)
+    refute Task.yield(task, 100), "the second checkout should be blocked"
+
+    Pool.stop(pool)
+    assert {:error, :noproc} = Task.await(task)
+  end
+
+  test "child_spec derives its id from :id or :name so multiple pools can be supervised" do
+    assert Pool.child_spec([]).id == Pool
+    assert Pool.child_spec(name: :fast).id == :fast
+    assert Pool.child_spec(id: :custom, name: :fast).id == :custom
+  end
+
   defp start_pool(opts) do
     {:ok, pool} =
       opts |> Keyword.put_new(:start_fun, &FakeBrowser.start_link/1) |> Pool.start_link()

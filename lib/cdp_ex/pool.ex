@@ -21,6 +21,12 @@ defmodule CDPEx.Pool do
   so `:size` self-heals. Put the pool under your supervision tree; its
   `terminate/2` stops every browser, reaping Chrome.
 
+  Browser launches are **synchronous** — a browser is started inside the pool
+  process, so while one is launching (a cold Chrome can take a few seconds) the
+  pool can't serve other checkouts or checkins. A short `:checkout_timeout` is
+  therefore unreliable while the pool is still growing to `:size`; once warm,
+  checkouts are immediate.
+
   ## Options
 
     * `:size` — maximum number of browsers (default `1`)
@@ -59,9 +65,12 @@ defmodule CDPEx.Pool do
 
   @doc false
   def child_spec(opts) do
-    # terminate/2 stops every browser sequentially (each takes a few seconds to
-    # reap Chrome), so give the supervisor headroom over the GenServer 5s default.
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, shutdown: 30_000}
+    # Derive a distinct id from :id/:name so several pools can run under one
+    # supervisor without colliding on the default __MODULE__ id. terminate/2 stops
+    # every browser sequentially (each takes a few seconds to reap Chrome), so give
+    # the supervisor headroom over the GenServer 5s default.
+    id = Keyword.get(opts, :id, Keyword.get(opts, :name, __MODULE__))
+    %{id: id, start: {__MODULE__, :start_link, [opts]}, shutdown: 30_000}
   end
 
   @doc """
@@ -73,10 +82,16 @@ defmodule CDPEx.Pool do
   """
   @spec checkout(GenServer.server(), timeout()) :: {:ok, pid()} | {:error, term()}
   def checkout(pool, timeout \\ @default_checkout_timeout) do
-    GenServer.call(pool, {:checkout, timeout}, checkout_deadline(timeout))
+    # Wait indefinitely on the outer call; the pool's own per-request timer is the
+    # authoritative timeout (it removes the waiter and replies {:error, :timeout}).
+    # This avoids a stale waiter when a slow launch blocks the pool past a tight
+    # outer deadline. A pool that stops mid-wait surfaces as {:error, :noproc}.
+    GenServer.call(pool, {:checkout, timeout}, :infinity)
   catch
-    :exit, {:timeout, _} -> {:error, :timeout}
     :exit, {:noproc, _} -> {:error, :noproc}
+    :exit, {:normal, _} -> {:error, :noproc}
+    :exit, {:shutdown, _} -> {:error, :noproc}
+    :exit, {{:shutdown, _}, _} -> {:error, :noproc}
   end
 
   @doc "Returns a browser borrowed with `checkout/2`."
@@ -188,6 +203,14 @@ defmodule CDPEx.Pool do
   def terminate(_reason, state) do
     Enum.each(state.available, &safe_stop/1)
     Enum.each(Map.keys(state.busy), &safe_stop/1)
+
+    # Reply to anyone still blocked in checkout/2 so they get a clean
+    # {:error, :noproc} instead of an uncaught exit as the pool goes down.
+    Enum.each(:queue.to_list(state.waiting), fn {from, timer} ->
+      _ = cancel_timer(timer)
+      GenServer.reply(from, {:error, :noproc})
+    end)
+
     :ok
   end
 
@@ -243,7 +266,14 @@ defmodule CDPEx.Pool do
 
       {{_owner, ref}, busy} ->
         Process.demonitor(ref, [:flush])
-        %{state | busy: busy, available: [browser | state.available]}
+        # Don't return an already-dead browser (its {:EXIT} may not be processed
+        # yet) to the available set, or dispatch could hand a dead pid to a waiter.
+        # Drop it instead; the {:EXIT} path reconciles anything this misses.
+        if Process.alive?(browser) do
+          %{state | busy: busy, available: [browser | state.available]}
+        else
+          %{state | busy: busy, count: state.count - 1}
+        end
     end
   end
 
@@ -282,9 +312,6 @@ defmodule CDPEx.Pool do
 
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(ref), do: Process.cancel_timer(ref)
-
-  defp checkout_deadline(:infinity), do: :infinity
-  defp checkout_deadline(timeout) when is_integer(timeout), do: max(timeout, 0) + 100
 
   defp safe_stop(browser) do
     if Process.alive?(browser), do: Browser.stop(browser)
