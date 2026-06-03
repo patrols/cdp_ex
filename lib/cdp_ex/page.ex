@@ -20,8 +20,10 @@ defmodule CDPEx.Page do
     * **Capture** — `screenshot/2`, `pdf/2`
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
+    * **Auth** — `authenticate/4` (proxy / HTTP Basic challenges)
   """
 
+  alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.Protocol
 
@@ -229,6 +231,27 @@ defmodule CDPEx.Page do
       {:down, reason} -> {:error, down_reason(reason)}
       {:error, _} = error -> error
     end
+  end
+
+  @doc """
+  Arms HTTP/proxy authentication on this page with `username`/`password`.
+
+  Headless Chrome launched with `--proxy-server=host:port` can't send proxy
+  credentials, so an authenticated proxy rejects the connection
+  (`net::ERR_INVALID_AUTH_CREDENTIALS`). Call this after `new_page/2` and
+  **before** `navigate/3`: it answers the proxy (or HTTP Basic) auth challenge with
+  the given credentials. It also covers Basic-auth-gated origins.
+
+  This enables the CDP `Fetch` domain for the page, which pauses (and
+  auto-continues) **every** request — measurable overhead on heavy pages.
+
+  Options:
+    * `:source` — which challenges to answer: `:any` (default), `:proxy`, `:server`
+  """
+  @spec authenticate(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def authenticate(%__MODULE__{} = page, username, password, opts \\ [])
+      when is_binary(username) and is_binary(password) do
+    Browser.authenticate(page.browser, page, [username: username, password: password] ++ opts)
   end
 
   @doc """

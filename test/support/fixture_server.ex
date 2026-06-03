@@ -32,18 +32,43 @@ defmodule CDPEx.FixtureServer do
 
   defp serve(socket) do
     # Read the full request headers (they may arrive across TCP segments) so the
-    # header reflection is deterministic, then respond.
+    # header reflection and auth check are deterministic, then respond.
     request = recv_request(socket, "")
-    body = render(request)
-
-    response =
-      "HTTP/1.1 200 OK\r\n" <>
-        "Content-Type: text/html; charset=utf-8\r\n" <>
-        "Content-Length: #{byte_size(body)}\r\n" <>
-        "Connection: close\r\n\r\n" <> body
-
-    _ = :gen_tcp.send(socket, response)
+    _ = :gen_tcp.send(socket, respond(request))
     :gen_tcp.close(socket)
+  end
+
+  @basic_auth "Basic " <> Base.encode64("cdpex:secret")
+
+  # /basic-auth gates on HTTP Basic credentials (cdpex:secret): without a valid
+  # Authorization header it answers 401 + WWW-Authenticate, so Chrome — and an armed
+  # CDPEx.Page.authenticate — receives an auth challenge. Any other path serves the page.
+  defp respond(request) do
+    if String.starts_with?(request_path(request), "/basic-auth") and not authorized?(request) do
+      body = ~s(<!doctype html><html><body><p id="status">401</p></body></html>)
+      http_response("401 Unauthorized", body, ["WWW-Authenticate: Basic realm=\"cdpex\""])
+    else
+      http_response("200 OK", render(request), [])
+    end
+  end
+
+  defp authorized?(request), do: header_value(request, "authorization") == @basic_auth
+
+  defp request_path(request) do
+    request |> String.split("\r\n", parts: 2) |> hd() |> String.split(" ") |> Enum.at(1, "/")
+  end
+
+  defp http_response(status, body, extra_headers) do
+    headers =
+      [
+        "HTTP/1.1 #{status}",
+        "Content-Type: text/html; charset=utf-8",
+        "Content-Length: #{byte_size(body)}",
+        "Connection: close"
+        | extra_headers
+      ]
+
+    Enum.join(headers, "\r\n") <> "\r\n\r\n" <> body
   end
 
   # Reflects the X-CDPEx-Test request header into #echo-header so integration

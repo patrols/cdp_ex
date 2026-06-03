@@ -348,6 +348,27 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "authentication" do
+    test "authenticate answers an HTTP Basic challenge so a gated page loads", %{fixture: fixture} do
+      auth_url = fixture <> "basic-auth"
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      # Without credentials the gated page is blocked (the server returns 401, so
+      # there's no #greeting to read).
+      {:ok, blocked} = CDPEx.new_page(browser)
+      {:ok, _} = Page.navigate(blocked, auth_url)
+      assert {:ok, nil} = Page.text(blocked, "#greeting")
+
+      # Armed with authenticate/4, the challenge is answered and the page loads —
+      # which also proves the paused requests were auto-continued.
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+      {:ok, _} = Page.navigate(page, auth_url)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+  end
+
   describe "tracer bullet" do
     test "with_page reproduces the spike's fetch end-to-end", %{fixture: fixture} do
       # The whole point: one call launches Chrome, opens a page, runs the fun,

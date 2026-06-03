@@ -8,6 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `CDPEx.Pool` — a fixed-size pool of reusable browsers (`checkout/2`, `checkin/2`, `with_browser/3`, `with_page/3`) that keeps Chrome warm so a per-job fetch avoids a cold launch. Lazy launch up to `:size`, blocking checkout with timeout, automatic reclaim of a crashed caller's browser, and on-demand relaunch of a crashed one.
+- `CDPEx.Page.authenticate/4` — answer proxy (`--proxy-server`) or HTTP Basic auth challenges with credentials, so authenticated proxies and Basic-auth-gated origins work. Backed by a per-page `CDPEx.Fetch` handler that enables the `Fetch` domain, auto-continues paused requests, and answers `authRequired` (with a `:source` filter and a bad-credentials loop guard).
 
 ### Changed
 - `CDPEx.Page.navigate/3` and `wait_for_navigation/2` raise `ArgumentError` on an unknown `:wait_until` value instead of silently treating it as `:network_almost_idle`.

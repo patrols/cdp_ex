@@ -184,6 +184,7 @@ automatically, and a crashed browser is relaunched on demand.
 | `click/3` | Synthetic `.click()` on the first match |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
 | `screenshot/2` | PNG bytes, or write to `:path` |
+| `authenticate/4` | Answer a proxy / HTTP Basic auth challenge (call before `navigate/3`) |
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).
 

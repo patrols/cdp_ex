@@ -19,6 +19,7 @@ defmodule CDPEx.Browser do
 
   alias CDPEx.Chrome
   alias CDPEx.Connection
+  alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.Protocol
 
@@ -70,6 +71,12 @@ defmodule CDPEx.Browser do
   """
   @spec close_page(GenServer.server(), Page.t()) :: :ok | {:error, :unknown_page}
   def close_page(browser, %Page{} = page), do: GenServer.call(browser, {:close_page, page}, 15_000)
+
+  @doc "Arms HTTP/proxy authentication for `page`. See `CDPEx.Page.authenticate/4`."
+  @spec authenticate(GenServer.server(), Page.t(), keyword()) :: :ok | {:error, term()}
+  def authenticate(browser, %Page{} = page, opts) do
+    GenServer.call(browser, {:authenticate, page, opts}, 15_000)
+  end
 
   @doc "Stops the browser, closing all pages and killing Chrome."
   @spec stop(GenServer.server()) :: :ok
@@ -177,6 +184,18 @@ defmodule CDPEx.Browser do
         # already closed). Don't close the handle's connection or send a stray
         # closeTarget — doing so could stop a live page owned by another browser.
         {:reply, {:error, :unknown_page}, state}
+    end
+  end
+
+  def handle_call({:authenticate, %Page{conn: conn, session_id: sid}, opts}, _from, state) do
+    # Start a per-page Fetch handler (linked to us, so its crash is isolated and it
+    # dies with the browser). It self-stops when the page's connection goes down.
+    fetch_opts =
+      [conn: conn, session_id: sid] ++ Keyword.take(opts, [:username, :password, :source])
+
+    case Fetch.start_link(fetch_opts) do
+      {:ok, _pid} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
