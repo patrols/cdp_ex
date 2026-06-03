@@ -533,6 +533,54 @@ defmodule CDPEx.IntegrationTest do
 
       assert :ok = Page.disable_request_interception(page)
     end
+
+    test "auto-disables Fetch when the interception owner process dies (anti-brick)", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      test = self()
+
+      # Enable interception from a separate process, then kill it WITHOUT disabling.
+      owner =
+        spawn(fn ->
+          send(test, {:enabled, Page.enable_request_interception(page)})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:enabled, :ok}, 5_000
+
+      ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^owner, _}, 5_000
+
+      # Once the browser has processed the owner's :DOWN (clearing the reservation),
+      # its handle_continue has already issued Fetch.disable — so the page is no longer
+      # bricked and a fresh navigation actually loads (requests aren't paused with no
+      # resolver). Pre-fix, this navigation would pause on the document and never load.
+      assert eventually(fn -> :sys.get_state(browser).intercepts == %{} end)
+
+      {:ok, _} = Page.navigate(page, fixture, wait_until: :load)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
+    test "interception and authenticate are mutually exclusive per page" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      # Authenticate first → interception is refused.
+      {:ok, p1} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(p1, "cdpex", "secret")
+      assert {:error, {:conflict, :authenticated}} = Page.enable_request_interception(p1)
+
+      # Intercept first → authenticate is refused (the reverse direction).
+      {:ok, p2} = CDPEx.new_page(browser)
+      assert :ok = Page.enable_request_interception(p2)
+      assert {:error, {:conflict, :intercepting}} = Page.authenticate(p2, "cdpex", "secret")
+      assert :ok = Page.disable_request_interception(p2)
+    end
   end
 
   describe "tracer bullet" do

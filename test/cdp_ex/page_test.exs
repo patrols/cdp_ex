@@ -1,9 +1,28 @@
+defmodule CDPEx.PageTest.StubBrowser do
+  @moduledoc false
+  # Minimal stand-in for CDPEx.Browser so the page-level interception tests exercise
+  # the caller-side subscribe/enable path. Answers the reservation hops with a
+  # configurable reply; the reservation *logic* (exclusion, monitor, auto-disable on
+  # owner death) is covered directly in CDPEx.BrowserTest.
+  use GenServer
+
+  def start_link(reserve_reply \\ :ok), do: GenServer.start_link(__MODULE__, reserve_reply)
+
+  @impl true
+  def init(reserve_reply), do: {:ok, reserve_reply}
+
+  @impl true
+  def handle_call({:reserve_interception, _page}, _from, reply), do: {:reply, reply, reply}
+  def handle_call({:release_interception, _page}, _from, reply), do: {:reply, :ok, reply}
+end
+
 defmodule CDPEx.PageTest do
   use ExUnit.Case, async: true
 
   alias CDPEx.Connection
   alias CDPEx.FakeCDP
   alias CDPEx.Page
+  alias CDPEx.PageTest.StubBrowser
 
   @network_methods ["Network.requestWillBeSent", "Network.responseReceived"]
 
@@ -16,6 +35,8 @@ defmodule CDPEx.PageTest do
     {:ok, conn} = Connection.start_link(server.url)
     assert_receive {:fake_cdp_connected, fake}, 2_000
 
+    {:ok, browser} = StubBrowser.start_link()
+
     on_exit(fn ->
       try do
         if Process.alive?(conn), do: Connection.close(conn)
@@ -25,7 +46,7 @@ defmodule CDPEx.PageTest do
     end)
 
     %{
-      page: %Page{browser: self(), conn: conn, target_id: "T", session_id: nil},
+      page: %Page{browser: browser, conn: conn, target_id: "T", session_id: nil},
       conn: conn,
       fake: fake
     }
