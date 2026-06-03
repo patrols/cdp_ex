@@ -52,4 +52,20 @@ defmodule CDPEx.FetchTest do
                Fetch.auth_decision(:any, full, "NEW", %{"source" => "Server"}, @creds)
     end
   end
+
+  describe "start_link/1" do
+    test "stops with {:error, :noproc} when the connection is already dead" do
+      # Trap exits: the handler is linked, and an init {:stop, :noproc} exits the
+      # child with that (abnormal) reason.
+      Process.flag(:trap_exit, true)
+
+      conn = spawn(fn -> :ok end)
+      ref = Process.monitor(conn)
+      assert_receive {:DOWN, ^ref, :process, ^conn, _}, 1_000
+
+      # A subscribe/enable against the dead conn would exit; init catches it so the
+      # caller gets a clean error instead of a raw exit reason.
+      assert {:error, :noproc} = Fetch.start_link(conn: conn, username: "u", password: "p")
+    end
+  end
 end

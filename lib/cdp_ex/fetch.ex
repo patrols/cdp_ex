@@ -35,13 +35,15 @@ defmodule CDPEx.Fetch do
   def init(opts) do
     conn = Keyword.fetch!(opts, :conn)
     session_id = Keyword.get(opts, :session_id)
+    Process.monitor(conn)
 
     # Subscribe BEFORE enabling so no paused request can slip through between the
-    # enable and the first event delivery; monitor the connection so we stop with
-    # the page.
+    # enable and the first event delivery. These are GenServer.calls; if `conn`
+    # already died (a rare race where the Browser processes authenticate/4 just
+    # ahead of the page-conn EXIT) they exit — catch it so start_link returns a
+    # clean {:error, :noproc} rather than a raw exit reason.
     Connection.subscribe(conn, "Fetch.requestPaused")
     Connection.subscribe(conn, "Fetch.authRequired")
-    Process.monitor(conn)
 
     case Connection.call(conn, "Fetch.enable", %{"handleAuthRequests" => true}, @call_timeout,
            session_id: session_id
@@ -59,6 +61,8 @@ defmodule CDPEx.Fetch do
       {:error, reason} ->
         {:stop, reason}
     end
+  catch
+    :exit, _ -> {:stop, :noproc}
   end
 
   @impl true
