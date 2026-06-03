@@ -48,7 +48,7 @@ defmodule CDPEx.FixtureServer do
   #     FINAL (post-redirect) 200, not the redirect hop.
   #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
   #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
-  #     wait_for_response/2 and wait_for_network_idle/2 paths.
+  #     wait_for_response/3 and wait_for_network_idle/2 paths.
   #   anything else serves the page.
   defp respond(request) do
     path = request_path(request)

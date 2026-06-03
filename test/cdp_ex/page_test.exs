@@ -814,6 +814,27 @@ defmodule CDPEx.PageTest do
       assert :ok = Task.await(task, 3_000)
     end
 
+    test "a completion for a request started before the call doesn't cause a false idle", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 5_000) end)
+      enable_network_idle(fake, conn, task.pid)
+
+      # A NEW request (seen after the call) is in flight.
+      send_network_event(fake, "Network.requestWillBeSent", "NEW")
+
+      # A request that started BEFORE the call completes during the wait. Its id was never
+      # tracked, so its terminal event must NOT clear NEW's slot — the wait stays busy.
+      send_network_event(fake, "Network.loadingFinished", "PRECALL")
+      refute Task.yield(task, 300), "false idle: a pre-call completion cleared a live request"
+
+      # NEW completes → genuinely idle.
+      send_network_event(fake, "Network.loadingFinished", "NEW")
+      assert :ok = Task.await(task, 3_000)
+    end
+
     test "max_inflight: 2 stays idle at the threshold, busies above it", %{
       page: page,
       conn: conn,

@@ -909,7 +909,7 @@ defmodule CDPEx.Page do
 
       try do
         # Idle from the call onward: arm immediately (0 in-flight <= max_inflight).
-        case await_network_idle(ctx, 0, arm_idle(idle_time)) do
+        case await_network_idle(ctx, %{}, arm_idle(idle_time)) do
           :idle -> :ok
           :timeout -> {:error, :timeout}
           {:down, reason} -> {:error, down_reason(reason)}
@@ -927,34 +927,38 @@ defmodule CDPEx.Page do
     end
   end
 
-  # Count in-flight requests (requestWillBeSent +1; loadingFinished/Failed −1, clamped at
-  # 0 — responseReceived is NOT counted). The idle timer is armed while the count is
-  # at/below the threshold and cancelled when it rises above; when the live timer fires,
-  # the network has stayed idle for the whole window. Scoped to this page's session
-  # (`^sid`); the connection dying or the overall deadline ends the wait.
+  # Track in-flight requests in a map keyed by request id, used as a set (`inflight`), not
+  # a counter: requestWillBeSent adds, loadingFinished/Failed removes; responseReceived is
+  # ignored. A set (vs a +1/−1 delta) is robust to the two ways CDP breaks a naive counter:
+  #   * a redirect re-emits requestWillBeSent for the SAME id (a no-op re-add) yet fires
+  #     only one terminal event, and
+  #   * a request that started BEFORE this call (its requestWillBeSent never seen) fires a
+  #     terminal event whose id isn't tracked (a no-op remove) — so it can't clear a live
+  #     request's slot and trigger a false idle.
+  # The idle timer is armed while the size is at/below the threshold and cancelled above;
+  # when the live timer fires, the network stayed idle the whole window. Scoped to this
+  # page's session (`^sid`); the connection dying or the overall deadline ends it. (A plain
+  # map, not MapSet, keeps Dialyzer happy with this unspecced recursive helper.)
   defp await_network_idle(
          %{conn: conn, sid: sid, max_inflight: max_inflight, mon: mon, deadline: deadline} = ctx,
          inflight,
          {timer, tag} = idle
        ) do
     receive do
-      {:cdp_event, ^conn, @request_will_be_sent, params, ^sid} ->
-        # A redirect hop re-emits requestWillBeSent for the SAME request (carrying a
-        # `redirectResponse`), but the chain still fires only ONE terminal
-        # loadingFinished/Failed — so count the original request once, never per hop, or
-        # the counter never returns to 0 and a redirecting request never reaches idle.
-        if Map.has_key?(params, "redirectResponse") do
-          await_network_idle(ctx, inflight, idle)
-        else
-          inflight = inflight + 1
-          idle = if inflight > max_inflight, do: disarm_idle(idle), else: idle
-          await_network_idle(ctx, inflight, idle)
-        end
+      {:cdp_event, ^conn, @request_will_be_sent, %{"requestId" => id}, ^sid} ->
+        inflight = Map.put(inflight, id, true)
+        idle = if map_size(inflight) > max_inflight, do: disarm_idle(idle), else: idle
+        await_network_idle(ctx, inflight, idle)
 
-      {:cdp_event, ^conn, method, _params, ^sid}
+      {:cdp_event, ^conn, method, %{"requestId" => id}, ^sid}
       when method in [@loading_finished, @loading_failed] ->
-        inflight = max(inflight - 1, 0)
-        idle = if inflight <= max_inflight and timer == nil, do: arm_idle(ctx.idle_time), else: idle
+        inflight = Map.delete(inflight, id)
+
+        idle =
+          if map_size(inflight) <= max_inflight and timer == nil,
+            do: arm_idle(ctx.idle_time),
+            else: idle
+
         await_network_idle(ctx, inflight, idle)
 
       {:cdp_event, ^conn, _method, _params, _other_sid} ->
