@@ -530,20 +530,29 @@ defmodule CDPEx.Page do
 
     # Subscribe BEFORE enabling so an event emitted the instant the domain turns on
     # can't slip through before the caller is registered (mirrors navigate/3's
-    # subscribe-before-trigger). Undo the subscription if the enable fails.
+    # subscribe-before-trigger).
     with :ok <- subscribe_each(page.conn, methods),
          :ok <- ensure_network(page, timeout) do
       :ok
     else
       {:error, _} = error ->
+        # Enable failed — undo the subscriptions we just added. This drops every
+        # method in `methods`; if the caller had independently subscribed to one of
+        # them beforehand, that subscription goes too (an accepted edge case —
+        # observe_network owns the lifecycle of the methods it is given).
         unsubscribe_each(page.conn, methods)
         error
     end
   end
 
   @doc """
-  Stops observing — unsubscribes the caller from the network `:events` (same
-  default as `observe_network/2`). Leaves the `Network` domain enabled.
+  Stops observing — unsubscribes the caller from the network `:events`. Leaves the
+  `Network` domain enabled.
+
+  Pass the **same** `:events` you gave `observe_network/2`. Both default to the
+  request + response lifecycle, but if you observed with a custom list you must
+  repeat it here — otherwise the original subscriptions are never removed and the
+  caller keeps receiving those events.
   """
   @spec stop_observing_network(t(), keyword()) :: :ok
   def stop_observing_network(%__MODULE__{} = page, opts \\ []) do

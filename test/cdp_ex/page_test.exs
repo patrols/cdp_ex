@@ -145,6 +145,40 @@ defmodule CDPEx.PageTest do
 
       assert {:error, :invalid_response_body} = Task.await(task)
     end
+
+    test "observe_network rolls back its subscriptions when Network.enable fails", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # Run from a long-lived helper (not a Task that exits) so the post-rollback
+      # subscription state reflects the rollback's unsubscribe — not the connection's
+      # automatic prune of a dead subscriber.
+      test = self()
+
+      observer =
+        spawn_link(fn ->
+          send(test, {:observe_result, Page.observe_network(page)})
+
+          receive do
+            :stop -> :ok
+          after
+            5_000 -> :ok
+          end
+        end)
+
+      for method <- @network_methods, do: wait_until_subscribed(conn, observer, method)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
+
+      assert_receive {:observe_result, {:error, {:cdp_error, "Network.enable", _}}}, 2_000
+
+      # The enable failed, so both subscriptions were rolled back.
+      for method <- @network_methods, do: refute(subscribed?(conn, observer, method))
+
+      send(observer, :stop)
+    end
   end
 
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent

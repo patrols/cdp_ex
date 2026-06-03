@@ -377,10 +377,12 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, body} = Page.response_body(page, request_id)
       assert body =~ "Hello"
 
-      # Stopping must actually halt delivery: drain buffered events, stop, navigate
-      # again, and confirm no further Network.* events reach us.
-      flush_cdp_events()
+      # Stopping must actually halt delivery. stop_observing_network/2 is a
+      # synchronous GenServer.call, so once it returns no new events are delivered —
+      # flush AFTER the stop (not before), or a late in-flight event from the first
+      # navigation could land post-flush and trip refute_receive.
       assert :ok = Page.stop_observing_network(page)
+      flush_cdp_events()
       {:ok, _} = Page.navigate(page, fixture <> "?after-stop")
       refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", _, _}, 1_000
     end
