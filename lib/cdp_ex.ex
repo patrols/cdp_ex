@@ -74,6 +74,7 @@ defmodule CDPEx do
           | {:unexpected_evaluate, term()}
           | {:invalid_args, term()}
           | {:invalid_source, term()}
+          | {:invalid_error_reason, term()}
           | {:invalid_transport, term()}
           | {:unsupported_transport, term()}
           | {:invalid_response_body, String.t()}
