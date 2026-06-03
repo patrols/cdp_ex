@@ -747,6 +747,98 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "telemetry" do
+    test "CDPEx.launch/1 emits a [:cdp_ex, :launch] span with a positive duration" do
+      attach_telemetry([[:cdp_ex, :launch, :stop]])
+
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      assert_receive {:telemetry, [:cdp_ex, :launch, :stop], %{duration: duration}, _meta}, 15_000
+      assert duration > 0
+    end
+
+    test "opening and closing a page emits [:cdp_ex, :page, :start] then :stop, no error" do
+      attach_telemetry([[:cdp_ex, :page, :start], [:cdp_ex, :page, :stop], [:cdp_ex, :error]])
+
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+
+      assert_receive {:telemetry, [:cdp_ex, :page, :start], %{system_time: _},
+                      %{target_id: tid, transport: :dedicated}},
+                     5_000
+
+      assert tid == page.target_id
+
+      :ok = CDPEx.close_page(browser, page)
+      assert_receive {:telemetry, [:cdp_ex, :page, :stop], _, %{transport: :dedicated}}, 5_000
+
+      # A clean close is not a fault — no [:cdp_ex, :error].
+      refute_received {:telemetry, [:cdp_ex, :error], _, _}
+    end
+
+    test "a :session page open/close emits :start/:stop with transport: :session", %{
+      fixture: fixture
+    } do
+      attach_telemetry([[:cdp_ex, :page, :start], [:cdp_ex, :page, :stop]])
+
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser, transport: :session)
+      assert_receive {:telemetry, [:cdp_ex, :page, :start], _, %{transport: :session}}, 5_000
+
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = CDPEx.close_page(browser, page)
+      assert_receive {:telemetry, [:cdp_ex, :page, :stop], _, %{transport: :session}}, 5_000
+    end
+
+    test "a page that dies with Chrome emits no [:cdp_ex, :page, :stop]" do
+      attach_telemetry([[:cdp_ex, :page, :stop]])
+
+      {:ok, browser} = CDPEx.launch()
+      {:ok, _page} = CDPEx.new_page(browser)
+
+      %{chrome: %{os_pid: os_pid}} = :sys.get_state(browser)
+      System.cmd("kill", ["-9", to_string(os_pid)])
+
+      # :stop fires only on an explicit close_page/2 — a page dying with Chrome does not
+      # emit it (consumers learn of the loss via [:cdp_ex, :error] instead).
+      refute_receive {:telemetry, [:cdp_ex, :page, :stop], _, _}, 2_000
+    end
+
+    test "killing Chrome emits a [:cdp_ex, :error] fault event" do
+      attach_telemetry([[:cdp_ex, :error]])
+
+      {:ok, browser} = CDPEx.launch()
+
+      %{chrome: %{os_pid: os_pid}} = :sys.get_state(browser)
+      System.cmd("kill", ["-9", to_string(os_pid)])
+
+      # Chrome's port exit and the browser-connection drop race; whichever the Browser
+      # processes first stops it, so assert a genuine fault event fires (any of the three
+      # contexts) rather than pinning the order.
+      assert_receive {:telemetry, [:cdp_ex, :error], %{system_time: _}, %{context: context}}, 10_000
+      assert context in [:chrome_exited, :browser_connection_down, :ws_closed]
+    end
+  end
+
+  # Attach a telemetry handler forwarding each event to the test process; detach on exit.
+  # A named (module) handler avoids :telemetry's local/anonymous-handler warning; the
+  # config (4th arg) carries the test pid.
+  defp attach_telemetry(events) do
+    id = "integration-telemetry-#{System.unique_integer([:positive])}"
+    :telemetry.attach_many(id, events, &__MODULE__.forward/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  @doc false
+  def forward(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
+  end
+
   # Teardown helper. The browser is linked to (and watches) the test process, so
   # by the time on_exit runs it may already be stopping on its own — racing this
   # call. Tolerate an exit from the stop so a teardown race never fails a test

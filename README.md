@@ -180,6 +180,8 @@ automatically, and a crashed browser is relaunched on demand.
 |---|---|
 | `navigate/3` | Go to a URL, waiting for `networkAlmostIdle` (configurable) |
 | `wait_for_selector/3` | Poll until a CSS selector matches |
+| `wait_for_response/3` | Block until a network response URL matches (fn / `Regex` / substring) |
+| `wait_for_network_idle/2` | Block until the network settles (Puppeteer "networkidle") |
 | `evaluate/3` | Run JS and return the value (`returnByValue`) |
 | `click/3` | Synthetic `.click()` on the first match |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
@@ -191,6 +193,30 @@ automatically, and a crashed browser is relaunched on demand.
 | `authenticate/4` | Answer a proxy / HTTP Basic auth challenge (call before `navigate/3`) |
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).
+
+## Telemetry
+
+CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
+handlers — attach your own to record them (emitting with nothing attached is a no-op).
+Events: `[:cdp_ex, :launch, …]` and `[:cdp_ex, :navigate, …]` spans,
+`[:cdp_ex, :page, :start | :stop]`, and `[:cdp_ex, :error]`. See
+[`CDPEx.Telemetry`](https://hexdocs.pm/cdp_ex/CDPEx.Telemetry.html) for the full
+taxonomy (measurements + metadata).
+
+```elixir
+:telemetry.attach(
+  "cdp-nav",
+  [:cdp_ex, :navigate, :stop],
+  fn _event, %{duration: d}, %{url: url, status: status}, _config ->
+    ms = System.convert_time_unit(d, :native, :millisecond)
+    IO.puts("#{url} -> #{inspect(status)} in #{ms}ms")
+  end,
+  nil
+)
+```
+
+`status` (and the post-redirect `final_url`) are `nil` unless the navigation used
+`response: true` — see `CDPEx.Page.navigate/3`.
 
 ## Development
 

@@ -22,6 +22,7 @@ defmodule CDPEx.Browser do
   alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.Protocol
+  alias CDPEx.Telemetry
 
   require Logger
 
@@ -201,6 +202,7 @@ defmodule CDPEx.Browser do
         # close the tab, but NEVER close that connection (other sessions use it).
         detach_session(state.browser_conn, sid)
         close_target(state.browser_conn, tid)
+        Telemetry.page(:stop, %{target_id: tid, transport: :session})
         {:reply, :ok, %{state | sessions: Map.delete(state.sessions, tid)}}
 
       _ ->
@@ -216,6 +218,7 @@ defmodule CDPEx.Browser do
         # since either may already be gone.
         close_target(state.browser_conn, tid)
         safe_close(conn)
+        Telemetry.page(:stop, %{target_id: tid, transport: :dedicated})
         {:reply, :ok, %{state | pages: Map.delete(state.pages, tid)}}
 
       _ ->
@@ -325,10 +328,12 @@ defmodule CDPEx.Browser do
   @impl true
   def handle_info({port, {:exit_status, status}}, %{chrome: %{port: port}} = state) do
     Logger.warning("[CDPEx.Browser] Chrome exited with status #{status}")
+    Telemetry.error(status, :chrome_exited)
     {:stop, {:chrome_exited, status}, state}
   end
 
   def handle_info({:EXIT, pid, reason}, %{browser_conn: pid} = state) do
+    Telemetry.error(reason, :browser_connection_down)
     {:stop, browser_down_reason(reason), state}
   end
 
@@ -473,6 +478,7 @@ defmodule CDPEx.Browser do
   defp reply_dedicated_page(state, opts) do
     case open_page(state, opts) do
       {:ok, page} ->
+        Telemetry.page(:start, %{target_id: page.target_id, transport: :dedicated})
         {:reply, {:ok, page}, %{state | pages: Map.put(state.pages, page.target_id, page.conn)}}
 
       {:error, reason} ->
@@ -483,6 +489,7 @@ defmodule CDPEx.Browser do
   defp reply_session_page(state, opts) do
     case open_session_page(state, opts) do
       {:ok, page} ->
+        Telemetry.page(:start, %{target_id: page.target_id, transport: :session})
         sessions = Map.put(state.sessions, page.target_id, page.session_id)
         {:reply, {:ok, page}, %{state | sessions: sessions}}
 

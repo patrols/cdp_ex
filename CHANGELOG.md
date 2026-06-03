@@ -10,6 +10,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page.navigate/3` accepts `response: true` to return `{:ok, page, %{status, url}}` — the main document's HTTP status and final (post-redirect) URL, correlated to the navigation by its `loaderId`. Lets callers detect a 403 wall / 404 / login-redirect instead of treating every navigation as success. Lazily enables the `Network` domain; returns `{:error, {:no_document_response, url}}` when no document response arrives (#31).
 - `CDPEx.Page.wait_for_response/3` blocks until a network response whose URL matches a function / `Regex` / substring arrives, returning the `Network.responseReceived` params (HTTP status + `requestId` for a follow-up `response_body/3`) — for an XHR/`fetch` kicked off by a `click/3` (#32).
 - `CDPEx.Page.wait_for_network_idle/2` blocks until the network is idle (≤ `:max_inflight` in-flight requests for `:idle_time` ms continuously) — the Puppeteer "networkidle" primitive for waiting out SPA hydration (#32).
+- `:telemetry` instrumentation — CDPEx emits launch + navigate spans, page open/close events, and error events (Chrome exit, browser-connection down, WebSocket close). Silent by default (no handlers attached); see `CDPEx.Telemetry` for the event taxonomy. Adds a `{:telemetry, "~> 1.2"}` dependency (#33).
 
 ### Breaking
 - `CDPEx.Connection.await_event/4` now returns `{:ok, params}` (the matched event's params) on a match, instead of a bare `:ok` (#32).

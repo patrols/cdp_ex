@@ -25,6 +25,9 @@ defmodule CDPEx do
         CDPEx.Page.html(page)
       end)
 
+  Observability is via `:telemetry` — see `CDPEx.Telemetry` for the event taxonomy
+  (launch / navigate spans, page open/close, and error events). Silent by default.
+
   > #### Status {: .info}
   >
   > Pages default to one WebSocket each (strong crash isolation); opt into
@@ -35,6 +38,7 @@ defmodule CDPEx do
 
   alias CDPEx.Browser
   alias CDPEx.Page
+  alias CDPEx.Telemetry
 
   @typedoc """
   The `reason` shapes that appear in `{:error, reason}` across CDPEx.
@@ -101,7 +105,9 @@ defmodule CDPEx do
   putting `CDPEx.Browser` under your own supervisor with a `:shutdown` timeout.
   """
   @spec launch(keyword()) :: GenServer.on_start()
-  def launch(opts \\ []), do: Browser.start_link(opts)
+  def launch(opts \\ []) do
+    Telemetry.span(:launch, %{}, fn -> {Browser.start_link(opts), %{}} end)
+  end
 
   @doc "Stops a browser started with `launch/1`, closing all pages and killing Chrome."
   @spec stop(pid()) :: :ok
