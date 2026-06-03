@@ -186,6 +186,8 @@ automatically, and a crashed browser is relaunched on demand.
 | `screenshot/2` | PNG bytes, or write to `:path` |
 | `observe_network/2` | Stream `Network` request/response events to the caller |
 | `response_body/3` | Fetch a response body by requestId (`Network.getResponseBody`) |
+| `enable_request_interception/2` | Pause matching requests for the caller to resolve |
+| `continue_request/3` / `fulfill_request/3` / `fail_request/3` | Resolve a paused request (proceed / synthetic response / fail) |
 | `authenticate/4` | Answer a proxy / HTTP Basic auth challenge (call before `navigate/3`) |
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).

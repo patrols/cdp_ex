@@ -21,6 +21,7 @@ defmodule CDPEx.Page do
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
     * **Network** — `observe_network/2`, `stop_observing_network/2`, `response_body/3`
+    * **Interception** — `enable_request_interception/2`, `disable_request_interception/2`, `continue_request/3`, `fulfill_request/3`, `fail_request/3`
     * **Auth** — `authenticate/4` (proxy / HTTP Basic challenges)
   """
 
@@ -37,6 +38,7 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
 
   @network_events ["Network.requestWillBeSent", "Network.responseReceived"]
+  @fetch_paused "Fetch.requestPaused"
 
   @enforce_keys [:browser, :conn, :target_id]
   defstruct [:browser, :conn, :target_id, :session_id]
@@ -630,6 +632,144 @@ defmodule CDPEx.Page do
   end
 
   @doc """
+  Enables request interception: pauses matching requests and delivers a
+  `Fetch.requestPaused` event to the calling process for each one. You must then
+  resolve **every** paused request with `continue_request/3`, `fulfill_request/3`,
+  or `fail_request/3` (keyed by its `"requestId"`) — an unresolved request stalls
+  the page.
+
+  Each pause arrives as `{:cdp_event, conn, "Fetch.requestPaused", params, session_id}`;
+  handle it in a `handle_info`. The caller is subscribed **before** the domain is
+  enabled, so no paused request is missed.
+
+  > #### The caller owns the lifecycle {: .warning}
+  >
+  > Nothing ties the enabled `Fetch` domain to the calling process. If the caller
+  > exits — or simply never calls `disable_request_interception/2` — `Fetch` stays
+  > enabled with no resolver and **every** subsequent request pauses forever: the
+  > page stalls permanently and can't even navigate away. Unlike a leaked
+  > `Network.enable`, a leaked `Fetch.enable` bricks the page. Drive interception
+  > from a long-lived process you control, and use that same process for `enable`,
+  > the pause handling, and `disable` (the subscription is keyed to its pid).
+
+  On a `:session`-transport page the caller receives **every** session's
+  `Fetch.requestPaused` events on the shared connection (subscriptions are keyed by
+  method, not session); match on the `session_id` element to filter to this page.
+
+  Mutually exclusive with `authenticate/4` on the same page — both drive the `Fetch`
+  domain. The conflict is **not enforced and fails silently**: enabling interception
+  on an authenticated page re-runs `Fetch.enable` without `handleAuthRequests`
+  (breaking auth) while the auth handler keeps racing the caller for each pause. Use
+  one or the other per page.
+
+  Options:
+    * `:patterns` — CDP `RequestPattern`s (default `[%{"urlPattern" => "*"}]`, all requests)
+    * `:timeout` — ms for the enable call (default 10_000)
+  """
+  @spec enable_request_interception(t(), keyword()) :: :ok | {:error, term()}
+  def enable_request_interception(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+    patterns = Keyword.get(opts, :patterns, [%{"urlPattern" => "*"}])
+
+    # Subscribe before enabling (mirrors observe_network/2); undo on enable failure.
+    with :ok <- subscribe_each(page.conn, [@fetch_paused]),
+         {:ok, _} <- do_call(page, "Fetch.enable", %{"patterns" => patterns}, timeout) do
+      :ok
+    else
+      {:error, _} = error ->
+        unsubscribe_each(page.conn, [@fetch_paused])
+        error
+    end
+  end
+
+  @doc """
+  Disables request interception — unsubscribes the caller from `Fetch.requestPaused`
+  and disables the `Fetch` domain. Resolve any still-paused requests first.
+
+  Call this from the **same process** that called `enable_request_interception/2`:
+  the unsubscribe is keyed to `self()`, so a disable from a different process leaves
+  the original subscriber still receiving (now-unresolvable) pauses.
+  """
+  @spec disable_request_interception(t(), keyword()) :: :ok | {:error, term()}
+  def disable_request_interception(%__MODULE__{} = page, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+    unsubscribe_each(page.conn, [@fetch_paused])
+    ok_call(page, "Fetch.disable", %{}, timeout)
+  end
+
+  @doc """
+  Lets a paused request proceed (`Fetch.continueRequest`), optionally rewriting it.
+
+  `:url`, `:method`, and `:headers` are **verbatim overrides, not merges**. In
+  particular `:headers` *replaces the entire request header set*, so passing it to
+  set one header drops everything Chrome would otherwise send (`User-Agent`,
+  `Accept`, `Cookie`, …). Omit `:headers` to leave the original request headers
+  intact (the same gotcha as Puppeteer's `continueRequest({headers})`).
+
+  Options (all optional): `:url`, `:method`, `:headers` (a name => value map or
+  keyword list), `:post_data` (a binary or iodata, base64-encoded for you), `:timeout`.
+  """
+  @spec continue_request(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def continue_request(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    params =
+      %{"requestId" => request_id}
+      |> put_present("url", Keyword.get(opts, :url))
+      |> put_present("method", Keyword.get(opts, :method))
+      |> put_present("headers", header_entries(Keyword.get(opts, :headers)))
+      |> put_present("postData", encode64(Keyword.get(opts, :post_data)))
+
+    ok_call(page, "Fetch.continueRequest", params, timeout)
+  end
+
+  @doc """
+  Answers a paused request with a synthetic response (`Fetch.fulfillRequest`) — the
+  page never hits the network for it.
+
+  Options: `:status` (response code, default 200), `:headers` (a name => value map or
+  keyword list), `:body` (a binary or iodata, base64-encoded for you), `:timeout`.
+  """
+  @spec fulfill_request(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def fulfill_request(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    params =
+      %{"requestId" => request_id, "responseCode" => Keyword.get(opts, :status, 200)}
+      |> put_present("responseHeaders", header_entries(Keyword.get(opts, :headers)))
+      |> put_present("body", encode64(Keyword.get(opts, :body)))
+
+    ok_call(page, "Fetch.fulfillRequest", params, timeout)
+  end
+
+  @doc """
+  Fails a paused request (`Fetch.failRequest`).
+
+  `:reason` (default `:failed`) is one of `:failed`, `:aborted`, `:timed_out`,
+  `:access_denied`, `:connection_closed`, `:connection_reset`, `:connection_refused`,
+  `:name_not_resolved`, `:internet_disconnected`, `:address_unreachable`,
+  `:blocked_by_client`, `:blocked_by_response`. An unknown value returns
+  `{:error, {:invalid_error_reason, value}}`.
+  """
+  @spec fail_request(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def fail_request(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+
+    case error_reason(Keyword.get(opts, :reason, :failed)) do
+      {:ok, reason} ->
+        ok_call(
+          page,
+          "Fetch.failRequest",
+          %{"requestId" => request_id, "errorReason" => reason},
+          timeout
+        )
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   Sets extra HTTP headers sent with every subsequent request on this page.
 
   `headers` is a map of header name => value; set them before navigating for
@@ -758,6 +898,53 @@ defmodule CDPEx.Page do
     :ok
   catch
     :exit, _ -> :ok
+  end
+
+  defp ok_call(page, method, params, timeout) do
+    case do_call(page, method, params, timeout) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  defp header_entries(nil), do: nil
+
+  # Accept a map or a keyword list (both are natural for headers); Enum.map handles
+  # either's {name, value} pairs. A genuinely-wrong shape still raises.
+  defp header_entries(headers) when is_map(headers) or is_list(headers) do
+    Enum.map(headers, fn {name, value} ->
+      %{"name" => to_string(name), "value" => to_string(value)}
+    end)
+  end
+
+  defp encode64(nil), do: nil
+  # Accept a binary or iodata — IO.iodata_to_binary/1 flattens either (and a
+  # genuinely-wrong type, e.g. an integer, still raises).
+  defp encode64(data), do: Base.encode64(IO.iodata_to_binary(data))
+
+  @error_reasons %{
+    failed: "Failed",
+    aborted: "Aborted",
+    timed_out: "TimedOut",
+    access_denied: "AccessDenied",
+    connection_closed: "ConnectionClosed",
+    connection_reset: "ConnectionReset",
+    connection_refused: "ConnectionRefused",
+    name_not_resolved: "NameNotResolved",
+    internet_disconnected: "InternetDisconnected",
+    address_unreachable: "AddressUnreachable",
+    blocked_by_client: "BlockedByClient",
+    blocked_by_response: "BlockedByResponse"
+  }
+
+  defp error_reason(reason) do
+    case Map.fetch(@error_reasons, reason) do
+      {:ok, cdp} -> {:ok, cdp}
+      :error -> {:error, {:invalid_error_reason, reason}}
+    end
   end
 
   # Page ops thread the page's session id (`nil` for a dedicated page) so the same
