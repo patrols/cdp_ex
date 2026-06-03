@@ -40,15 +40,31 @@ defmodule CDPEx.FixtureServer do
 
   @basic_auth "Basic " <> Base.encode64("cdpex:secret")
 
-  # /basic-auth gates on HTTP Basic credentials (cdpex:secret): without a valid
-  # Authorization header it answers 401 + WWW-Authenticate, so Chrome — and an armed
-  # CDPEx.Page.authenticate — receives an auth challenge. Any other path serves the page.
+  # Path routing:
+  #   /basic-auth — gates on HTTP Basic credentials (cdpex:secret): without a valid
+  #     Authorization header it answers 401 + WWW-Authenticate, so Chrome — and an armed
+  #     CDPEx.Page.authenticate — receives an auth challenge.
+  #   /redirect   — 302 to "/", so navigate(response: true) can prove it reports the
+  #     FINAL (post-redirect) 200, not the redirect hop.
+  #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
+  #   anything else serves the page.
   defp respond(request) do
-    if String.starts_with?(request_path(request), "/basic-auth") and not authorized?(request) do
-      body = ~s(<!doctype html><html><body><p id="status">401</p></body></html>)
-      http_response("401 Unauthorized", body, ["WWW-Authenticate: Basic realm=\"cdpex\""])
-    else
-      http_response("200 OK", render(request), [])
+    path = request_path(request)
+
+    cond do
+      String.starts_with?(path, "/basic-auth") and not authorized?(request) ->
+        body = ~s(<!doctype html><html><body><p id="status">401</p></body></html>)
+        http_response("401 Unauthorized", body, ["WWW-Authenticate: Basic realm=\"cdpex\""])
+
+      String.starts_with?(path, "/redirect") ->
+        http_response("302 Found", "", ["Location: /"])
+
+      String.starts_with?(path, "/missing") ->
+        body = ~s(<!doctype html><html><body><p id="status">404</p></body></html>)
+        http_response("404 Not Found", body, [])
+
+      true ->
+        http_response("200 OK", render(request), [])
     end
   end
 

@@ -187,6 +187,31 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "Hello"} = Page.text(page, "#greeting")
     end
 
+    test "navigate/3 response: true reports the post-redirect 200 and final URL", %{
+      page: page,
+      fixture: fixture
+    } do
+      # /redirect 302s to "/", so the reported response must be the FINAL landing
+      # (200 at the root URL), not the redirect hop — correlation is by loaderId.
+      assert {:ok, ^page, %{status: 200, url: url}} =
+               Page.navigate(page, fixture <> "redirect", response: true)
+
+      assert url == fixture
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
+    test "navigate/3 response: true surfaces a 404 (a clean signal vs a bare {:ok, page})", %{
+      page: page,
+      fixture: fixture
+    } do
+      # A 404 still loads (it has a body), so the default navigate/3 can't tell it
+      # apart from a 200. response: true exposes the status.
+      missing = fixture <> "missing"
+
+      assert {:ok, ^page, %{status: 404, url: ^missing}} =
+               Page.navigate(page, missing, response: true)
+    end
+
     test "evaluate returns a JS value", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert {:ok, "CDPEx Fixture"} = Page.evaluate(page, "document.title")

@@ -39,6 +39,8 @@ defmodule CDPEx.Page do
 
   @network_events ["Network.requestWillBeSent", "Network.responseReceived"]
   @fetch_paused "Fetch.requestPaused"
+  @lifecycle_method "Page.lifecycleEvent"
+  @response_method "Network.responseReceived"
 
   @enforce_keys [:browser, :conn, :target_id]
   defstruct [:browser, :conn, :target_id, :session_id]
@@ -57,15 +59,37 @@ defmodule CDPEx.Page do
   best-effort: if it times out, navigation still returns `{:ok, page}` (the page
   may simply be slow); a hard navigation error returns `{:error, _}`.
 
+  ## Capturing the document response
+
+  Pass `response: true` to also get the main document's HTTP outcome — a clean signal
+  for "did I land on the real page", versus a 403 wall / 404 / redirect-to-login that
+  all otherwise look like success:
+
+      {:ok, page, %{status: 200, url: final_url}} = Page.navigate(page, url, response: true)
+
+  `status` is the HTTP status and `url` is the **final** URL after redirects,
+  correlated to *this* navigation's main document by its `loaderId` (not "the first
+  `Document` response seen"). This lazily enables the `Network` domain. If no main
+  document response arrives before the wait ends, it returns
+  `{:error, {:no_document_response, url}}` (e.g. a connection that never produced an
+  HTTP response — though those usually surface earlier as `{:navigate, _}`).
+
   Options:
     * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`
+    * `:response` — `true` to also return `%{status, url}` (default `false`)
     * `:timeout` — ms (default 30_000)
   """
-  @spec navigate(t(), String.t(), keyword()) :: {:ok, t()} | {:error, term()}
+  @spec navigate(t(), String.t(), keyword()) ::
+          {:ok, t()} | {:ok, t(), map()} | {:error, term()}
   def navigate(%__MODULE__{} = page, url, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @navigate_timeout)
     wait_until = Keyword.get(opts, :wait_until, :network_almost_idle)
-    navigate_with_wait(page, url, wait_until, timeout)
+
+    if Keyword.get(opts, :response, false) do
+      navigate_capturing_response(page, url, wait_until, timeout)
+    else
+      navigate_with_wait(page, url, wait_until, timeout)
+    end
   end
 
   defp navigate_with_wait(page, url, :none, timeout) do
@@ -103,6 +127,122 @@ defmodule CDPEx.Page do
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  # Like navigate_with_wait/4 but also captures the main-document Network.responseReceived
+  # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
+  # stays untouched. Requires the Network domain; enables it lazily.
+  defp navigate_capturing_response(page, url, wait_until, timeout) do
+    methods = [@lifecycle_method, @response_method]
+
+    with :ok <- ensure_network(page, timeout),
+         :ok <- subscribe_each(page.conn, methods) do
+      Enum.each(methods, &drain_events(page.conn, &1))
+      ref = Process.monitor(page.conn)
+      deadline = System.monotonic_time(:millisecond) + timeout
+
+      try do
+        capture_after_navigate(page, url, wait_until, timeout, ref, deadline)
+      after
+        Process.demonitor(ref, [:flush])
+        unsubscribe_each(page.conn, methods)
+        Enum.each(methods, &drain_events(page.conn, &1))
+      end
+    end
+  end
+
+  defp capture_after_navigate(page, url, wait_until, timeout, ref, deadline) do
+    case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+      {:ok, %{"errorText" => error}} ->
+        {:error, {:navigate, error}}
+
+      {:ok, result} ->
+        milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
+
+        case await_capture(
+               page,
+               milestone,
+               ref,
+               deadline,
+               result["loaderId"],
+               result["frameId"],
+               nil
+             ) do
+          {:ok, nil} -> {:error, {:no_document_response, url}}
+          {:ok, resp} -> {:ok, page, resp}
+          {:down, reason} -> {:error, down_reason(reason)}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # Await the readiness milestone (or, with :none, the document response itself) while
+  # accumulating the main-document response — scoped to this page's session (`^sid`),
+  # correlated by loaderId (+ frameId when present) and type "Document".
+  defp await_capture(
+         %__MODULE__{conn: conn, session_id: sid} = page,
+         milestone,
+         ref,
+         deadline,
+         lid,
+         fid,
+         captured
+       ) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:cdp_event, ^conn, @response_method, params, ^sid} ->
+        captured =
+          if document_response?(params, lid, fid), do: response_summary(params), else: captured
+
+        if is_nil(milestone) and not is_nil(captured) do
+          {:ok, captured}
+        else
+          await_capture(page, milestone, ref, deadline, lid, fid, captured)
+        end
+
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^milestone}, ^sid}
+      when not is_nil(milestone) ->
+        {:ok, captured}
+
+      {:cdp_event, ^conn, _method, _params, _other_sid} ->
+        # Another session's event, or this session's non-milestone lifecycle — ignore.
+        await_capture(page, milestone, ref, deadline, lid, fid, captured)
+
+      {:DOWN, ^ref, :process, ^conn, reason} ->
+        {:down, reason}
+    after
+      remaining ->
+        # Best-effort: return whatever document response we captured (nil → the caller
+        # maps it to {:error, {:no_document_response, _}}). Prefer a just-landed :DOWN.
+        receive do
+          {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
+        after
+          0 -> {:ok, captured}
+        end
+    end
+  end
+
+  defp document_response?(%{"type" => "Document", "loaderId" => loader} = params, lid, fid) do
+    loader == lid and Map.get(params, "frameId", fid) == fid
+  end
+
+  defp document_response?(_params, _lid, _fid), do: false
+
+  defp response_summary(params) do
+    response = params["response"] || %{}
+    %{status: response["status"], url: response["url"]}
+  end
+
+  # Generic mailbox drain for one cdp method (parallel to drain_lifecycle/1).
+  defp drain_events(conn, method) do
+    receive do
+      {:cdp_event, ^conn, ^method, _params, _sid} -> drain_events(conn, method)
+    after
+      0 -> :ok
     end
   end
 

@@ -77,6 +77,7 @@ defmodule CDPEx do
           | {:timeout, :await_event}
           | {:conflict, :authenticated | :intercepting}
           | {:navigate, String.t()}
+          | {:no_document_response, String.t()}
           | {:selector_not_found, String.t()}
           | {:evaluate_exception, term()}
           | {:unexpected_evaluate, term()}

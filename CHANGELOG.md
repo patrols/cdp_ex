@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.Page.navigate/3` accepts `response: true` to return `{:ok, page, %{status, url}}` — the main document's HTTP status and final (post-redirect) URL, correlated to the navigation by its `loaderId`. Lets callers detect a 403 wall / 404 / login-redirect instead of treating every navigation as success. Lazily enables the `Network` domain; returns `{:error, {:no_document_response, url}}` when no document response arrives (#31).
+
 ### Breaking
 - Request interception ↔ `authenticate/4` mutual exclusion is now **enforced** (it previously failed silently — returning a misleading `:ok` while breaking the page, since both drive the `Fetch` domain). On the same page: `enable_request_interception/2` returns `{:error, {:conflict, :authenticated}}` when the page is authenticated, `authenticate/4` returns `{:error, {:conflict, :intercepting}}` when it's intercepting, and re-enabling interception returns `{:error, :already_intercepting}` (was `:ok`). Interception also now rejects a `:session`-transport page with `{:error, {:unsupported_transport, :session}}`, matching `authenticate/4`. Update any caller that only matched `:ok` on these paths (#30).
 
