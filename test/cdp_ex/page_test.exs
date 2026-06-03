@@ -1,9 +1,36 @@
+defmodule CDPEx.PageTest.StubBrowser do
+  @moduledoc false
+  # Minimal stand-in for CDPEx.Browser so the page-level interception tests exercise
+  # the caller-side subscribe/enable path. Answers the reservation hops with a
+  # configurable reply; the reservation *logic* (exclusion, monitor, auto-disable on
+  # owner death) is covered directly in CDPEx.BrowserTest.
+  use GenServer
+
+  def start_link(reserve_reply \\ :ok, notify \\ nil),
+    do: GenServer.start_link(__MODULE__, {reserve_reply, notify})
+
+  @impl true
+  def init(state), do: {:ok, state}
+
+  @impl true
+  def handle_call({:reserve_interception, page}, _from, {reply, notify} = state) do
+    if notify, do: send(notify, {:stub_reserve, page})
+    {:reply, reply, state}
+  end
+
+  def handle_call({:release_interception, page}, _from, {_reply, notify} = state) do
+    if notify, do: send(notify, {:stub_release, page})
+    {:reply, :ok, state}
+  end
+end
+
 defmodule CDPEx.PageTest do
   use ExUnit.Case, async: true
 
   alias CDPEx.Connection
   alias CDPEx.FakeCDP
   alias CDPEx.Page
+  alias CDPEx.PageTest.StubBrowser
 
   @network_methods ["Network.requestWillBeSent", "Network.responseReceived"]
 
@@ -16,6 +43,8 @@ defmodule CDPEx.PageTest do
     {:ok, conn} = Connection.start_link(server.url)
     assert_receive {:fake_cdp_connected, fake}, 2_000
 
+    {:ok, browser} = StubBrowser.start_link(:ok, self())
+
     on_exit(fn ->
       try do
         if Process.alive?(conn), do: Connection.close(conn)
@@ -25,7 +54,7 @@ defmodule CDPEx.PageTest do
     end)
 
     %{
-      page: %Page{browser: self(), conn: conn, target_id: "T", session_id: nil},
+      page: %Page{browser: browser, conn: conn, target_id: "T", session_id: nil},
       conn: conn,
       fake: fake
     }
@@ -376,8 +405,17 @@ defmodule CDPEx.PageTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Fetch.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
 
+      # The rollback issues a best-effort Fetch.disable (covers the timed-out-but-
+      # enabled brick edge); answer it so the rollback completes promptly.
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => did, "method" => "Fetch.disable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{did},"result":{}}))
+
       assert_receive {:enable_result, {:error, {:cdp_error, "Fetch.enable", _}}}, 2_000
       refute subscribed?(conn, observer, "Fetch.requestPaused")
+
+      # The reservation must be released on the rollback path, else the page stays
+      # locked in the browser's intercepts map after a failed enable.
+      assert_receive {:stub_release, _}, 2_000
 
       send(observer, :stop)
     end

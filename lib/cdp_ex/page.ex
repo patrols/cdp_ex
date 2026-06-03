@@ -252,8 +252,10 @@ defmodule CDPEx.Page do
 
   Only `:dedicated` pages (the `new_page/2` default) are supported; a `:session`
   page returns `{:error, {:unsupported_transport, :session}}`. A page that isn't one
-  of this browser's open pages returns `{:error, :unknown_page}`, and a page that is
-  already authenticated returns `{:error, :already_authenticated}`.
+  of this browser's open pages returns `{:error, :unknown_page}`, a page that is
+  already authenticated returns `{:error, :already_authenticated}`, and a page that
+  already has request interception enabled returns `{:error, {:conflict, :intercepting}}`
+  (auth and interception both drive the `Fetch` domain — use one per page).
 
   The bad-credentials loop guard keys on the request id, so a single request that
   must answer **both** a proxy and an origin challenge isn't supported — the second
@@ -642,25 +644,25 @@ defmodule CDPEx.Page do
   handle it in a `handle_info`. The caller is subscribed **before** the domain is
   enabled, so no paused request is missed.
 
-  > #### The caller owns the lifecycle {: .warning}
+  > #### Drive interception from one long-lived process {: .info}
   >
-  > Nothing ties the enabled `Fetch` domain to the calling process. If the caller
-  > exits — or simply never calls `disable_request_interception/2` — `Fetch` stays
-  > enabled with no resolver and **every** subsequent request pauses forever: the
-  > page stalls permanently and can't even navigate away. Unlike a leaked
-  > `Network.enable`, a leaked `Fetch.enable` bricks the page. Drive interception
-  > from a long-lived process you control, and use that same process for `enable`,
-  > the pause handling, and `disable` (the subscription is keyed to its pid).
+  > Use the **same process** for `enable_request_interception/2`, the pause handling,
+  > and `disable_request_interception/2` — the subscription is keyed to its pid. That
+  > process is registered with the browser as the interception owner: if it exits
+  > without disabling, the browser auto-`Fetch.disable`s the page, so a crashed or
+  > forgetful caller can't leave it bricked (every request paused with no resolver).
+  > While interception is enabled you must still resolve every pause.
 
-  On a `:session`-transport page the caller receives **every** session's
-  `Fetch.requestPaused` events on the shared connection (subscriptions are keyed by
-  method, not session); match on the `session_id` element to filter to this page.
+  Only `:dedicated` pages are supported; a `:session`-transport page is rejected with
+  `{:error, {:unsupported_transport, :session}}` (mirroring `authenticate/4`) — its
+  subscription and owner-monitor would outlive `close_page`, which never stops the
+  shared browser connection.
 
   Mutually exclusive with `authenticate/4` on the same page — both drive the `Fetch`
-  domain. The conflict is **not enforced and fails silently**: enabling interception
-  on an authenticated page re-runs `Fetch.enable` without `handleAuthRequests`
-  (breaking auth) while the auth handler keeps racing the caller for each pause. Use
-  one or the other per page.
+  domain. The conflict is **enforced**: enabling interception on an authenticated page
+  returns `{:error, {:conflict, :authenticated}}`, and `authenticate/4` on an
+  intercepting page returns `{:error, {:conflict, :intercepting}}`. Re-enabling
+  interception on a page that already has it returns `{:error, :already_intercepting}`.
 
   Options:
     * `:patterns` — CDP `RequestPattern`s (default `[%{"urlPattern" => "*"}]`, all requests)
@@ -671,13 +673,27 @@ defmodule CDPEx.Page do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
     patterns = Keyword.get(opts, :patterns, [%{"urlPattern" => "*"}])
 
-    # Subscribe before enabling (mirrors observe_network/2); undo on enable failure.
-    with :ok <- subscribe_each(page.conn, [@fetch_paused]),
-         {:ok, _} <- do_call(page, "Fetch.enable", %{"patterns" => patterns}, timeout) do
-      :ok
-    else
+    # Reserve the page's Fetch domain with the browser first: it enforces mutual
+    # exclusion with authenticate/4 and monitors this process so the domain is
+    # auto-disabled if we die. Only on a successful reservation do we subscribe +
+    # enable (on this process, mirroring observe_network/2); roll both back on failure.
+    case Browser.reserve_interception(page.browser, page) do
+      :ok ->
+        with :ok <- subscribe_each(page.conn, [@fetch_paused]),
+             {:ok, _} <- do_call(page, "Fetch.enable", %{"patterns" => patterns}, timeout) do
+          :ok
+        else
+          {:error, _} = error ->
+            unsubscribe_each(page.conn, [@fetch_paused])
+            # A client-side timeout can mean Chrome actually enabled Fetch; disable it
+            # best-effort before releasing, so a timed-out enable can't leave the page
+            # bricked (Fetch on, no resolver) with the reservation/monitor already gone.
+            _ = ok_call(page, "Fetch.disable", %{}, timeout)
+            Browser.release_interception(page.browser, page)
+            error
+        end
+
       {:error, _} = error ->
-        unsubscribe_each(page.conn, [@fetch_paused])
         error
     end
   end
@@ -694,7 +710,11 @@ defmodule CDPEx.Page do
   def disable_request_interception(%__MODULE__{} = page, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
     unsubscribe_each(page.conn, [@fetch_paused])
-    ok_call(page, "Fetch.disable", %{}, timeout)
+    result = ok_call(page, "Fetch.disable", %{}, timeout)
+    # Release the browser-side reservation (demonitors this process) regardless of the
+    # disable result, so the eventual owner :DOWN can't re-issue a spurious disable.
+    Browser.release_interception(page.browser, page)
+    result
   end
 
   @doc """

@@ -1,6 +1,8 @@
 defmodule CDPEx.FetchTest do
   use ExUnit.Case, async: true
 
+  alias CDPEx.Connection
+  alias CDPEx.FakeCDP
   alias CDPEx.Fetch
 
   @creds [username: "u", password: "p"]
@@ -54,18 +56,56 @@ defmodule CDPEx.FetchTest do
   end
 
   describe "start_link/1" do
-    test "stops with {:error, :noproc} when the connection is already dead" do
-      # Trap exits: the handler is linked, and an init {:stop, :noproc} exits the
-      # child with that (abnormal) reason.
+    test "arms asynchronously, then signals {:arm_failed, _, :noproc} on a dead connection" do
+      # The handler is linked. init/1 now returns fast and defers arming to
+      # handle_continue/2, so start_link succeeds; the dead-conn subscribe/enable then
+      # fails there and is reported to the browser (here, the test process) as
+      # {:arm_failed, pid, :noproc} before the handler stops quietly (:normal).
       Process.flag(:trap_exit, true)
 
       conn = spawn(fn -> :ok end)
       ref = Process.monitor(conn)
       assert_receive {:DOWN, ^ref, :process, ^conn, _}, 1_000
 
-      # A subscribe/enable against the dead conn would exit; init catches it so the
-      # caller gets a clean error instead of a raw exit reason.
-      assert {:error, :noproc} = Fetch.start_link(conn: conn, username: "u", password: "p")
+      assert {:ok, pid} =
+               Fetch.start_link(conn: conn, browser: self(), username: "u", password: "p")
+
+      assert_receive {:arm_failed, ^pid, :noproc}, 1_000
+    end
+  end
+
+  describe "handle_continue(:arm) (FakeCDP)" do
+    setup do
+      {:ok, server} = FakeCDP.start()
+      {:ok, conn} = Connection.start_link(server.url)
+      assert_receive {:fake_cdp_connected, fake}, 2_000
+
+      on_exit(fn ->
+        try do
+          # Closing the conn makes the (conn-monitoring) Fetch handler self-stop.
+          if Process.alive?(conn), do: Connection.close(conn)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      %{conn: conn, fake: fake}
+    end
+
+    test "subscribes, enables Fetch with handleAuthRequests, then signals {:armed}", %{
+      conn: conn,
+      fake: fake
+    } do
+      {:ok, pid} = Fetch.start_link(conn: conn, browser: self(), username: "u", password: "p")
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.enable", "params" => params}},
+                     2_000
+
+      assert params["handleAuthRequests"] == true
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+
+      assert_receive {:armed, ^pid}, 2_000
     end
   end
 end

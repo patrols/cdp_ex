@@ -20,10 +20,12 @@ defmodule CDPEx.Fetch do
 
   alias CDPEx.Connection
 
+  require Logger
+
   @call_timeout 10_000
   @max_tracked_challenges 1024
 
-  defstruct [:conn, :session_id, :username, :password, :source, attempts: %{}]
+  defstruct [:conn, :session_id, :username, :password, :source, :browser, attempts: %{}]
 
   @type t :: %__MODULE__{}
 
@@ -34,35 +36,55 @@ defmodule CDPEx.Fetch do
   @impl true
   def init(opts) do
     conn = Keyword.fetch!(opts, :conn)
-    session_id = Keyword.get(opts, :session_id)
+    # Monitor the page connection so we stop when it goes down. The blocking arm
+    # work (subscribe ×2 + Fetch.enable, up to @call_timeout) is deferred to
+    # handle_continue/2 so that init/1 — and therefore the Browser GenServer that
+    # called start_link — returns immediately instead of blocking the whole enable.
     Process.monitor(conn)
 
+    {:ok,
+     %__MODULE__{
+       conn: conn,
+       session_id: Keyword.get(opts, :session_id),
+       username: Keyword.fetch!(opts, :username),
+       password: Keyword.fetch!(opts, :password),
+       source: Keyword.get(opts, :source, :any),
+       browser: Keyword.fetch!(opts, :browser)
+     }, {:continue, :arm}}
+  end
+
+  @impl true
+  def handle_continue(:arm, state) do
     # Subscribe BEFORE enabling so no paused request can slip through between the
     # enable and the first event delivery. These are GenServer.calls; if `conn`
-    # already died (a rare race where the Browser processes authenticate/4 just
-    # ahead of the page-conn EXIT) they exit — catch it so start_link returns a
-    # clean {:error, :noproc} rather than a raw exit reason.
-    Connection.subscribe(conn, "Fetch.requestPaused")
-    Connection.subscribe(conn, "Fetch.authRequired")
+    # already died (a rare race where the Browser processed authenticate/4 just
+    # ahead of the page-conn EXIT) they exit — catch it and stop with :noproc.
+    Connection.subscribe(state.conn, "Fetch.requestPaused")
+    Connection.subscribe(state.conn, "Fetch.authRequired")
 
-    case Connection.call(conn, "Fetch.enable", %{"handleAuthRequests" => true}, @call_timeout,
-           session_id: session_id
+    case Connection.call(state.conn, "Fetch.enable", %{"handleAuthRequests" => true}, @call_timeout,
+           session_id: state.session_id
          ) do
       {:ok, _} ->
-        {:ok,
-         %__MODULE__{
-           conn: conn,
-           session_id: session_id,
-           username: Keyword.fetch!(opts, :username),
-           password: Keyword.fetch!(opts, :password),
-           source: Keyword.get(opts, :source, :any)
-         }}
+        # Signal the Browser we're armed so it can reply :ok to the still-waiting
+        # authenticate/4 caller — preserving the "armed before return" guarantee
+        # while leaving the Browser free to process other messages during the enable.
+        send(state.browser, {:armed, self()})
+        {:noreply, state}
 
       {:error, reason} ->
-        {:stop, reason}
+        # A real CDP error on a live conn — worth a log line, since the caller only
+        # gets {:error, _}. Tell the Browser to fail the waiting authenticate/4 caller,
+        # then stop quietly (:normal — no GenServer crash report for a benign failure).
+        Logger.warning("[CDPEx.Fetch] arming failed: #{inspect(reason)}")
+        send(state.browser, {:arm_failed, self(), reason})
+        {:stop, :normal, state}
     end
   catch
-    :exit, _ -> {:stop, :noproc}
+    :exit, _ ->
+      # The page connection died mid-arm (a close/authenticate race) — benign, no log.
+      send(state.browser, {:arm_failed, self(), :noproc})
+      {:stop, :normal, state}
   end
 
   @impl true
