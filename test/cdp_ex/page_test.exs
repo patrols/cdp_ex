@@ -67,6 +67,20 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "authenticate/4 source validation" do
+    # A bad :source short-circuits before Browser.authenticate, so these never touch
+    # the (test-process) browser — they exercise the boundary guard in isolation.
+    test "rejects an unknown :source atom", %{page: page} do
+      assert {:error, {:invalid_source, :bogus}} =
+               Page.authenticate(page, "u", "p", source: :bogus)
+    end
+
+    test "rejects a stringly-typed :source", %{page: page} do
+      assert {:error, {:invalid_source, "proxy"}} =
+               Page.authenticate(page, "u", "p", source: "proxy")
+    end
+  end
+
   # Poll until `pid` is registered as a Page.lifecycleEvent subscriber on `conn`, so
   # events sent afterward are guaranteed to be delivered to it (no send/subscribe race).
   defp wait_until_subscribed(conn, pid, retries \\ 100) do

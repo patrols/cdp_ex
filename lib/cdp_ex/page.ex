@@ -20,8 +20,10 @@ defmodule CDPEx.Page do
     * **Capture** — `screenshot/2`, `pdf/2`
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
+    * **Auth** — `authenticate/4` (proxy / HTTP Basic challenges)
   """
 
+  alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.Protocol
 
@@ -230,6 +232,46 @@ defmodule CDPEx.Page do
       {:error, _} = error -> error
     end
   end
+
+  @doc """
+  Arms HTTP/proxy authentication on this page with `username`/`password`.
+
+  Headless Chrome launched with `--proxy-server=host:port` can't send proxy
+  credentials, so an authenticated proxy rejects the connection
+  (`net::ERR_INVALID_AUTH_CREDENTIALS`). Call this after `new_page/2` and
+  **before** `navigate/3`: it answers the proxy (or HTTP Basic) auth challenge with
+  the given credentials. It also covers Basic-auth-gated origins.
+
+  This enables the CDP `Fetch` domain for the page, which pauses (and
+  auto-continues) **every** request — measurable overhead on heavy pages.
+
+  Only `:dedicated` pages (the `new_page/2` default) are supported; a `:session`
+  page returns `{:error, {:unsupported_transport, :session}}`. A page that isn't one
+  of this browser's open pages returns `{:error, :unknown_page}`, and a page that is
+  already authenticated returns `{:error, :already_authenticated}`.
+
+  The bad-credentials loop guard keys on the request id, so a single request that
+  must answer **both** a proxy and an origin challenge isn't supported — the second
+  challenge is cancelled (Puppeteer-parity).
+
+  Options:
+    * `:source` — which challenges to answer: `:any` (default), `:proxy`, `:server`.
+      An unknown value returns `{:error, {:invalid_source, value}}`.
+  """
+  @spec authenticate(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def authenticate(%__MODULE__{} = page, username, password, opts \\ [])
+      when is_binary(username) and is_binary(password) do
+    case validate_source(Keyword.get(opts, :source, :any)) do
+      :ok ->
+        Browser.authenticate(page.browser, page, [username: username, password: password] ++ opts)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp validate_source(source) when source in [:any, :proxy, :server], do: :ok
+  defp validate_source(source), do: {:error, {:invalid_source, source}}
 
   @doc """
   Evaluates a JavaScript expression and returns its value (`returnByValue`).

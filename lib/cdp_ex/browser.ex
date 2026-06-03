@@ -19,6 +19,7 @@ defmodule CDPEx.Browser do
 
   alias CDPEx.Chrome
   alias CDPEx.Connection
+  alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.Protocol
 
@@ -27,7 +28,17 @@ defmodule CDPEx.Browser do
   @create_timeout 10_000
   @bootstrap_timeout 10_000
 
-  defstruct [:chrome, :browser_conn, :host, :port, :opts, :parent, pages: %{}, sessions: %{}]
+  defstruct [
+    :chrome,
+    :browser_conn,
+    :host,
+    :port,
+    :opts,
+    :parent,
+    pages: %{},
+    sessions: %{},
+    auths: %{}
+  ]
 
   @type t :: %__MODULE__{}
 
@@ -70,6 +81,14 @@ defmodule CDPEx.Browser do
   """
   @spec close_page(GenServer.server(), Page.t()) :: :ok | {:error, :unknown_page}
   def close_page(browser, %Page{} = page), do: GenServer.call(browser, {:close_page, page}, 15_000)
+
+  # Internal hop for `CDPEx.Page.authenticate/4`, which owns the input contract
+  # (credential guards + `:source` validation). Not part of the public API.
+  @doc false
+  @spec authenticate(GenServer.server(), Page.t(), keyword()) :: :ok | {:error, term()}
+  def authenticate(browser, %Page{} = page, opts) do
+    GenServer.call(browser, {:authenticate, page, opts}, 15_000)
+  end
 
   @doc "Stops the browser, closing all pages and killing Chrome."
   @spec stop(GenServer.server()) :: :ok
@@ -180,6 +199,48 @@ defmodule CDPEx.Browser do
     end
   end
 
+  def handle_call({:authenticate, %Page{session_id: sid}, _opts}, _from, state)
+      when not is_nil(sid) do
+    # A :session page rides the shared browser connection, which `close_page/2`
+    # never stops — so the Fetch handler (which self-stops when its connection goes
+    # down) would linger for the life of the browser. Restrict authenticate/4 to
+    # :dedicated pages rather than leak a handler per authenticated session page.
+    {:reply, {:error, {:unsupported_transport, :session}}, state}
+  end
+
+  def handle_call(
+        {:authenticate, %Page{conn: conn, target_id: tid, session_id: sid}, opts},
+        _from,
+        state
+      ) do
+    # Dedicated page only (the :session clause above already returned).
+    cond do
+      Map.get(state.pages, tid) != conn ->
+        # Not one of this browser's live pages (a handle from another browser, or an
+        # already-closed one) — mirror close_page/2 instead of arming a handler on a
+        # foreign connection and linking it to us.
+        {:reply, {:error, :unknown_page}, state}
+
+      Map.has_key?(state.auths, tid) ->
+        # Already authenticated: a second handler would double every
+        # continueRequest/continueWithAuth, and its teardown would disable Fetch for
+        # the survivor. Reject the re-arm.
+        {:reply, {:error, :already_authenticated}, state}
+
+      true ->
+        # Start a per-page Fetch handler linked to us (crash-isolated, dies with the
+        # browser). It self-stops when the page's connection goes down; we drop the
+        # auths entry when it exits (see the {:EXIT, …} clause).
+        fetch_opts =
+          [conn: conn, session_id: sid] ++ Keyword.take(opts, [:username, :password, :source])
+
+        case Fetch.start_link(fetch_opts) do
+          {:ok, pid} -> {:reply, :ok, %{state | auths: Map.put(state.auths, tid, pid)}}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
   @impl true
   def handle_info({port, {:exit_status, status}}, %{chrome: %{port: port}} = state) do
     Logger.warning("[CDPEx.Browser] Chrome exited with status #{status}")
@@ -198,9 +259,10 @@ defmodule CDPEx.Browser do
   end
 
   def handle_info({:EXIT, pid, _reason}, state) do
-    # A page connection exited (closed or crashed). Drop it; the page handle the
-    # caller holds becomes stale and its next op returns {:error, :noproc}.
-    {:noreply, %{state | pages: drop_conn(state.pages, pid)}}
+    # A page connection or a Fetch auth handler exited (closed or crashed). Drop it
+    # from both maps: a stale page handle's next op returns {:error, :noproc}, and
+    # clearing the auths entry lets the page be authenticated again.
+    {:noreply, %{state | pages: drop_conn(state.pages, pid), auths: drop_value(state.auths, pid)}}
   end
 
   def handle_info(
@@ -379,6 +441,10 @@ defmodule CDPEx.Browser do
 
   defp drop_conn(pages, pid) do
     pages |> Enum.reject(fn {_tid, conn} -> conn == pid end) |> Map.new()
+  end
+
+  defp drop_value(map, pid) do
+    map |> Enum.reject(fn {_k, v} -> v == pid end) |> Map.new()
   end
 
   # Close a CDP target on the browser connection, ignoring failures (the browser
