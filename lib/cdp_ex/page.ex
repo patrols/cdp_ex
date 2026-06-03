@@ -246,7 +246,13 @@ defmodule CDPEx.Page do
   auto-continues) **every** request — measurable overhead on heavy pages.
 
   Only `:dedicated` pages (the `new_page/2` default) are supported; a `:session`
-  page returns `{:error, {:unsupported_transport, :session}}`.
+  page returns `{:error, {:unsupported_transport, :session}}`. A page that isn't one
+  of this browser's open pages returns `{:error, :unknown_page}`, and a page that is
+  already authenticated returns `{:error, :already_authenticated}`.
+
+  The bad-credentials loop guard keys on the request id, so a single request that
+  must answer **both** a proxy and an origin challenge isn't supported — the second
+  challenge is cancelled (Puppeteer-parity).
 
   Options:
     * `:source` — which challenges to answer: `:any` (default), `:proxy`, `:server`.

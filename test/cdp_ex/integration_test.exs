@@ -10,6 +10,7 @@ defmodule CDPEx.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.FixtureServer
   alias CDPEx.Page
@@ -392,6 +393,32 @@ defmodule CDPEx.IntegrationTest do
       # connection and must stop with it — no lingering GenServer, no armed Fetch.
       :ok = CDPEx.close_page(browser, page)
       assert_receive {:DOWN, ^ref, :process, ^handler, _reason}, 5_000
+    end
+
+    test "refuses to authenticate a page belonging to another browser" do
+      {:ok, browser_a} = CDPEx.launch()
+      {:ok, browser_b} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser_a) end)
+      on_exit(fn -> stop_quietly(browser_b) end)
+
+      {:ok, page_b} = CDPEx.new_page(browser_b)
+
+      # Arming B's page through A must refuse (mirrors close_page) rather than link a
+      # handler to a connection A doesn't own.
+      assert {:error, :unknown_page} =
+               Browser.authenticate(browser_a, page_b, username: "u", password: "p")
+
+      # B's page is unharmed and still authenticates on its own browser.
+      assert :ok = Page.authenticate(page_b, "cdpex", "secret")
+    end
+
+    test "refuses a second authenticate on an already-armed page" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+      assert {:error, :already_authenticated} = Page.authenticate(page, "cdpex", "secret")
     end
   end
 
