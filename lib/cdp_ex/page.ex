@@ -653,9 +653,10 @@ defmodule CDPEx.Page do
   > forgetful caller can't leave it bricked (every request paused with no resolver).
   > While interception is enabled you must still resolve every pause.
 
-  On a `:session`-transport page the caller receives **every** session's
-  `Fetch.requestPaused` events on the shared connection (subscriptions are keyed by
-  method, not session); match on the `session_id` element to filter to this page.
+  Only `:dedicated` pages are supported; a `:session`-transport page is rejected with
+  `{:error, {:unsupported_transport, :session}}` (mirroring `authenticate/4`) — its
+  subscription and owner-monitor would outlive `close_page`, which never stops the
+  shared browser connection.
 
   Mutually exclusive with `authenticate/4` on the same page — both drive the `Fetch`
   domain. The conflict is **enforced**: enabling interception on an authenticated page
@@ -684,6 +685,10 @@ defmodule CDPEx.Page do
         else
           {:error, _} = error ->
             unsubscribe_each(page.conn, [@fetch_paused])
+            # A client-side timeout can mean Chrome actually enabled Fetch; disable it
+            # best-effort before releasing, so a timed-out enable can't leave the page
+            # bricked (Fetch on, no resolver) with the reservation/monitor already gone.
+            _ = ok_call(page, "Fetch.disable", %{}, timeout)
             Browser.release_interception(page.browser, page)
             error
         end

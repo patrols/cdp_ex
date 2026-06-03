@@ -405,6 +405,11 @@ defmodule CDPEx.PageTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Fetch.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
 
+      # The rollback issues a best-effort Fetch.disable (covers the timed-out-but-
+      # enabled brick edge); answer it so the rollback completes promptly.
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => did, "method" => "Fetch.disable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{did},"result":{}}))
+
       assert_receive {:enable_result, {:error, {:cdp_error, "Fetch.enable", _}}}, 2_000
       refute subscribed?(conn, observer, "Fetch.requestPaused")
 
