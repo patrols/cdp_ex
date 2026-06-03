@@ -22,6 +22,7 @@ defmodule CDPEx.Connection do
   use GenServer, restart: :temporary
 
   alias CDPEx.Protocol
+  alias CDPEx.Telemetry
   alias Mint.HTTP
   alias Mint.WebSocket
 
@@ -312,6 +313,7 @@ defmodule CDPEx.Connection do
   # `{:ws_closed, reason}` shape — terminate/2 is the single place that fails the
   # pending callers. The owning Browser sees the reason via its monitor.
   defp stop_ws_closed(state, reason) do
+    Telemetry.error(reason, :ws_closed)
     {:stop, {:shutdown, {:ws_closed, reason}}, state}
   end
 

@@ -50,6 +50,8 @@ defmodule CDPEx.MixProject do
       {:mint_web_socket, "~> 1.0"},
       # JSON-RPC encoding/decoding for the CDP protocol.
       {:jason, "~> 1.4"},
+      # Observability: CDPEx emits :telemetry span/execute events (attaches no handlers).
+      {:telemetry, "~> 1.2"},
 
       # Dev/test tooling
       {:ex_doc, "~> 0.34", only: [:dev, :test], runtime: false},

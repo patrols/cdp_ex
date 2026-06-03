@@ -28,6 +28,7 @@ defmodule CDPEx.Page do
   alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.Protocol
+  alias CDPEx.Telemetry
 
   require Logger
 
@@ -98,6 +99,13 @@ defmodule CDPEx.Page do
           | {:ok, t(), %{status: non_neg_integer(), url: String.t()}}
           | {:error, term()}
   def navigate(%__MODULE__{} = page, url, opts \\ []) do
+    Telemetry.span(:navigate, %{url: url}, fn ->
+      result = do_navigate(page, url, opts)
+      {result, navigate_metadata(url, result)}
+    end)
+  end
+
+  defp do_navigate(page, url, opts) do
     timeout = Keyword.get(opts, :timeout, @navigate_timeout)
     wait_until = Keyword.get(opts, :wait_until, :network_almost_idle)
 
@@ -107,6 +115,16 @@ defmodule CDPEx.Page do
       navigate_with_wait(page, url, wait_until, timeout)
     end
   end
+
+  # Span :stop metadata for navigate/3: status + final_url are populated only on the
+  # response:true 3-tuple; an error tuple flows through :stop with :error set.
+  defp navigate_metadata(url, {:ok, _page, resp}),
+    do: %{url: url, status: resp.status, final_url: resp.url}
+
+  defp navigate_metadata(url, {:ok, _page}), do: %{url: url, status: nil, final_url: nil}
+
+  defp navigate_metadata(url, {:error, reason}),
+    do: %{url: url, status: nil, final_url: nil, error: reason}
 
   defp navigate_with_wait(page, url, :none, timeout) do
     case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
