@@ -289,13 +289,20 @@ defmodule CDPEx.Chrome do
   # On a missing file, carry the captured stderr excerpt so a launch that never
   # exposed the endpoint is self-diagnosing instead of a context-free atom.
   defp read_devtools_file(dir, buffer) do
-    with {:ok, contents} <- File.read(Path.join(dir, "DevToolsActivePort")),
-         [port_str, browser_path | _] <- String.split(String.trim(contents), "\n"),
+    case File.read(Path.join(dir, "DevToolsActivePort")) do
+      {:ok, contents} -> parse_devtools_contents(contents)
+      {:error, _} -> {:error, {:debug_url_not_found, String.slice(buffer, 0, 500)}}
+    end
+  end
+
+  # Carry the malformed contents excerpt (mirroring debug_url_not_found's stderr
+  # excerpt) so a bad DevToolsActivePort is self-diagnosing, not a context-free atom.
+  defp parse_devtools_contents(contents) do
+    with [port_str, browser_path | _] <- String.split(String.trim(contents), "\n"),
          {port_num, _} <- Integer.parse(port_str) do
       {:ok, "ws://127.0.0.1:#{port_num}#{browser_path}"}
     else
-      {:error, _} -> {:error, {:debug_url_not_found, String.slice(buffer, 0, 500)}}
-      _ -> {:error, :devtools_file_malformed}
+      _ -> {:error, {:devtools_file_malformed, String.slice(contents, 0, 500)}}
     end
   end
 

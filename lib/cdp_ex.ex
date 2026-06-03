@@ -36,6 +36,48 @@ defmodule CDPEx do
   alias CDPEx.Browser
   alias CDPEx.Page
 
+  @typedoc """
+  The `reason` shapes that appear in `{:error, reason}` across CDPEx.
+
+  Error reasons are part of the public contract — pattern-match the **tagged kinds**
+  (`{:cdp_error, …}`, `{:timeout, …}`, `{:ws_closed, …}`, …); their payloads (a CDP
+  method, an exit status, a stderr/contents excerpt) are open and may gain detail. A
+  few reasons are bare, context-free atoms — a self-describing terminal state, the
+  way GenServer uses `:noproc`.
+
+  Best-effort documentation, **not** a closed/exhaustive type: kinds such as
+  `{:cdp_error, method, payload}` wrap arbitrary CDP data.
+
+  Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
+  `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
+  while the high-level `CDPEx.Page` `wait_for_*` functions and `CDPEx.Pool.checkout/2`
+  return a bare `:timeout` ("the awaited condition didn't happen in time").
+  """
+  @type error_reason ::
+          :noproc
+          | :timeout
+          | :unknown_page
+          | :already_authenticated
+          | :invalid_response_body
+          | :invalid_pdf_data
+          | {:timeout, term()}
+          | {:ws_closed, term()}
+          | {:ws_decode, term()}
+          | {:cdp_error, String.t(), term()}
+          | {:navigate, String.t()}
+          | {:selector_not_found, String.t()}
+          | {:evaluate_exception, term()}
+          | {:unexpected_evaluate, term()}
+          | {:invalid_args, term()}
+          | {:invalid_source, term()}
+          | {:invalid_transport, term()}
+          | {:unsupported_transport, term()}
+          | {:write_failed, term()}
+          | {:chrome_not_found, term()}
+          | {:chrome_exited, integer(), String.t()}
+          | {:debug_url_not_found, String.t()}
+          | {:devtools_file_malformed, String.t()}
+
   @doc """
   Launches a headless Chrome browser and returns its process pid.
 

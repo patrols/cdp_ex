@@ -174,6 +174,32 @@ defmodule CDPEx.ChromeTest do
       refute File.dir?(handle.user_data_dir)
     end
 
+    @tag :tmp_dir
+    test "returns {:devtools_file_malformed, excerpt} for an unparseable DevToolsActivePort", %{
+      tmp_dir: tmp_dir
+    } do
+      # Writes a DevToolsActivePort that exists but doesn't parse (no port/path
+      # lines) — the terminal reason carries the contents excerpt, not a bare atom.
+      stub =
+        write_stub!(tmp_dir, "stub-malformed-port", """
+        #!/bin/sh
+        dir=""
+        for arg in "$@"; do
+          case "$arg" in
+            --user-data-dir=*) dir="${arg#--user-data-dir=}" ;;
+          esac
+        done
+        echo 'not-a-valid-devtools-port-file' > "$dir/DevToolsActivePort"
+        echo 'stub-chrome: wrote a malformed port file' 1>&2
+        sleep 30
+        """)
+
+      assert {:error, {:devtools_file_malformed, excerpt}} =
+               Chrome.launch(chrome_binary: stub, launch_timeout: 2_000)
+
+      assert excerpt =~ "not-a-valid-devtools-port-file"
+    end
+
     @tag :integration
     test "launches real Chrome, exposes a browser ws URL, and cleans up on stop" do
       assert {:ok, handle} = Chrome.launch([])
