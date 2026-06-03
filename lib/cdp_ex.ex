@@ -106,8 +106,17 @@ defmodule CDPEx do
   """
   @spec launch(keyword()) :: GenServer.on_start()
   def launch(opts \\ []) do
-    Telemetry.span(:launch, %{}, fn -> {Browser.start_link(opts), %{}} end)
+    Telemetry.span(:launch, %{}, fn ->
+      result = Browser.start_link(opts)
+      {result, launch_metadata(result)}
+    end)
   end
+
+  # Launch span :stop metadata: empty on success, {error: reason} on failure — so a
+  # consumer can tell a failed launch from a successful one (mirrors navigate's span).
+  defp launch_metadata({:ok, _pid}), do: %{}
+  defp launch_metadata({:error, reason}), do: %{error: reason}
+  defp launch_metadata(:ignore), do: %{error: :ignore}
 
   @doc "Stops a browser started with `launch/1`, closing all pages and killing Chrome."
   @spec stop(pid()) :: :ok

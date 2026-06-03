@@ -18,8 +18,9 @@ defmodule CDPEx.Telemetry do
 
   A [span](`:telemetry.span/3`) around `CDPEx.launch/1` — Chrome spawn, WebSocket
   connect, and bootstrap. `:stop` carries the span `:duration` (in `:native` time
-  units). A launch that returns `{:error, reason}` still completes through `:stop`
-  (the browser never started); only a raised exception emits `:exception`.
+  units); its metadata is `%{}` on success or `%{error: reason}` when the launch
+  failed. A failed launch still completes through `:stop` (the browser never started);
+  only a raised exception emits `:exception`.
 
   ### `[:cdp_ex, :navigate, :start | :stop | :exception]`
 
@@ -85,10 +86,8 @@ defmodule CDPEx.Telemetry do
   @type span_name :: :launch | :navigate
 
   @doc false
-  @spec span(span_name(), :telemetry.event_metadata(), span_fun) :: result
-        when result: var,
-             span_fun: (-> {result, :telemetry.event_metadata()}
-                           | {result, :telemetry.event_measurements(), :telemetry.event_metadata()})
+  @spec span(span_name(), :telemetry.event_metadata(), (-> {result, map()})) :: result
+        when result: var
   def span(name, start_metadata, fun) when name in [:launch, :navigate] do
     :telemetry.span([:cdp_ex, name], start_metadata, fun)
   end

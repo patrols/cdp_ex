@@ -1,5 +1,8 @@
 defmodule CDPEx.TelemetryTest do
-  use ExUnit.Case, async: true
+  # NOT async: :telemetry handlers are VM-global, so an async run would let this module's
+  # handler receive [:cdp_ex, :navigate, ...] events from other concurrent tests (e.g.
+  # PageTest navigating the same URL), making assert_receive/refute_received nondeterministic.
+  use ExUnit.Case, async: false
 
   alias CDPEx.Connection
   alias CDPEx.FakeCDP
