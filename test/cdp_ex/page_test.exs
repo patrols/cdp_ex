@@ -6,14 +6,22 @@ defmodule CDPEx.PageTest.StubBrowser do
   # owner death) is covered directly in CDPEx.BrowserTest.
   use GenServer
 
-  def start_link(reserve_reply \\ :ok), do: GenServer.start_link(__MODULE__, reserve_reply)
+  def start_link(reserve_reply \\ :ok, notify \\ nil),
+    do: GenServer.start_link(__MODULE__, {reserve_reply, notify})
 
   @impl true
-  def init(reserve_reply), do: {:ok, reserve_reply}
+  def init(state), do: {:ok, state}
 
   @impl true
-  def handle_call({:reserve_interception, _page}, _from, reply), do: {:reply, reply, reply}
-  def handle_call({:release_interception, _page}, _from, reply), do: {:reply, :ok, reply}
+  def handle_call({:reserve_interception, page}, _from, {reply, notify} = state) do
+    if notify, do: send(notify, {:stub_reserve, page})
+    {:reply, reply, state}
+  end
+
+  def handle_call({:release_interception, page}, _from, {_reply, notify} = state) do
+    if notify, do: send(notify, {:stub_release, page})
+    {:reply, :ok, state}
+  end
 end
 
 defmodule CDPEx.PageTest do
@@ -35,7 +43,7 @@ defmodule CDPEx.PageTest do
     {:ok, conn} = Connection.start_link(server.url)
     assert_receive {:fake_cdp_connected, fake}, 2_000
 
-    {:ok, browser} = StubBrowser.start_link()
+    {:ok, browser} = StubBrowser.start_link(:ok, self())
 
     on_exit(fn ->
       try do
@@ -399,6 +407,10 @@ defmodule CDPEx.PageTest do
 
       assert_receive {:enable_result, {:error, {:cdp_error, "Fetch.enable", _}}}, 2_000
       refute subscribed?(conn, observer, "Fetch.requestPaused")
+
+      # The reservation must be released on the rollback path, else the page stays
+      # locked in the browser's intercepts map after a failed enable.
+      assert_receive {:stub_release, _}, 2_000
 
       send(observer, :stop)
     end

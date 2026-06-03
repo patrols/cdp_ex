@@ -46,9 +46,8 @@ defmodule CDPEx do
   The only bare, context-free reasons are `:noproc`, the high-level `:timeout`,
   `:unknown_page`, `:already_authenticated`, and `:already_intercepting` —
   self-describing control-flow outcomes with no payload to carry, the way GenServer
-  uses `:noproc`. Validation
-  failures that *do* have offending data to surface are tagged instead
-  (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
+  uses `:noproc`. Validation failures that *do* have offending data to surface are
+  tagged instead (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
   `{:invalid_screenshot_data, excerpt}`).
 
   Only part of this union is machine-checked: `t:CDPEx.Connection.call_error/0` and

@@ -556,14 +556,15 @@ defmodule CDPEx.IntegrationTest do
       Process.exit(owner, :kill)
       assert_receive {:DOWN, ^ref, :process, ^owner, _}, 5_000
 
-      # Once the browser has processed the owner's :DOWN (clearing the reservation),
-      # its handle_continue has already issued Fetch.disable — so the page is no longer
-      # bricked and a fresh navigation actually loads (requests aren't paused with no
-      # resolver). Pre-fix, this navigation would pause on the document and never load.
-      assert eventually(fn -> :sys.get_state(browser).intercepts == %{} end)
-
-      {:ok, _} = Page.navigate(page, fixture, wait_until: :load)
-      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+      # The browser monitors the owner and Fetch.disables the page (off-process) when
+      # it dies. Poll a fresh navigation until it actually renders: while Fetch is
+      # still enabled the document stays paused and a short-timeout navigate returns
+      # best-effort without loading, so the selector text stays absent; once the
+      # async disable lands the page loads. Pre-fix it would never recover.
+      assert eventually(fn ->
+               Page.navigate(page, fixture, wait_until: :load, timeout: 1_000)
+               match?({:ok, "Hello"}, Page.text(page, "#greeting"))
+             end)
     end
 
     test "interception and authenticate are mutually exclusive per page" do

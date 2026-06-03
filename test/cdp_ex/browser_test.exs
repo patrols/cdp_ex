@@ -141,13 +141,31 @@ defmodule CDPEx.BrowserTest do
                Browser.handle_call({:release_interception, page}, {self(), make_ref()}, state)
     end
 
-    test "an owner :DOWN drops the entry and disables Fetch on its connection" do
-      conn = self()
+    test "an owner :DOWN drops the reservation (the Fetch.disable runs off-process)" do
+      # A dead conn makes the fire-and-forget disable Task resolve to :noproc silently;
+      # the actual disable is verified end-to-end by the integration suite.
+      conn = spawn(fn -> :ok end)
       ref = make_ref()
       state = %Browser{pages: %{"T1" => conn}, intercepts: %{"T1" => {self(), ref}}}
 
-      assert {:noreply, %Browser{intercepts: %{}}, {:continue, {:disable_fetch, ^conn}}} =
+      assert {:noreply, %Browser{intercepts: %{}}} =
                Browser.handle_info({:DOWN, ref, :process, self(), :killed}, state)
+    end
+
+    test "an owner :DOWN for an already-closed page drops the reservation without crashing" do
+      ref = make_ref()
+      state = %Browser{pages: %{}, intercepts: %{"T1" => {self(), ref}}}
+
+      assert {:noreply, %Browser{intercepts: %{}}} =
+               Browser.handle_info({:DOWN, ref, :process, self(), :killed}, state)
+    end
+
+    test "release of a page with no reservation is an idempotent :ok" do
+      page = %Page{browser: self(), conn: self(), target_id: "T_GONE"}
+      state = %Browser{intercepts: %{}}
+
+      assert {:reply, :ok, ^state} =
+               Browser.handle_call({:release_interception, page}, {self(), make_ref()}, state)
     end
 
     test "an owner :DOWN for an unknown ref is ignored" do
@@ -211,6 +229,18 @@ defmodule CDPEx.BrowserTest do
       assert new_state.pending_auth == %{}
       {_pid, tag} = from
       assert_receive {^tag, {:error, :boom}}
+    end
+
+    test "{:armed} for an unknown pid is a no-op (late or duplicate signal)" do
+      state = %Browser{pending_auth: %{}}
+      assert {:noreply, ^state} = Browser.handle_info({:armed, spawn(fn -> :ok end)}, state)
+    end
+
+    test "{:arm_failed} for an unknown pid is a no-op" do
+      state = %Browser{pending_auth: %{}}
+
+      assert {:noreply, ^state} =
+               Browser.handle_info({:arm_failed, spawn(fn -> :ok end), :boom}, state)
     end
   end
 end

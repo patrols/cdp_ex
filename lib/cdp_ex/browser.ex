@@ -100,13 +100,21 @@ defmodule CDPEx.Browser do
   @doc false
   @spec reserve_interception(GenServer.server(), Page.t()) :: :ok | {:error, term()}
   def reserve_interception(browser, %Page{} = page) do
-    GenServer.call(browser, {:reserve_interception, page})
+    GenServer.call(browser, {:reserve_interception, page}, 15_000)
+  catch
+    # A stalled or dead Browser must not crash the caller's interception-owner process
+    # with a raw exit — surface it as an error like the other page ops do.
+    :exit, _ -> {:error, :noproc}
   end
 
   @doc false
   @spec release_interception(GenServer.server(), Page.t()) :: :ok
   def release_interception(browser, %Page{} = page) do
-    GenServer.call(browser, {:release_interception, page})
+    GenServer.call(browser, {:release_interception, page}, 15_000)
+  catch
+    # Best-effort: if the Browser is gone or stalled there's nothing to release, and a
+    # raw exit must not blow up the caller's disable path.
+    :exit, _ -> :ok
   end
 
   @doc "Stops the browser, closing all pages and killing Chrome."
@@ -391,31 +399,52 @@ defmodule CDPEx.Browser do
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     # An interception owner died without disabling. Drop its reservation and disable
-    # Fetch on that page's connection (off the hot path, via handle_continue) so the
-    # page isn't left bricked with no resolver. Unknown ref → a stale monitor; ignore.
+    # Fetch on that page's connection so the page isn't left bricked with no resolver.
+    # The disable runs OFF the Browser process (a hung page conn must not stall every
+    # other page — the same responsiveness #36 protects for auth). Unknown ref → a
+    # stale monitor; ignore.
     case pop_intercept_by_ref(state.intercepts, ref) do
       {nil, _} ->
         {:noreply, state}
 
       {tid, intercepts} ->
-        state = %{state | intercepts: intercepts}
-
         case Map.get(state.pages, tid) do
-          nil -> {:noreply, state}
-          conn -> {:noreply, state, {:continue, {:disable_fetch, conn}}}
+          # Page already closed: its Fetch domain went with it, nothing to disable.
+          nil -> :ok
+          conn -> disable_fetch_async(conn)
         end
+
+        {:noreply, %{state | intercepts: intercepts}}
     end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  @impl true
-  def handle_continue({:disable_fetch, conn}, state) do
-    # Best-effort Fetch.disable for a dead interception owner. Connection.call
-    # tolerates a dead conn (returns {:error, _} instead of exiting), so this can't
-    # crash the Browser.
-    _ = Connection.call(conn, "Fetch.disable", %{}, @create_timeout)
-    {:noreply, state}
+  # Best-effort Fetch.disable for a dead interception owner, on a throwaway process so
+  # an unresponsive page connection can't block the Browser GenServer. Connection.call
+  # tolerates a dead conn (returns {:error, _} rather than exiting); a genuine failure
+  # on a live conn is logged since it can leave the page intercepted.
+  defp disable_fetch_async(conn) do
+    _ =
+      Task.start(fn ->
+        case Connection.call(conn, "Fetch.disable", %{}, @create_timeout) do
+          {:ok, _} ->
+            :ok
+
+          {:error, :noproc} ->
+            :ok
+
+          {:error, {:ws_closed, _}} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "[CDPEx.Browser] Fetch.disable after interception owner death returned #{inspect(reason)}; the page may remain intercepted"
+            )
+        end
+      end)
+
+    :ok
   end
 
   @impl true

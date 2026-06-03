@@ -252,8 +252,10 @@ defmodule CDPEx.Page do
 
   Only `:dedicated` pages (the `new_page/2` default) are supported; a `:session`
   page returns `{:error, {:unsupported_transport, :session}}`. A page that isn't one
-  of this browser's open pages returns `{:error, :unknown_page}`, and a page that is
-  already authenticated returns `{:error, :already_authenticated}`.
+  of this browser's open pages returns `{:error, :unknown_page}`, a page that is
+  already authenticated returns `{:error, :already_authenticated}`, and a page that
+  already has request interception enabled returns `{:error, {:conflict, :intercepting}}`
+  (auth and interception both drive the `Fetch` domain — use one per page).
 
   The bad-credentials loop guard keys on the request id, so a single request that
   must answer **both** a proxy and an origin challenge isn't supported — the second

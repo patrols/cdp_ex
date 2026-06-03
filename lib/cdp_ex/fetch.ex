@@ -20,6 +20,8 @@ defmodule CDPEx.Fetch do
 
   alias CDPEx.Connection
 
+  require Logger
+
   @call_timeout 10_000
   @max_tracked_challenges 1024
 
@@ -71,15 +73,16 @@ defmodule CDPEx.Fetch do
         {:noreply, state}
 
       {:error, reason} ->
-        # Arming failed (e.g. a CDP error). Tell the Browser so it fails the waiting
-        # authenticate/4 caller, then stop quietly (:normal — a benign arm failure
-        # shouldn't emit a GenServer crash report).
+        # A real CDP error on a live conn — worth a log line, since the caller only
+        # gets {:error, _}. Tell the Browser to fail the waiting authenticate/4 caller,
+        # then stop quietly (:normal — no GenServer crash report for a benign failure).
+        Logger.warning("[CDPEx.Fetch] arming failed: #{inspect(reason)}")
         send(state.browser, {:arm_failed, self(), reason})
         {:stop, :normal, state}
     end
   catch
     :exit, _ ->
-      # The page connection died mid-arm (a close/authenticate race) — same quiet path.
+      # The page connection died mid-arm (a close/authenticate race) — benign, no log.
       send(state.browser, {:arm_failed, self(), :noproc})
       {:stop, :normal, state}
   end

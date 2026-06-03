@@ -6,12 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- `CDPEx.Page` request interception no longer bricks the page when its owner dies: `CDPEx.Browser` now monitors the process that called `enable_request_interception/2` and auto-`Fetch.disable`s the page if that process exits without disabling — a crashed or forgetful caller can't leave every request paused with no resolver (#30).
-- `CDPEx.Page.authenticate/4` no longer blocks the `CDPEx.Browser` GenServer for the duration of `Fetch.enable`: the per-page Fetch handler now arms asynchronously and signals readiness, so the browser keeps serving other pages while a page authenticates. `authenticate/4` still returns only once interception is armed, preserving the "armed before `navigate/3`" guarantee (#36).
+### Breaking
+- Request interception ↔ `authenticate/4` mutual exclusion is now **enforced** (it previously failed silently — returning a misleading `:ok` while breaking the page, since both drive the `Fetch` domain). On the same page: `enable_request_interception/2` returns `{:error, {:conflict, :authenticated}}` when the page is authenticated, `authenticate/4` returns `{:error, {:conflict, :intercepting}}` when it's intercepting, and re-enabling interception returns `{:error, :already_intercepting}` (was `:ok`). Interception also now rejects a `:session`-transport page with `{:error, {:unsupported_transport, :session}}`, matching `authenticate/4`. Update any caller that only matched `:ok` on these paths (#30).
 
-### Changed
-- Request interception and `authenticate/4` are now **mutually exclusive per page**, enforced rather than failing silently (both drive the `Fetch` domain): enabling interception on an authenticated page returns `{:error, {:conflict, :authenticated}}`, `authenticate/4` on an intercepting page returns `{:error, {:conflict, :intercepting}}`, and re-enabling interception returns `{:error, :already_intercepting}`. Interception now also rejects a `:session`-transport page with `{:error, {:unsupported_transport, :session}}`, matching `authenticate/4` (#30).
+### Fixed
+- `CDPEx.Page` request interception no longer bricks the page when its owner dies: `CDPEx.Browser` now monitors the process that called `enable_request_interception/2` and auto-`Fetch.disable`s the page (off the Browser process, so a hung connection can't stall other pages) if that process exits without disabling — a crashed or forgetful caller can't leave every request paused with no resolver (#30).
+- `CDPEx.Page.authenticate/4` no longer blocks the `CDPEx.Browser` GenServer for the duration of `Fetch.enable`: the per-page Fetch handler now arms asynchronously and signals readiness, so the browser keeps serving other pages while a page authenticates. `authenticate/4` still returns only once interception is armed, preserving the "armed before `navigate/3`" guarantee (#36).
 
 ## [0.3.0] - 2026-06-03
 
