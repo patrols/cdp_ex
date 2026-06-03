@@ -443,6 +443,22 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "screenshot/2" do
+    test "reports an undecodable base64 payload, carrying the offending data", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.screenshot(page) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Page.captureScreenshot"}},
+                     2_000
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"data":"!!!not base64!!!"}}))
+
+      assert {:error, {:invalid_screenshot_data, "!!!not base64!!!"}} = Task.await(task)
+    end
+  end
+
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent
   # afterward are guaranteed to be delivered to it (no send/subscribe race).
   defp wait_until_subscribed(conn, pid, method \\ "Page.lifecycleEvent", retries \\ 100) do

@@ -47,13 +47,16 @@ defmodule CDPEx do
   `:unknown_page`, and `:already_authenticated` — self-describing control-flow
   outcomes with no payload to carry, the way GenServer uses `:noproc`. Validation
   failures that *do* have offending data to surface are tagged instead
-  (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`).
+  (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
+  `{:invalid_screenshot_data, excerpt}`).
 
-  The producer reasons are composed from `CDPEx.Connection.call_error/0` and
-  `CDPEx.Chrome.launch_error/0`, which **are** precisely specced on `call/5` /
-  `launch/1` — so Dialyzer catches a shape change at the source. The whole union
-  is still best-effort, **not** closed: kinds such as `{:cdp_error, method, payload}`
-  wrap arbitrary CDP data.
+  Only part of this union is machine-checked: `CDPEx.Connection.call_error/0` and
+  `CDPEx.Chrome.launch_error/0` are precisely specced on `call/5` / `launch/1`, so
+  Dialyzer catches a shape change in *those* at the source. The remaining members —
+  the page-level tagged kinds and bare atoms — are hand-maintained documentation:
+  `error_reason/0` itself is referenced by no `@spec`, so it is best-effort and
+  **not** closed (kinds such as `{:cdp_error, method, payload}` also wrap arbitrary
+  CDP data, and a renamed page-level producer would drift silently).
 
   Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
   `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
@@ -79,6 +82,7 @@ defmodule CDPEx do
           | {:unsupported_transport, term()}
           | {:invalid_response_body, String.t()}
           | {:invalid_pdf_data, String.t()}
+          | {:invalid_screenshot_data, String.t()}
           | {:write_failed, term()}
 
   @doc """
