@@ -354,11 +354,10 @@ defmodule CDPEx.IntegrationTest do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)
 
-      # Without credentials the gated page is blocked (the server returns 401, so
-      # there's no #greeting to read).
+      # Without credentials the navigation is rejected outright — Chrome can't
+      # answer the 401 challenge (net::ERR_INVALID_AUTH_CREDENTIALS).
       {:ok, blocked} = CDPEx.new_page(browser)
-      {:ok, _} = Page.navigate(blocked, auth_url)
-      assert {:ok, nil} = Page.text(blocked, "#greeting")
+      assert {:error, {:navigate, _}} = Page.navigate(blocked, auth_url)
 
       # Armed with authenticate/4, the challenge is answered and the page loads —
       # which also proves the paused requests were auto-continued.
