@@ -509,12 +509,15 @@ defmodule CDPEx.Page do
   Starts observing network traffic, delivering CDP `Network` events to the calling
   process.
 
-  Enables the `Network` domain (idempotent) and subscribes the caller to `:events`
-  (default the request + response lifecycle). Each event arrives as
+  Subscribes the caller to `:events` (default the request + response lifecycle),
+  then enables the `Network` domain (idempotent). Each event arrives as
   `{:cdp_event, conn, method, params, session_id}` — handle them in a `handle_info`.
-  Call `stop_observing_network/2` to unsubscribe. On a session-transport page the
-  caller receives every session's events on the shared connection; match on the
-  `session_id` element to filter to this page.
+  Call `stop_observing_network/2` to unsubscribe.
+
+  Start observing **before** navigating: requests already in flight when you call
+  this are not captured. On a session-transport page the caller receives **every**
+  session's events on the shared connection (subscriptions are keyed by method, not
+  session); match on the `session_id` element to filter to this page.
 
   Options:
     * `:events` — `Network.*` method names (default request + response lifecycle)
@@ -523,9 +526,18 @@ defmodule CDPEx.Page do
   @spec observe_network(t(), keyword()) :: :ok | {:error, term()}
   def observe_network(%__MODULE__{} = page, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
+    methods = Keyword.get(opts, :events, @network_events)
 
-    with :ok <- ensure_network(page, timeout) do
-      subscribe_each(page.conn, Keyword.get(opts, :events, @network_events))
+    # Subscribe BEFORE enabling so an event emitted the instant the domain turns on
+    # can't slip through before the caller is registered (mirrors navigate/3's
+    # subscribe-before-trigger). Undo the subscription if the enable fails.
+    with :ok <- subscribe_each(page.conn, methods),
+         :ok <- ensure_network(page, timeout) do
+      :ok
+    else
+      {:error, _} = error ->
+        unsubscribe_each(page.conn, methods)
+        error
     end
   end
 
@@ -543,8 +555,12 @@ defmodule CDPEx.Page do
   event), via `Network.getResponseBody`.
 
   Returns `{:ok, body}` (decoding base64 when Chrome sends it that way) or
-  `{:error, reason}`. Requires the `Network` domain enabled (e.g. via
-  `observe_network/2`). Options: `:timeout` (default 10_000).
+  `{:error, reason}`. The `Network` domain must have been enabled (e.g. via
+  `observe_network/2`) **when the request was captured** — unlike the other Network
+  ops this does not lazily enable it, since enabling now can't recover a past body.
+  If it wasn't enabled, the call surfaces as
+  `{:error, {:cdp_error, "Network.getResponseBody", _}}`. Options: `:timeout`
+  (default 10_000).
   """
   @spec response_body(t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
   def response_body(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do

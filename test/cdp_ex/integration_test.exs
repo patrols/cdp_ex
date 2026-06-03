@@ -367,16 +367,22 @@ defmodule CDPEx.IntegrationTest do
 
       assert req_url =~ "127.0.0.1"
 
-      assert_receive {:cdp_event, ^conn, "Network.responseReceived", %{"requestId" => request_id},
-                      _},
+      # Match the DOCUMENT response specifically (not whichever lands first), so
+      # request_id points at the page itself — deterministic regardless of favicon
+      # or other sub-resource probes.
+      assert_receive {:cdp_event, ^conn, "Network.responseReceived",
+                      %{"requestId" => request_id, "type" => "Document"}, _},
                      5_000
 
-      # The fixture serves the page for any path, so whichever response this is
-      # (document or a favicon probe), its body is the fixture HTML.
       assert {:ok, body} = Page.response_body(page, request_id)
       assert body =~ "Hello"
 
+      # Stopping must actually halt delivery: drain buffered events, stop, navigate
+      # again, and confirm no further Network.* events reach us.
+      flush_cdp_events()
       assert :ok = Page.stop_observing_network(page)
+      {:ok, _} = Page.navigate(page, fixture <> "?after-stop")
+      refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", _, _}, 1_000
     end
   end
 
@@ -467,6 +473,15 @@ defmodule CDPEx.IntegrationTest do
   # by the time on_exit runs it may already be stopping on its own — racing this
   # call. Tolerate an exit from the stop so a teardown race never fails a test
   # whose body already passed.
+  # Drain any buffered {:cdp_event, ...} messages from the mailbox.
+  defp flush_cdp_events do
+    receive do
+      {:cdp_event, _, _, _, _} -> flush_cdp_events()
+    after
+      0 -> :ok
+    end
+  end
+
   defp stop_quietly(browser) do
     if Process.alive?(browser), do: CDPEx.stop(browser)
   catch
