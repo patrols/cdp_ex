@@ -315,10 +315,10 @@ defmodule CDPEx.Page do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => ^name}, ^sid} ->
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^name}, ^sid} ->
         :reached
 
-      {:cdp_event, ^conn, "Page.lifecycleEvent", _params, _session_id} ->
+      {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
         await_lifecycle(page, name, ref, deadline)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
@@ -342,13 +342,13 @@ defmodule CDPEx.Page do
   # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
   # which must instead return {:error, _}. Treat (un)subscription as best-effort.
   defp safe_subscribe(conn) do
-    Connection.subscribe(conn, "Page.lifecycleEvent")
+    Connection.subscribe(conn, @lifecycle_method)
   catch
     :exit, _ -> {:error, :noproc}
   end
 
   defp safe_unsubscribe(conn) do
-    Connection.unsubscribe(conn, "Page.lifecycleEvent")
+    Connection.unsubscribe(conn, @lifecycle_method)
   catch
     :exit, _ -> :ok
   end
@@ -814,16 +814,25 @@ defmodule CDPEx.Page do
   connection drops. Lazily enables the `Network` domain. Only responses observed
   **after** this call are considered, so call it before triggering the request.
 
+  > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}
+  >
+  > Unlike `wait_for_navigation/2` / `wait_for_selector/3` / `wait_for_network_idle/2`
+  > (which return `:ok`), this returns the matched event — match on `{:ok, params}`.
+
   Options: `:timeout` — ms (default 30_000).
   """
   @spec wait_for_response(t(), (String.t() -> boolean()) | Regex.t() | String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def wait_for_response(%__MODULE__{} = page, matcher, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @navigate_timeout)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
     predicate = response_url_predicate(matcher)
 
-    with :ok <- ensure_network(page, timeout) do
-      case Connection.await_event(page.conn, predicate, timeout, session_id: page.session_id) do
+    # One deadline for the whole call so :timeout is a true overall ceiling: the lazy
+    # Network.enable and the await draw from the same budget.
+    with :ok <- ensure_network(page, remaining(deadline)) do
+      case Connection.await_event(page.conn, predicate, remaining(deadline),
+             session_id: page.session_id
+           ) do
         {:ok, params} -> {:ok, params}
         {:error, {:timeout, :await_event}} -> {:error, :timeout}
         {:error, _} = error -> error
@@ -862,6 +871,13 @@ defmodule CDPEx.Page do
   (e.g. a streaming / SSE / long-poll connection that never closes), or
   `{:error, reason}` if the connection drops. Lazily enables the `Network` domain.
 
+  > #### Don't combine with `observe_network/2` on the same page {: .warning}
+  >
+  > This subscribes the calling process to the `Network` request-lifecycle events for
+  > the duration of the call, then unsubscribes on the way out. If the *same process*
+  > is also running `observe_network/2` on this page, that subscription is torn down.
+  > Drive the idle wait from a process that isn't also observing the network.
+
   Options:
     * `:idle_time` — ms of continuous idleness required (default 500)
     * `:max_inflight` — in-flight requests still considered idle (default 0; 2 is
@@ -872,12 +888,13 @@ defmodule CDPEx.Page do
   def wait_for_network_idle(%__MODULE__{} = page, opts \\ []) do
     idle_time = Keyword.get(opts, :idle_time, 500)
     max_inflight = Keyword.get(opts, :max_inflight, 0)
-    timeout = Keyword.get(opts, :timeout, @navigate_timeout)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
 
-    # Subscribe BEFORE enabling so a request that starts the instant the domain turns
-    # on is counted (mirrors observe_network/2); roll the subscriptions back if enable fails.
+    # Subscribe BEFORE enabling so a request that starts the instant the domain turns on
+    # is counted (mirrors observe_network/2); roll the subscriptions back if enable fails.
+    # One deadline spans enable + the idle wait, so :timeout is a true overall ceiling.
     with :ok <- subscribe_each(page.conn, @idle_events),
-         :ok <- ensure_network(page, timeout) do
+         :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
       ref = Process.monitor(page.conn)
 
@@ -887,7 +904,7 @@ defmodule CDPEx.Page do
         max_inflight: max_inflight,
         idle_time: idle_time,
         mon: ref,
-        deadline: System.monotonic_time(:millisecond) + timeout
+        deadline: deadline
       }
 
       try do
@@ -920,21 +937,19 @@ defmodule CDPEx.Page do
          inflight,
          {timer, tag} = idle
        ) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
     receive do
-      {:cdp_event, ^conn, @request_will_be_sent, _params, ^sid} ->
-        inflight = inflight + 1
-
-        idle =
-          if inflight > max_inflight and timer != nil do
-            _ = Process.cancel_timer(timer)
-            {nil, nil}
-          else
-            idle
-          end
-
-        await_network_idle(ctx, inflight, idle)
+      {:cdp_event, ^conn, @request_will_be_sent, params, ^sid} ->
+        # A redirect hop re-emits requestWillBeSent for the SAME request (carrying a
+        # `redirectResponse`), but the chain still fires only ONE terminal
+        # loadingFinished/Failed — so count the original request once, never per hop, or
+        # the counter never returns to 0 and a redirecting request never reaches idle.
+        if Map.has_key?(params, "redirectResponse") do
+          await_network_idle(ctx, inflight, idle)
+        else
+          inflight = inflight + 1
+          idle = if inflight > max_inflight, do: disarm_idle(idle), else: idle
+          await_network_idle(ctx, inflight, idle)
+        end
 
       {:cdp_event, ^conn, method, _params, ^sid}
       when method in [@loading_finished, @loading_failed] ->
@@ -954,35 +969,38 @@ defmodule CDPEx.Page do
         await_network_idle(ctx, inflight, idle)
 
       {:DOWN, ^mon, :process, ^conn, reason} ->
-        cancel_idle(idle)
+        _ = disarm_idle(idle)
         {:down, reason}
     after
-      remaining ->
+      remaining(deadline) ->
         # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} over a stale timeout.
         receive do
           {:DOWN, ^mon, :process, ^conn, reason} ->
-            cancel_idle(idle)
+            _ = disarm_idle(idle)
             {:down, reason}
         after
           0 ->
-            cancel_idle(idle)
+            _ = disarm_idle(idle)
             :timeout
         end
     end
   end
 
   # A ref-tagged one-shot timer; the tag identifies *this* arming, so a stale fire from a
-  # cancelled-but-already-delivered timer is ignored by the receive.
+  # cancelled-but-already-delivered timer is ignored by the receive. A non-positive
+  # idle_time is clamped to 0 (Process.send_after would raise on a negative).
   defp arm_idle(idle_time) do
     tag = make_ref()
-    {Process.send_after(self(), {:idle_tick, tag}, idle_time), tag}
+    {Process.send_after(self(), {:idle_tick, tag}, max(idle_time, 0)), tag}
   end
 
-  defp cancel_idle({nil, _tag}), do: :ok
+  # Cancel the idle timer and return the disarmed state ({nil, nil}); idempotent, so it is
+  # safe on a teardown path or when already disarmed.
+  defp disarm_idle({nil, _tag}), do: {nil, nil}
 
-  defp cancel_idle({timer, _tag}) do
+  defp disarm_idle({timer, _tag}) do
     _ = Process.cancel_timer(timer)
-    :ok
+    {nil, nil}
   end
 
   defp drain_idle_ticks do
@@ -992,6 +1010,8 @@ defmodule CDPEx.Page do
       0 -> :ok
     end
   end
+
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   @doc """
   Enables request interception: pauses matching requests and delivers a

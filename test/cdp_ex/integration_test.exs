@@ -350,6 +350,25 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "fetched-data"} = Page.response_body(page, req)
     end
 
+    test "wait_for_network_idle settles even when the fetch redirects", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#redirect-fetch-btn")
+
+      waiter =
+        Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 300, timeout: 5_000) end)
+
+      Process.sleep(200)
+      assert :ok = Page.click(page, "#redirect-fetch-btn")
+
+      # The fetch hits /redirect (302 → /). The redirect hop must not leave a phantom
+      # in-flight request, or this hangs to the timeout — regression guard for the
+      # requestWillBeSent-per-hop overcount.
+      assert :ok = Task.await(waiter, 10_000)
+    end
+
     test "screenshot returns PNG bytes and can write a file", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       :ok = Page.wait_for_selector(page, "#greeting")

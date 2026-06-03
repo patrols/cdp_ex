@@ -105,6 +105,7 @@ defmodule CDPEx.FixtureServer do
         <h1 id="greeting">Hello</h1>
         <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
         <button id="fetch-btn" onclick="fetch('/data').then(r => r.text()).then(t => { document.getElementById('greeting').textContent = t; })">Fetch</button>
+        <button id="redirect-fetch-btn" onclick="fetch('/redirect')">RedirectFetch</button>
         <div id="echo-header">#{echo}</div>
       </body>
     </html>
