@@ -187,9 +187,19 @@ defmodule CDPEx.Browser do
     end
   end
 
+  def handle_call({:authenticate, %Page{session_id: sid}, _opts}, _from, state)
+      when not is_nil(sid) do
+    # A :session page rides the shared browser connection, which `close_page/2`
+    # never stops — so the Fetch handler (which self-stops when its connection goes
+    # down) would linger for the life of the browser. Restrict authenticate/4 to
+    # :dedicated pages rather than leak a handler per authenticated session page.
+    {:reply, {:error, {:unsupported_transport, :session}}, state}
+  end
+
   def handle_call({:authenticate, %Page{conn: conn, session_id: sid}, opts}, _from, state) do
-    # Start a per-page Fetch handler (linked to us, so its crash is isolated and it
-    # dies with the browser). It self-stops when the page's connection goes down.
+    # Dedicated page only (the :session clause above already returned): start a
+    # per-page Fetch handler linked to us (crash-isolated, dies with the browser).
+    # It self-stops when the page's connection goes down.
     fetch_opts =
       [conn: conn, session_id: sid] ++ Keyword.take(opts, [:username, :password, :source])
 

@@ -366,6 +366,33 @@ defmodule CDPEx.IntegrationTest do
       {:ok, _} = Page.navigate(page, auth_url)
       assert {:ok, "Hello"} = Page.text(page, "#greeting")
     end
+
+    test "rejects a :session page rather than leak its handler" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, session_page} = CDPEx.new_page(browser, transport: :session)
+
+      assert {:error, {:unsupported_transport, :session}} =
+               Page.authenticate(session_page, "cdpex", "secret")
+    end
+
+    test "the Fetch handler self-stops when the page's connection goes down" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      before = fetch_handlers()
+      {:ok, page} = CDPEx.new_page(browser)
+      assert :ok = Page.authenticate(page, "cdpex", "secret")
+
+      assert [handler] = fetch_handlers() -- before
+      ref = Process.monitor(handler)
+
+      # Closing the dedicated page stops its connection; the handler monitors that
+      # connection and must stop with it — no lingering GenServer, no armed Fetch.
+      :ok = CDPEx.close_page(browser, page)
+      assert_receive {:DOWN, ^ref, :process, ^handler, _reason}, 5_000
+    end
   end
 
   describe "tracer bullet" do
@@ -455,6 +482,15 @@ defmodule CDPEx.IntegrationTest do
   # by the time on_exit runs it may already be stopping on its own — racing this
   # call. Tolerate an exit from the stop so a teardown race never fails a test
   # whose body already passed.
+  # The Fetch handlers currently alive (matched by their initial call), so a test
+  # can isolate the one a given authenticate/4 started.
+  defp fetch_handlers do
+    for pid <- Process.list(),
+        {:dictionary, dict} <- [Process.info(pid, :dictionary)],
+        Keyword.get(dict, :"$initial_call") == {CDPEx.Fetch, :init, 1},
+        do: pid
+  end
+
   defp stop_quietly(browser) do
     if Process.alive?(browser), do: CDPEx.stop(browser)
   catch

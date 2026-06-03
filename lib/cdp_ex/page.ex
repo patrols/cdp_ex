@@ -245,14 +245,27 @@ defmodule CDPEx.Page do
   This enables the CDP `Fetch` domain for the page, which pauses (and
   auto-continues) **every** request — measurable overhead on heavy pages.
 
+  Only `:dedicated` pages (the `new_page/2` default) are supported; a `:session`
+  page returns `{:error, {:unsupported_transport, :session}}`.
+
   Options:
-    * `:source` — which challenges to answer: `:any` (default), `:proxy`, `:server`
+    * `:source` — which challenges to answer: `:any` (default), `:proxy`, `:server`.
+      An unknown value returns `{:error, {:invalid_source, value}}`.
   """
   @spec authenticate(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def authenticate(%__MODULE__{} = page, username, password, opts \\ [])
       when is_binary(username) and is_binary(password) do
-    Browser.authenticate(page.browser, page, [username: username, password: password] ++ opts)
+    case validate_source(Keyword.get(opts, :source, :any)) do
+      :ok ->
+        Browser.authenticate(page.browser, page, [username: username, password: password] ++ opts)
+
+      {:error, _} = error ->
+        error
+    end
   end
+
+  defp validate_source(source) when source in [:any, :proxy, :server], do: :ok
+  defp validate_source(source), do: {:error, {:invalid_source, source}}
 
   @doc """
   Evaluates a JavaScript expression and returns its value (`returnByValue`).

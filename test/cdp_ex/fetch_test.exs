@@ -41,5 +41,15 @@ defmodule CDPEx.FetchTest do
       assert {%{"response" => "Default"}, %{}} =
                Fetch.auth_decision(:server, %{}, "R1", %{"source" => "Proxy"}, @creds)
     end
+
+    test "caps the attempts map so answered-but-unpruned challenges can't grow it unbounded" do
+      # Only the rejection path deletes; a successful answer leaves its entry. At the
+      # cap a fresh challenge resets the map rather than growing it without bound.
+      full = Map.new(1..1024, &{"R#{&1}", 1})
+      assert map_size(full) == 1024
+
+      assert {%{"response" => "ProvideCredentials"}, %{"NEW" => 1}} =
+               Fetch.auth_decision(:any, full, "NEW", %{"source" => "Server"}, @creds)
+    end
   end
 end

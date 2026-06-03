@@ -21,6 +21,7 @@ defmodule CDPEx.Fetch do
   alias CDPEx.Connection
 
   @call_timeout 10_000
+  @max_tracked_challenges 1024
 
   defstruct [:conn, :session_id, :username, :password, :source, attempts: %{}]
 
@@ -126,9 +127,20 @@ defmodule CDPEx.Fetch do
           "password" => Keyword.fetch!(creds, :password)
         }
 
-        {response, Map.update(attempts, request_id, 1, &(&1 + 1))}
+        {response, track_attempt(attempts, request_id)}
     end
   end
+
+  # Only the rejection path (`CancelAuth`) ever deletes an entry; a
+  # successfully-answered challenge emits no same-id follow-up to prune on, so cap
+  # the map to bound growth on a long-lived page that keeps meeting fresh
+  # challenges. In practice (proxy creds are cached after the first success) the
+  # live size is 0–1, so the cap is a safety valve; dropping entries at the cap at
+  # most re-offers credentials once for a challenge still in flight.
+  defp track_attempt(attempts, request_id) when map_size(attempts) >= @max_tracked_challenges,
+    do: %{request_id => 1}
+
+  defp track_attempt(attempts, request_id), do: Map.put(attempts, request_id, 1)
 
   defp source_match?(:any, _source), do: true
   defp source_match?(:proxy, "Proxy"), do: true
