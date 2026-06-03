@@ -640,8 +640,27 @@ defmodule CDPEx.Page do
 
   Each pause arrives as `{:cdp_event, conn, "Fetch.requestPaused", params, session_id}`;
   handle it in a `handle_info`. The caller is subscribed **before** the domain is
-  enabled, so no paused request is missed. Mutually exclusive with `authenticate/4`
-  on the same page — both drive the `Fetch` domain.
+  enabled, so no paused request is missed.
+
+  > #### The caller owns the lifecycle {: .warning}
+  >
+  > Nothing ties the enabled `Fetch` domain to the calling process. If the caller
+  > exits — or simply never calls `disable_request_interception/2` — `Fetch` stays
+  > enabled with no resolver and **every** subsequent request pauses forever: the
+  > page stalls permanently and can't even navigate away. Unlike a leaked
+  > `Network.enable`, a leaked `Fetch.enable` bricks the page. Drive interception
+  > from a long-lived process you control, and use that same process for `enable`,
+  > the pause handling, and `disable` (the subscription is keyed to its pid).
+
+  On a `:session`-transport page the caller receives **every** session's
+  `Fetch.requestPaused` events on the shared connection (subscriptions are keyed by
+  method, not session); match on the `session_id` element to filter to this page.
+
+  Mutually exclusive with `authenticate/4` on the same page — both drive the `Fetch`
+  domain. The conflict is **not enforced and fails silently**: enabling interception
+  on an authenticated page re-runs `Fetch.enable` without `handleAuthRequests`
+  (breaking auth) while the auth handler keeps racing the caller for each pause. Use
+  one or the other per page.
 
   Options:
     * `:patterns` — CDP `RequestPattern`s (default `[%{"urlPattern" => "*"}]`, all requests)
@@ -666,6 +685,10 @@ defmodule CDPEx.Page do
   @doc """
   Disables request interception — unsubscribes the caller from `Fetch.requestPaused`
   and disables the `Fetch` domain. Resolve any still-paused requests first.
+
+  Call this from the **same process** that called `enable_request_interception/2`:
+  the unsubscribe is keyed to `self()`, so a disable from a different process leaves
+  the original subscriber still receiving (now-unresolvable) pauses.
   """
   @spec disable_request_interception(t(), keyword()) :: :ok | {:error, term()}
   def disable_request_interception(%__MODULE__{} = page, opts \\ []) do
@@ -676,6 +699,12 @@ defmodule CDPEx.Page do
 
   @doc """
   Lets a paused request proceed (`Fetch.continueRequest`), optionally rewriting it.
+
+  `:url`, `:method`, and `:headers` are **verbatim overrides, not merges**. In
+  particular `:headers` *replaces the entire request header set*, so passing it to
+  set one header drops everything Chrome would otherwise send (`User-Agent`,
+  `Accept`, `Cookie`, …). Omit `:headers` to leave the original request headers
+  intact (the same gotcha as Puppeteer's `continueRequest({headers})`).
 
   Options (all optional): `:url`, `:method`, `:headers` (a name => value map),
   `:post_data` (a binary, base64-encoded for you), `:timeout`.

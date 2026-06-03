@@ -273,6 +273,113 @@ defmodule CDPEx.PageTest do
       assert {:error, {:invalid_error_reason, :bogus}} =
                Page.fail_request(page, "R1", reason: :bogus)
     end
+
+    test "fail_request defaults the reason to :failed", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.fail_request(page, "R1") end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.failRequest", "params" => params}},
+                     2_000
+
+      assert params == %{"requestId" => "R1", "errorReason" => "Failed"}
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "continue_request with no options sends only the requestId", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.continue_request(page, "R1") end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.continueRequest", "params" => params}},
+                     2_000
+
+      # put_present omits absent options — no leaked url/method/headers/postData keys.
+      assert params == %{"requestId" => "R1"}
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "fulfill_request with no options sends only requestId + default status", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.fulfill_request(page, "R1") end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "method" => "Fetch.fulfillRequest", "params" => params}},
+                     2_000
+
+      assert params == %{"requestId" => "R1", "responseCode" => 200}
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "disable_request_interception unsubscribes the caller and disables Fetch", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      caller =
+        spawn_link(fn ->
+          Connection.subscribe(conn, "Fetch.requestPaused")
+          send(test, :subscribed)
+
+          receive do
+            :go -> :ok
+          end
+
+          send(test, {:disabled, Page.disable_request_interception(page)})
+
+          receive do
+            :stop -> :ok
+          after
+            5_000 -> :ok
+          end
+        end)
+
+      assert_receive :subscribed, 2_000
+      assert subscribed?(conn, caller, "Fetch.requestPaused")
+      send(caller, :go)
+
+      # disable unsubscribes (synchronously) then blocks on Fetch.disable.
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Fetch.disable"}}, 2_000
+      refute subscribed?(conn, caller, "Fetch.requestPaused")
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert_receive {:disabled, :ok}, 2_000
+      send(caller, :stop)
+    end
+
+    test "enable_request_interception rolls back the subscription when Fetch.enable fails", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      observer =
+        spawn_link(fn ->
+          send(test, {:enable_result, Page.enable_request_interception(page)})
+
+          receive do
+            :stop -> :ok
+          after
+            5_000 -> :ok
+          end
+        end)
+
+      wait_until_subscribed(conn, observer, "Fetch.requestPaused")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Fetch.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
+
+      assert_receive {:enable_result, {:error, {:cdp_error, "Fetch.enable", _}}}, 2_000
+      refute subscribed?(conn, observer, "Fetch.requestPaused")
+
+      send(observer, :stop)
+    end
   end
 
   # Poll until `pid` is registered as a `method` subscriber on `conn`, so events sent
