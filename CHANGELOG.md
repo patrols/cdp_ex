@@ -17,7 +17,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Error-reason shapes normalized toward tagged tuples** (#20). A reason shape is a public contract — a matcher on the old bare atom silently falls through its catch-all with no compile/Dialyzer warning, so update any matchers:
   - `CDPEx.Connection.await_event/4` timeout: `{:error, :timeout}` → `{:error, {:timeout, :await_event}}`, sharing the `{:timeout, _}` shape with `call/5`'s `{:timeout, method}`.
   - A malformed `DevToolsActivePort` at launch: `{:error, :devtools_file_malformed}` → `{:error, {:devtools_file_malformed, excerpt}}`, carrying the file's contents excerpt like its sibling `{:debug_url_not_found, _}`.
-  - **Unchanged (still bare, intentional):** `:noproc`, and the high-level "didn't happen in time" `:timeout` from `CDPEx.Page` `wait_for_*` and `CDPEx.Pool.checkout/2`.
+  - Base64 validation failures now carry the offending data: `CDPEx.Page.response_body/3` returns `{:error, {:invalid_response_body, excerpt}}` (was `:invalid_response_body`) and `CDPEx.Page.pdf/2` returns `{:error, {:invalid_pdf_data, excerpt}}` (was `:invalid_pdf_data`) when Chrome sends a body/PDF that isn't decodable base64.
+  - **Unchanged (still bare, intentional):** `:noproc`; the high-level "didn't happen in time" `:timeout` from `CDPEx.Page` `wait_for_*` and `CDPEx.Pool.checkout/2`; and the control-flow outcomes `:unknown_page` / `:already_authenticated` — self-describing states with no payload to carry.
 
 ### Changed
 - `CDPEx.Page.navigate/3` and `wait_for_navigation/2` raise `ArgumentError` on an unknown `:wait_until` value instead of silently treating it as `:network_almost_idle`.

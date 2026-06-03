@@ -41,9 +41,13 @@ defmodule CDPEx do
 
   Error reasons are part of the public contract — pattern-match the **tagged kinds**
   (`{:cdp_error, …}`, `{:timeout, …}`, `{:ws_closed, …}`, …); their payloads (a CDP
-  method, an exit status, a stderr/contents excerpt) are open and may gain detail. A
-  few reasons are bare, context-free atoms — a self-describing terminal state, the
-  way GenServer uses `:noproc`.
+  method, an exit status, a stderr/contents excerpt) are open and may gain detail.
+
+  The only bare, context-free reasons are `:noproc`, the high-level `:timeout`,
+  `:unknown_page`, and `:already_authenticated` — self-describing control-flow
+  outcomes with no payload to carry, the way GenServer uses `:noproc`. Validation
+  failures that *do* have offending data to surface are tagged instead
+  (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`).
 
   The producer reasons are composed from `CDPEx.Connection.call_error/0` and
   `CDPEx.Chrome.launch_error/0`, which **are** precisely specced on `call/5` /
@@ -62,8 +66,6 @@ defmodule CDPEx do
           | :timeout
           | :unknown_page
           | :already_authenticated
-          | :invalid_response_body
-          | :invalid_pdf_data
           | {:timeout, :await_event}
           | {:ws_decode, term()}
           | {:navigate, String.t()}
@@ -74,6 +76,8 @@ defmodule CDPEx do
           | {:invalid_source, term()}
           | {:invalid_transport, term()}
           | {:unsupported_transport, term()}
+          | {:invalid_response_body, String.t()}
+          | {:invalid_pdf_data, String.t()}
           | {:write_failed, term()}
 
   @doc """
