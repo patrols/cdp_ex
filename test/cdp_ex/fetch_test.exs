@@ -107,5 +107,30 @@ defmodule CDPEx.FetchTest do
 
       assert_receive {:armed, ^pid}, 2_000
     end
+
+    test "cancel/1 disables Fetch then stops :normal (graceful orphan teardown, #40)", %{
+      conn: conn,
+      fake: fake
+    } do
+      # Trap exits so we can witness the handler's {:EXIT} (it is linked to this process,
+      # which stands in for the Browser).
+      Process.flag(:trap_exit, true)
+
+      {:ok, pid} = Fetch.start_link(conn: conn, browser: self(), username: "u", password: "p")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Fetch.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert_receive {:armed, ^pid}, 2_000
+
+      # The authenticate/4 caller departed; the Browser cancels the orphaned handler. It
+      # must disable Fetch (terminate/2 — releasing any paused request) and stop :normal,
+      # so the Browser's {:EXIT} clears its auths entry.
+      :ok = Fetch.cancel(pid)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => did, "method" => "Fetch.disable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{did},"result":{}}))
+
+      assert_receive {:EXIT, ^pid, :normal}, 2_000
+    end
   end
 end

@@ -269,17 +269,27 @@ defmodule CDPEx.Browser do
         # authenticate/4 still returns once interception is armed — without blocking
         # this GenServer for the whole enable. It self-stops when the page's connection
         # goes down; we drop the auths entry when it exits (see the {:EXIT, …} clause).
+        #
+        # We also MONITOR the caller: if its 15s authenticate/4 call times out (a slow
+        # arm under scheduler starvation), the caller exits and we'd otherwise leave the
+        # page armed with auths[tid] set but no waiting caller — a retry would hit
+        # {:error, :already_authenticated} with no way to recover but closing the page.
+        # On the caller's :DOWN we cancel the orphaned handler so its {:EXIT} clears
+        # auths[tid] and the page becomes re-authenticatable (#40).
         fetch_opts =
           [conn: conn, session_id: sid, browser: self()] ++
             Keyword.take(opts, [:username, :password, :source])
 
         case Fetch.start_link(fetch_opts) do
           {:ok, pid} ->
+            {caller, _tag} = from
+            caller_ref = Process.monitor(caller)
+
             {:noreply,
              %{
                state
                | auths: Map.put(state.auths, tid, pid),
-                 pending_auth: Map.put(state.pending_auth, pid, from)
+                 pending_auth: Map.put(state.pending_auth, pid, {from, caller_ref})
              }}
 
           {:error, reason} ->
@@ -356,7 +366,8 @@ defmodule CDPEx.Browser do
         {nil, _} ->
           state
 
-        {from, pending_auth} ->
+        {{from, caller_ref}, pending_auth} ->
+          Process.demonitor(caller_ref, [:flush])
           GenServer.reply(from, {:error, reason})
           %{state | pending_auth: pending_auth}
       end
@@ -376,12 +387,15 @@ defmodule CDPEx.Browser do
 
   def handle_info({:armed, pid}, state) do
     # A Fetch handler finished arming; reply :ok to the authenticate/4 caller parked in
-    # pending_auth. Unknown pid → a late or duplicate signal; ignore.
+    # pending_auth and release our monitor on it. Unknown pid → the caller already
+    # departed (its :DOWN dropped the entry and cancelled this handler), so this is an
+    # orphan whose cancel-stop {:EXIT} will clear auths — ignore the late signal.
     case Map.pop(state.pending_auth, pid) do
       {nil, _} ->
         {:noreply, state}
 
-      {from, pending_auth} ->
+      {{from, caller_ref}, pending_auth} ->
+        Process.demonitor(caller_ref, [:flush])
         GenServer.reply(from, :ok)
         {:noreply, %{state | pending_auth: pending_auth}}
     end
@@ -392,11 +406,13 @@ defmodule CDPEx.Browser do
     # (already-recorded) auths entry so the page can be authenticated again. The
     # handler stops :normal, so this is the quiet failure path (no crash report); the
     # {:EXIT} clause below is the fallback if a handler dies without signalling.
+    # Unknown pid → the caller already departed; its {:EXIT} clears auths, so ignore.
     case Map.pop(state.pending_auth, pid) do
       {nil, _} ->
         {:noreply, state}
 
-      {from, pending_auth} ->
+      {{from, caller_ref}, pending_auth} ->
+        Process.demonitor(caller_ref, [:flush])
         GenServer.reply(from, {:error, reason})
         {:noreply, %{state | pending_auth: pending_auth, auths: drop_value(state.auths, pid)}}
     end
@@ -406,11 +422,12 @@ defmodule CDPEx.Browser do
     # An interception owner died without disabling. Drop its reservation and disable
     # Fetch on that page's connection so the page isn't left bricked with no resolver.
     # The disable runs OFF the Browser process (a hung page conn must not stall every
-    # other page — the same responsiveness #36 protects for auth). Unknown ref → a
-    # stale monitor; ignore.
+    # other page — the same responsiveness #36 protects for auth).
     case pop_intercept_by_ref(state.intercepts, ref) do
       {nil, _} ->
-        {:noreply, state}
+        # Not an interception owner — maybe an authenticate/4 caller that departed (its
+        # 15s call timed out) while its Fetch handler was still arming.
+        cancel_orphaned_auth(state, ref)
 
       {tid, intercepts} ->
         case Map.get(state.pages, tid) do
@@ -424,6 +441,32 @@ defmodule CDPEx.Browser do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # An authenticate/4 caller we were monitoring (while its Fetch handler armed) went
+  # down — typically because its 15s call timed out on a slow arm. If a pending entry
+  # still matches the monitor ref, cancel the orphaned handler: it disables Fetch and
+  # stops, and its {:EXIT} clears the auths entry so the page can be authenticated again
+  # instead of being stuck on {:error, :already_authenticated} (#40). We do not reply —
+  # the caller is gone. Unknown ref → a stale monitor; ignore.
+  defp cancel_orphaned_auth(state, ref) do
+    case pop_pending_auth_by_ref(state.pending_auth, ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {fetch_pid, pending_auth} ->
+        Fetch.cancel(fetch_pid)
+        {:noreply, %{state | pending_auth: pending_auth}}
+    end
+  end
+
+  # Find and remove the pending_auth entry whose caller monitor ref matches `ref`,
+  # returning {fetch_pid, remaining}. pending_auth is tiny (typically 0–1 entries).
+  defp pop_pending_auth_by_ref(pending_auth, ref) do
+    case Enum.find(pending_auth, fn {_pid, {_from, caller_ref}} -> caller_ref == ref end) do
+      nil -> {nil, pending_auth}
+      {fetch_pid, _entry} -> {fetch_pid, Map.delete(pending_auth, fetch_pid)}
+    end
+  end
 
   # Best-effort Fetch.disable for a dead interception owner, on a throwaway process so
   # an unresponsive page connection can't block the Browser GenServer. Connection.call
