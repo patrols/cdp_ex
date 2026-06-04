@@ -37,6 +37,11 @@ defmodule CDPEx.Page do
   @selector_timeout 5_000
   @screenshot_timeout 30_000
   @command_timeout 10_000
+  # Slack past a capture/wait helper's own deadline before run_in_helper/3 force-kills it.
+  # The helper bounds every op by the deadline, so it returns on its own well within this;
+  # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
+  # the scheduler starvation these deadlines guard against).
+  @helper_grace 5_000
 
   @lifecycle_method "Page.lifecycleEvent"
   @request_will_be_sent "Network.requestWillBeSent"
@@ -136,19 +141,21 @@ defmodule CDPEx.Page do
 
   defp navigate_with_wait(page, url, wait_until, timeout) do
     name = lifecycle_name(wait_until)
+    deadline = System.monotonic_time(:millisecond) + timeout
 
     # Issue the navigate (after subscribing — see subscribe_then_await/4) and wait
     # for its lifecycle milestone. The readiness wait is best-effort: a timeout
     # still returns {:ok, page} (the page may just be slow); a dead connection does not.
+    # One deadline spans subscribe + navigate + the wait, so :timeout is a true ceiling.
     trigger = fn ->
-      case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+      case do_call(page, "Page.navigate", %{"url" => url}, remaining(deadline)) do
         {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
         {:ok, _result} -> :ok
         {:error, _} = error -> error
       end
     end
 
-    case subscribe_then_await(page, name, timeout, trigger) do
+    case subscribe_then_await(page, name, deadline, trigger) do
       :reached ->
         {:ok, page}
 
@@ -174,9 +181,16 @@ defmodule CDPEx.Page do
     # invalid option never enables Network / spawns the helper first — matching the
     # default path, which validates before any side effect.
     milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
+    deadline = System.monotonic_time(:millisecond) + timeout
 
-    with :ok <- ensure_network(page, timeout) do
-      run_in_helper(fn -> run_capture(page, url, milestone, timeout) end, :capture_failed)
+    # One deadline spans enable + subscribe + navigate + the capture wait, so :timeout is a
+    # true overall ceiling (mirrors wait_for_response/3 and wait_for_network_idle/2).
+    with :ok <- ensure_network(page, remaining(deadline)) do
+      run_in_helper(
+        fn -> run_capture(page, url, milestone, deadline) end,
+        :capture_failed,
+        deadline
+      )
     end
   end
 
@@ -185,12 +199,13 @@ defmodule CDPEx.Page do
   # *the helper's* mailbox, so a caller that is also running observe_network/2 on this page
   # keeps its subscription and its buffered events intact (#42, #48). Connection monitors
   # every subscriber and drops it on :DOWN, so the helper's subscriptions are released when
-  # it exits — no explicit unsubscribe. `fun` must bound every blocking op it makes
-  # (subscribe_each catches a dead conn; CDP calls carry a timeout; the await loops monitor
-  # the conn and honour a deadline), so the helper always terminates and the caller awaits
-  # exactly one of its result or its :DOWN. A helper that crashes before replying (a
-  # should-never-happen bug) surfaces as {:error, {on_crash, reason}}.
-  defp run_in_helper(fun, on_crash) when is_function(fun, 0) do
+  # it exits — no explicit unsubscribe. `fun` must bound every blocking op it makes against
+  # `deadline` (subscribe_each + the CDP calls carry `remaining(deadline)`; the await loops
+  # monitor the conn and honour `deadline`), so it returns on its own within the budget;
+  # `after remaining(deadline) + @helper_grace` is a last-resort net that force-kills a body
+  # that ignores the deadline, so the caller never blocks past the ceiling. A helper that
+  # crashes before replying (a should-never-happen bug) surfaces as {:error, {on_crash, reason}}.
+  defp run_in_helper(fun, on_crash, deadline) when is_function(fun, 0) do
     parent = self()
     tag = make_ref()
 
@@ -203,30 +218,34 @@ defmodule CDPEx.Page do
 
       {:DOWN, ^mon, :process, ^helper, reason} ->
         {:error, {on_crash, reason}}
+    after
+      remaining(deadline) + @helper_grace ->
+        Process.exit(helper, :kill)
+        Process.demonitor(mon, [:flush])
+        {:error, {on_crash, :timeout}}
     end
   end
 
-  # The capture helper body (runs in the spawned process). Subscribes on its own pid,
-  # then issues the navigation and accumulates the main-document response. Returns
-  # capture_after_navigate/6's fully mapped result: {:ok, page, %{status, url}} |
-  # {:error, reason}. No before/after drain is needed — the helper's mailbox starts empty
-  # and dies with it.
-  defp run_capture(page, url, milestone, timeout) do
+  # The capture helper body (runs in the spawned process). Subscribes on its own pid (within
+  # the shared deadline), then issues the navigation and accumulates the main-document
+  # response. Returns capture_after_navigate/5's fully mapped result: {:ok, page, %{status,
+  # url}} | {:error, reason}. No before/after drain is needed — the helper's mailbox starts
+  # empty and dies with it.
+  defp run_capture(page, url, milestone, deadline) do
     methods = [@lifecycle_method, @response_received]
 
-    case subscribe_each(page.conn, methods) do
+    case subscribe_each(page.conn, methods, remaining(deadline)) do
       :ok ->
         ref = Process.monitor(page.conn)
-        deadline = System.monotonic_time(:millisecond) + timeout
-        capture_after_navigate(page, url, milestone, timeout, ref, deadline)
+        capture_after_navigate(page, url, milestone, ref, deadline)
 
       {:error, _} = error ->
         error
     end
   end
 
-  defp capture_after_navigate(page, url, milestone, timeout, ref, deadline) do
-    case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
+  defp capture_after_navigate(page, url, milestone, ref, deadline) do
+    case do_call(page, "Page.navigate", %{"url" => url}, remaining(deadline)) do
       {:ok, %{"errorText" => error}} ->
         {:error, {:navigate, error}}
 
@@ -337,15 +356,14 @@ defmodule CDPEx.Page do
   # a cached page) fires before the listener is in place. Returns await_lifecycle/4's
   # outcome (`:reached` | `{:down, reason}` | `:timeout`), or `{:error, reason}` when
   # subscription fails or `trigger` returns one.
-  defp subscribe_then_await(page, name, timeout, trigger) do
-    case safe_subscribe(page.conn) do
+  defp subscribe_then_await(page, name, deadline, trigger) do
+    case safe_subscribe(page.conn, remaining(deadline)) do
       {:error, reason} ->
         {:error, reason}
 
       :ok ->
         drain_events(page.conn, @lifecycle_method)
         ref = Process.monitor(page.conn)
-        deadline = System.monotonic_time(:millisecond) + timeout
 
         try do
           case trigger.() do
@@ -394,8 +412,8 @@ defmodule CDPEx.Page do
   # subscribe/unsubscribe are GenServer.calls; a connection that's already dead (or
   # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
   # which must instead return {:error, _}. Treat (un)subscription as best-effort.
-  defp safe_subscribe(conn) do
-    Connection.subscribe(conn, @lifecycle_method)
+  defp safe_subscribe(conn, timeout) do
+    Connection.subscribe(conn, @lifecycle_method, timeout)
   catch
     :exit, _ -> {:error, :noproc}
   end
@@ -443,9 +461,9 @@ defmodule CDPEx.Page do
   # this can't be tripped by params from another event method carrying a "name".
   defp await_navigation(page, wait_until, opts) do
     name = lifecycle_name(wait_until)
-    timeout = Keyword.get(opts, :timeout, @navigate_timeout)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
 
-    case subscribe_then_await(page, name, timeout, fn -> :ok end) do
+    case subscribe_then_await(page, name, deadline, fn -> :ok end) do
       :reached -> :ok
       :timeout -> {:error, :timeout}
       {:down, reason} -> {:error, down_reason(reason)}
@@ -949,7 +967,8 @@ defmodule CDPEx.Page do
 
     run_in_helper(
       fn -> run_network_idle(page, idle_time, max_inflight, deadline) end,
-      :idle_wait_failed
+      :idle_wait_failed,
+      deadline
     )
   end
 
@@ -961,7 +980,7 @@ defmodule CDPEx.Page do
   # the helper's subscriptions are pruned by Connection on its :DOWN and its idle-tick timers
   # die with it (an enable failure likewise just exits the helper and is auto-pruned).
   defp run_network_idle(page, idle_time, max_inflight, deadline) do
-    with :ok <- subscribe_each(page.conn, @idle_events),
+    with :ok <- subscribe_each(page.conn, @idle_events, remaining(deadline)),
          :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
       ref = Process.monitor(page.conn)
@@ -1338,9 +1357,11 @@ defmodule CDPEx.Page do
 
   # Subscribe/unsubscribe the caller to a list of event methods, tolerating a
   # connection that died mid-call so the observe ops surface {:error, :noproc} / :ok
-  # rather than crashing the caller.
-  defp subscribe_each(conn, methods) do
-    Enum.each(methods, &Connection.subscribe(conn, &1))
+  # rather than crashing the caller. `timeout` lets a caller fold the registration into an
+  # overall deadline; a snapshot is fine — if one subscribe exhausts it the call exits and
+  # the catch below short-circuits the rest.
+  defp subscribe_each(conn, methods, timeout \\ @command_timeout) do
+    Enum.each(methods, &Connection.subscribe(conn, &1, timeout))
     :ok
   catch
     :exit, _ -> {:error, :noproc}
