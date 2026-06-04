@@ -448,6 +448,10 @@ defmodule CDPEx.Browser do
   # stops, and its {:EXIT} clears the auths entry so the page can be authenticated again
   # instead of being stuck on {:error, :already_authenticated} (#40). We do not reply —
   # the caller is gone. Unknown ref → a stale monitor; ignore.
+  #
+  # Unlike the {:armed}/{:arm_failed}/{:EXIT} paths, this one does NOT demonitor: a
+  # monitor is one-shot and the runtime already removed it when it delivered the :DOWN
+  # that brought us here, so there is nothing left to demonitor.
   defp cancel_orphaned_auth(state, ref) do
     case pop_pending_auth_by_ref(state.pending_auth, ref) do
       {nil, _} ->
