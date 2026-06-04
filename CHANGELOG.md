@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `CDPEx.Pool` now launches browsers **asynchronously**. A cold Chrome start used to run synchronously inside the pool process, blocking every other checkout, checkin, and timeout for its duration (a few seconds), so a short `:checkout_timeout` was unreliable while the pool grew to `:size`. Each launch now runs in its own task: the pool stays responsive during warmup, launches for simultaneous waiters run concurrently, and `:checkout_timeout` is honored even mid-launch. Behavior is otherwise unchanged — `count + in-flight launches` never exceeds `:size`, a launch failure surfaces to the caller, and a launched browser is adopted (re-linked) by the pool so its crash handling and `terminate` reaping are preserved (#22).
+
 ### Fixed
 - `CDPEx.Page.navigate/3` with `response: true` no longer disturbs a same-process `observe_network/2` subscription. The document-response capture now runs in a short-lived, isolated helper process with its own `Network.responseReceived` subscription and mailbox, so a caller that is also observing the network on the same page keeps its subscription and its buffered events intact (previously the navigation unsubscribed the caller and drained those events). Cross-process observation was already unaffected (#42).
 - `CDPEx.Page.wait_for_network_idle/2` no longer disturbs a same-process `observe_network/2` subscription — the same fix as #42 applied to the idle wait. The in-flight tracking now runs in an isolated helper process, so a caller observing the network on the same page keeps its subscription and buffered events intact (previously the idle wait tore down the overlapping request-lifecycle subscriptions and drained those events). An abnormal crash of the internal helper surfaces as `{:error, {:idle_wait_failed, reason}}` (#48).

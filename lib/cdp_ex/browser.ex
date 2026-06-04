@@ -47,7 +47,13 @@ defmodule CDPEx.Browser do
 
   # ── Public API ──────────────────────────────────────────────────────────────
 
-  @doc "Starts a browser. See `CDPEx.Chrome` for launch options."
+  @doc """
+  Starts a browser. See `CDPEx.Chrome` for launch options.
+
+  Pass `:owner` (a pid) to set the process whose death triggers the browser's cleanup,
+  overriding the default (the calling process). `CDPEx.Pool` uses this when adopting a
+  browser it launched in a short-lived task.
+  """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {gen_opts, launch_opts} = Keyword.split(opts, [:name])
@@ -128,8 +134,14 @@ defmodule CDPEx.Browser do
   def init(launch_opts) do
     Process.flag(:trap_exit, true)
 
+    # An explicit `:owner` overrides the :$ancestors-derived parent. CDPEx.Pool passes it
+    # when adopting a browser launched in a throwaway task, so the owner-death self-reap
+    # (the {:EXIT, parent, _} clause) still targets the real owner (the pool) rather than
+    # the already-dead task — otherwise a hard-killed pool would orphan the browser.
+    {owner, launch_opts} = Keyword.pop(launch_opts, :owner)
+
     case Chrome.launch(launch_opts) do
-      {:ok, chrome} -> connect_browser(chrome, launch_opts)
+      {:ok, chrome} -> connect_browser(chrome, launch_opts, owner || parent_pid())
       {:error, reason} -> {:stop, reason}
     end
   end
@@ -137,7 +149,7 @@ defmodule CDPEx.Browser do
   # Chrome is running now. If the browser WebSocket fails to connect, init/1
   # returns {:stop, _} *before* the GenServer loop starts, so terminate/2 never
   # runs — we must reap Chrome here or leak the OS process and temp profile.
-  defp connect_browser(chrome, launch_opts) do
+  defp connect_browser(chrome, launch_opts, parent) do
     {host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
 
     case Connection.start_link(chrome.debug_url) do
@@ -159,7 +171,7 @@ defmodule CDPEx.Browser do
              host: host,
              port: port,
              opts: launch_opts,
-             parent: parent_pid()
+             parent: parent
            }}
         catch
           :exit, reason ->

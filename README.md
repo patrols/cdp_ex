@@ -44,7 +44,7 @@ you don't want a ChromeDriver process or a Node sidecar — that's the gap CDPEx
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
-> Connection pooling, network interception, and stealth remain out of scope for now.
+> Stealth / anti-fingerprinting presets remain out of scope for now (evidence-gated).
 
 ## Installation
 
@@ -171,8 +171,10 @@ end)
 ```
 
 Browsers launch lazily up to `:size` and are reused; `checkout/2` blocks (up to
-`:checkout_timeout`) when all are busy. A caller that crashes returns its browser
-automatically, and a crashed browser is relaunched on demand.
+`:checkout_timeout`) when all are busy. Launches are asynchronous, so the pool
+stays responsive during a cold start and warms multiple browsers concurrently
+under load. A caller that crashes returns its browser automatically, and a
+crashed browser is relaunched on demand.
 
 ## Page operations
 

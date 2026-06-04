@@ -10,6 +10,8 @@ defmodule CDPEx.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias CDPEx.Browser
   alias CDPEx.Connection
   alias CDPEx.FixtureServer
@@ -744,6 +746,24 @@ defmodule CDPEx.IntegrationTest do
         end)
 
       assert {:ok, "Hello"} = result
+    end
+
+    test "a pooled browser self-reaps when the pool is hard-killed (#22)" do
+      # The pool adopts a task-launched browser with owner: pool, so the browser's
+      # owner-death self-reap (defense-in-depth for a skipped terminate/2) still fires when
+      # the pool is :brutal_killed — rather than orphaning Chrome. Trap exits so the pool's
+      # death (it is start_linked to us) doesn't take the test down.
+      Process.flag(:trap_exit, true)
+
+      {:ok, pool} = Pool.start_link(size: 1)
+      {:ok, browser} = Pool.checkout(pool)
+      bref = Process.monitor(browser)
+
+      # The browser's self-reap logs an (expected) termination report — capture it.
+      capture_log(fn ->
+        Process.exit(pool, :kill)
+        assert_receive {:DOWN, ^bref, :process, ^browser, _reason}, 10_000
+      end)
     end
   end
 

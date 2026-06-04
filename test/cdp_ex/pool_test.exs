@@ -1,6 +1,8 @@
 defmodule CDPEx.PoolTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias CDPEx.Pool
 
   # A stand-in for CDPEx.Browser: a trivial GenServer (so Pool's Browser.stop/1 —
@@ -117,6 +119,215 @@ defmodule CDPEx.PoolTest do
     assert Pool.child_spec([]).id == Pool
     assert Pool.child_spec(name: :fast).id == :fast
     assert Pool.child_spec(id: :custom, name: :fast).id == :custom
+  end
+
+  test "a launch failure surfaces to the checkout caller" do
+    pool = start_pool(size: 1, start_fun: fn _ -> {:error, :launch_boom} end)
+    assert {:error, :launch_boom} = Pool.checkout(pool, 1_000)
+    # The failed launch freed its slot, so a retry attempts a fresh launch (not stuck).
+    assert {:error, :launch_boom} = Pool.checkout(pool, 1_000)
+    assert Process.alive?(pool)
+  end
+
+  test "a launch task crash surfaces its reason as an error and the pool survives" do
+    pool = start_pool(size: 1, start_fun: fn _ -> raise "launch crash" end)
+
+    # The launch task crash logs a (expected) SASL report — capture it so it isn't noise.
+    {result, _log} = with_log(fn -> Pool.checkout(pool, 1_000) end)
+
+    # The task's :DOWN reason (the raised exception) is propagated, not a bare atom.
+    assert {:error, {%RuntimeError{message: "launch crash"}, _stacktrace}} = result
+    assert Process.alive?(pool)
+  end
+
+  test "the pool stays responsive while a launch is in flight (#22)" do
+    # A launch that parks until the test releases it (deterministic, no wall-clock). In the
+    # old synchronous pool the GenServer was blocked inside start_fun, so it couldn't process
+    # any other message — the second checkout below would hang rather than time out.
+    test = self()
+
+    parked_start = fn opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 1, start_fun: parked_start)
+
+    slow = Task.async(fn -> Pool.checkout(pool, 5_000) end)
+    assert_receive {:launching, launcher}, 1_000
+
+    # The launch is provably still parked (we haven't sent :proceed), yet a second checkout
+    # is served its :timeout — the pool is responsive. A synchronous pool would be stuck.
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
+
+    # Release the launch; the original caller is served.
+    send(launcher, :proceed)
+    assert {:ok, _b} = Task.await(slow, 2_000)
+  end
+
+  test "launches browsers concurrently for simultaneous waiters (#22)" do
+    # Each launch announces itself then parks. If launches were serial, only one would be in
+    # flight at a time; we assert all three are parked at once, proving concurrency.
+    test = self()
+
+    parked_start = fn opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 3, start_fun: parked_start)
+
+    # Holders keep their browsers checked out (a Task that exits right after checkout would
+    # let the pool reclaim its browser on the owner's death and re-hand it to the next
+    # waiter — so we'd see fewer than three distinct browsers).
+    holders =
+      for _ <- 1..3 do
+        spawn(fn ->
+          {:ok, b} = Pool.checkout(pool, 3_000)
+          send(test, {:got, b})
+          receive do: (:release -> :ok), after: (5_000 -> :ok)
+        end)
+      end
+
+    launchers =
+      for _ <- 1..3 do
+        assert_receive {:launching, pid}, 1_000
+        pid
+      end
+
+    assert length(Enum.uniq(launchers)) == 3, "expected three concurrent launches"
+
+    Enum.each(launchers, &send(&1, :proceed))
+
+    browsers =
+      for _ <- 1..3 do
+        assert_receive {:got, b}, 2_000
+        b
+      end
+
+    assert length(Enum.uniq(browsers)) == 3
+    assert :sys.get_state(pool).count == 3
+
+    Enum.each(holders, &send(&1, :release))
+  end
+
+  test "the pool stops with an attributable reason if its launch supervisor dies (#22)" do
+    pool = start_pool(size: 1)
+    ref = Process.monitor(pool)
+    task_sup = :sys.get_state(pool).task_sup
+
+    # The pool's stop logs an (expected) termination report — capture it so it isn't noise.
+    capture_log(fn ->
+      Process.exit(task_sup, :kill)
+
+      # Rather than limping on unable to launch, the pool stops so its own supervisor can
+      # restart it with a fresh task_sup.
+      assert_receive {:DOWN, ^ref, :process, ^pool, {:task_sup_down, :killed}}, 1_000
+    end)
+  end
+
+  test "a launch that outlives its timed-out waiter becomes a warm spare (#22)" do
+    test = self()
+
+    parked_start = fn opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 1, start_fun: parked_start)
+
+    # The waiter triggers a launch then times out before it resolves.
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
+    assert_receive {:launching, launcher}, 1_000
+
+    # The launch completes with no waiter left — its browser is kept as a warm spare, not
+    # leaked, and a later checkout reuses it (count stays 1, no second launch).
+    send(launcher, :proceed)
+    assert {:ok, _b} = Pool.checkout(pool, 1_000)
+    assert :sys.get_state(pool).count == 1
+  end
+
+  test "a launch that fails after its waiter timed out is handled without crashing (#22)" do
+    test = self()
+
+    parked_fail = fn _opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      {:error, :late_boom}
+    end
+
+    pool = start_pool(size: 1, start_fun: parked_fail)
+
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
+    assert_receive {:launching, launcher}, 1_000
+
+    # The failure arrives with no waiter in the queue — the pool absorbs it (no crash) and
+    # frees the slot (launching drains back to empty).
+    send(launcher, :proceed)
+    assert eventually(fn -> :sys.get_state(pool).launching == %{} end)
+    assert Process.alive?(pool)
+  end
+
+  test "the pool passes itself as :owner so an adopted browser self-reaps against it (#22)" do
+    test = self()
+
+    capturing_start = fn opts ->
+      send(test, {:launch_opts, opts})
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 1, start_fun: capturing_start)
+
+    {:ok, _b} = Pool.checkout(pool, 1_000)
+    assert_receive {:launch_opts, opts}
+    assert opts[:owner] == pool
+  end
+
+  test "a launch failure doesn't fail a waiter still covered by another in-flight launch (#22)" do
+    test = self()
+
+    controlled = fn opts ->
+      send(test, {:launch, self()})
+
+      receive do
+        :proceed_ok -> FakeBrowser.start_link(opts)
+        {:proceed_error, reason} -> {:error, reason}
+      end
+    end
+
+    pool = start_pool(size: 2, start_fun: controlled)
+
+    # w2 first (long timeout) — its launch is confirmed in flight before w1 exists, so w1's
+    # short timeout can't race ahead of it. w1 then checks out (its launch fires too) and
+    # times out, leaving one waiter (w2) but BOTH launches still in flight.
+    w2 =
+      spawn(fn ->
+        send(test, {:w2, Pool.checkout(pool, 3_000)})
+        receive do: (:stop -> :ok), after: (5_000 -> :ok)
+      end)
+
+    assert_receive {:launch, lb}, 1_000
+
+    w1 =
+      spawn(fn ->
+        send(test, {:w1, Pool.checkout(pool, 100)})
+        receive do: (:stop -> :ok), after: (5_000 -> :ok)
+      end)
+
+    assert_receive {:launch, la}, 1_000
+    assert_receive {:w1, {:error, :timeout}}, 1_000
+
+    # One launch fails; the other succeeds. w2 must be served by the survivor, not failed by
+    # the casualty (pre-refinement it would have been failed to the head of the queue).
+    send(la, {:proceed_error, :boom})
+    send(lb, :proceed_ok)
+
+    assert_receive {:w2, {:ok, _browser}}, 2_000
+    send(w1, :stop)
+    send(w2, :stop)
   end
 
   defp start_pool(opts) do
