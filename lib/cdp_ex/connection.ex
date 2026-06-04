@@ -103,11 +103,15 @@ defmodule CDPEx.Connection do
 
   The subscription is removed automatically if the subscribing process exits, so
   a crashed subscriber can't accumulate in the connection.
-  """
-  @spec subscribe(GenServer.server(), String.t() | :all) :: :ok
-  def subscribe(conn, method), do: GenServer.call(conn, {:subscribe, method, self()})
 
-  @doc "Removes a subscription created with `subscribe/2`."
+  `timeout` bounds the registration call so a caller can fold it into an overall
+  deadline (defaults to the standard call timeout).
+  """
+  @spec subscribe(GenServer.server(), String.t() | :all, timeout()) :: :ok
+  def subscribe(conn, method, timeout \\ @default_call_timeout),
+    do: GenServer.call(conn, {:subscribe, method, self()}, timeout)
+
+  @doc "Removes a subscription created with `subscribe/3`."
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
   def unsubscribe(conn, method), do: GenServer.call(conn, {:unsubscribe, method, self()})
 

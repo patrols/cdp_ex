@@ -132,6 +132,17 @@ defmodule CDPEx.ConnectionTest do
     assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, nil}, 2_000
   end
 
+  test "subscribe/3 honours an explicit timeout and still registers (#49)", %{
+    conn: conn,
+    fake: fake
+  } do
+    # Callers fold the registration into an overall deadline by passing remaining(deadline).
+    :ok = Connection.subscribe(conn, "Page.lifecycleEvent", 2_000)
+    FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
+
+    assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, nil}, 2_000
+  end
+
   test ":all subscribers receive every event", %{conn: conn, fake: fake} do
     :ok = Connection.subscribe(conn, :all)
     FakeCDP.send_text(fake, ~s({"method":"Network.requestWillBeSent","params":{"x":1}}))

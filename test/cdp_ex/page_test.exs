@@ -242,6 +242,22 @@ defmodule CDPEx.PageTest do
       assert reason == :noproc or match?({:ws_closed, _}, reason)
     end
 
+    test "respects :timeout as an overall ceiling — an unanswered Network.enable fails promptly (#49)",
+         %{page: page, fake: fake} do
+      # One deadline spans enable + subscribe + navigate + the capture wait. With
+      # Network.enable never answered, the call surfaces the enable timeout from the shared
+      # budget rather than hanging past it.
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, timeout: 300)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Network.enable"}}, 2_000
+      # Deliberately no reply.
+
+      assert {:error, {:timeout, "Network.enable"}} = Task.await(task, 2_000)
+    end
+
     test "leaves a same-process observe_network/2 subscription and buffered events intact (#42)",
          %{page: page, conn: conn, fake: fake} do
       test = self()
