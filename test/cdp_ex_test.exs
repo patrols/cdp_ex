@@ -1,20 +1,24 @@
 defmodule CDPExTest do
   use ExUnit.Case, async: true
 
+  alias Code.Typespec
+
   doctest CDPEx
 
   describe "classify_error/1" do
     # Exemplars are kept beside CDPEx.error_reason/0: every documented member appears
-    # in exactly one bucket below. A new error_reason kind should be added here (and to
-    # classify_error/1) in the same change — otherwise it falls through to :unknown and
-    # the "no recognized reason is :unknown" assertion below won't cover it, which is the
-    # prompt to classify it deliberately.
+    # in exactly one bucket below. The "error_reason/0 coverage" test mechanically
+    # enforces this — it extracts the union's members (expanding call_error/launch_error)
+    # and fails if any lacks an exemplar here, so a new error_reason kind can't be added
+    # without being classified.
 
     # Re-attempt may succeed: dropped connection, dead process, timeout, launch trouble,
     # or an internal capture/idle helper crash.
     @transient [
       {:ws_closed, :closed},
       {:ws_closed, {:ws_decode, :invalid_frame}},
+      {:ws_connect, :econnrefused},
+      {:ws_upgrade, :upgrade_timeout},
       :noproc,
       :timeout,
       {:timeout, "Page.navigate"},
@@ -30,7 +34,6 @@ defmodule CDPExTest do
     # validation failures, plus a missing Chrome binary and a no-document navigation).
     @terminal [
       {:chrome_not_found, "/usr/bin/google-chrome"},
-      {:no_document_response, "https://example.com/#hash"},
       {:selector_not_found, ".missing"},
       {:evaluate_exception, %{"text" => "ReferenceError"}},
       {:unexpected_evaluate, %{"unexpected" => true}},
@@ -49,14 +52,16 @@ defmodule CDPExTest do
       :already_intercepting
     ]
 
-    # Outcome depends on a payload classify_error/1 deliberately does not crack yet —
-    # the net::ERR_* text, the CDP error code, the file-write posix reason.
+    # Outcome depends on a payload or timing classify_error/1 deliberately does not crack
+    # yet — the net::ERR_* text, the CDP error code, the file-write posix reason, or
+    # whether a no-document navigation was a same-document hop vs a slow miss.
     @payload_dependent [
       {:navigate, "net::ERR_NAME_NOT_RESOLVED"},
       {:navigate, "net::ERR_CONNECTION_REFUSED"},
       {:cdp_error, "Page.navigate", %{"code" => -32_000, "message" => "boom"}},
       {:write_failed, :eacces},
-      {:write_failed, :enospc}
+      {:write_failed, :enospc},
+      {:no_document_response, "https://example.com/#hash"}
     ]
 
     # Reasons CDPEx never produces — a future shape or a foreign wrapped term.
@@ -122,4 +127,44 @@ defmodule CDPExTest do
       refute CDPEx.transient?(:some_future_atom)
     end
   end
+
+  describe "error_reason/0 coverage" do
+    test "every error_reason/0 member has a classify_error/1 exemplar" do
+      exemplar_tags = MapSet.new(@transient ++ @terminal ++ @payload_dependent, &reason_tag/1)
+
+      missing = MapSet.difference(error_reason_member_tags(), exemplar_tags)
+
+      assert MapSet.equal?(missing, MapSet.new()),
+             "error_reason/0 members with no classify_error/1 exemplar — add each to a " <>
+               "bucket above and give it a classify_error/1 clause: " <>
+               inspect(MapSet.to_list(missing))
+    end
+  end
+
+  # The tag of an exemplar reason: a tuple's first element, else the bare atom itself.
+  defp reason_tag(reason) when is_tuple(reason), do: elem(reason, 0)
+  defp reason_tag(reason), do: reason
+
+  # The set of member "tags" of CDPEx.error_reason/0, read from the compiled type AST,
+  # expanding the two machine-checked remote sub-unions (call_error, launch_error). This
+  # is what makes the exemplar lists exhaustive against the type rather than by convention.
+  defp error_reason_member_tags, do: union_member_tags(CDPEx, :error_reason)
+
+  defp union_member_tags(module, type_name) do
+    {:ok, types} = Typespec.fetch_types(module)
+
+    {_kind, {^type_name, ast, _args}} =
+      Enum.find(types, fn {_, {name, _, _}} -> name == type_name end)
+
+    ast |> collect_tags() |> MapSet.new()
+  end
+
+  defp collect_tags({:type, _, :union, members}), do: Enum.flat_map(members, &collect_tags/1)
+  defp collect_tags({:atom, _, atom}), do: [atom]
+  defp collect_tags({:type, _, :tuple, [{:atom, _, tag} | _]}), do: [tag]
+
+  defp collect_tags({:remote_type, _, [{:atom, _, mod}, {:atom, _, name}, _]}),
+    do: MapSet.to_list(union_member_tags(mod, name))
+
+  defp collect_tags(_other), do: []
 end

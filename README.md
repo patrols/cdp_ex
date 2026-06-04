@@ -220,6 +220,10 @@ transient/terminal decision lives in one place instead of drifting across caller
 The reason shapes are documented as
 [`t:CDPEx.error_reason/0`](https://hexdocs.pm/cdp_ex/CDPEx.html#t:error_reason/0).
 
+Retries are yours to bound: cap attempts, back off, and on a `:transient` result
+re-establish the resource (open a fresh page/browser) rather than reusing a dead
+handle — a dead page keeps returning `:noproc`.
+
 ## Telemetry
 
 CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
