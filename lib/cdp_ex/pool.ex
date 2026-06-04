@@ -29,7 +29,8 @@ defmodule CDPEx.Pool do
   ## Options
 
     * `:size` — maximum number of browsers (default `1`)
-    * `:launch_opts` — options passed to each `CDPEx.Browser` (see `CDPEx.Chrome`)
+    * `:launch_opts` — options passed to each `CDPEx.Browser` (see `CDPEx.Chrome`); any
+      `:owner` here is ignored — the pool owns its browsers and sets it itself
     * `:checkout_timeout` — ms to wait for a free browser (default `5_000`)
     * `:name` — registers the pool process
   """
@@ -37,6 +38,8 @@ defmodule CDPEx.Pool do
   use GenServer
 
   alias CDPEx.Browser
+
+  require Logger
 
   @default_size 1
   @default_checkout_timeout 5_000
@@ -255,17 +258,30 @@ defmodule CDPEx.Pool do
 
     # An in-flight launch may finish a browser we never adopted: once the task runs
     # Process.unlink/1, that browser is linked to nobody, so killing task_sup won't reap it.
-    # task_sup is still alive here, so each launch can still deliver — block briefly per ref
-    # to catch a just-completed one and stop it (or its terminal :DOWN/error), so a shutdown
-    # mid-launch doesn't orphan Chrome. Bounded by @launch_drain_timeout; child_spec's
-    # shutdown: 30_000 gives headroom for the pool's :size.
+    # task_sup is still alive here, so each launch can still deliver — wait briefly per ref to
+    # catch a just-completed one and stop it (or its terminal :DOWN/error), so a shutdown
+    # mid-launch doesn't orphan Chrome. One SHARED deadline caps the whole drain at
+    # @launch_drain_timeout regardless of :size, so it can't blow past child_spec's
+    # shutdown: 30_000 (which would let the supervisor :brutal_kill us mid-drain).
+    drain_deadline = System.monotonic_time(:millisecond) + @launch_drain_timeout
+
     Enum.each(Map.keys(state.launching), fn ref ->
+      remaining = max(drain_deadline - System.monotonic_time(:millisecond), 0)
+
       receive do
         {^ref, {:ok, browser}} -> safe_stop(browser)
         {^ref, _other} -> :ok
         {:DOWN, ^ref, :process, _pid, _reason} -> :ok
       after
-        @launch_drain_timeout -> :ok
+        remaining ->
+          # Budget spent before this launch delivered — its browser (if it completed) may
+          # leak. Surface it rather than leaking silently. (remaining == 0 once the shared
+          # deadline is used up, so later refs are skipped without a spurious wait.)
+          if remaining > 0 do
+            Logger.warning(
+              "[CDPEx.Pool] a browser launch didn't complete within the shutdown drain; its Chrome may be orphaned"
+            )
+          end
       end
     end)
 
