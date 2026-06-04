@@ -84,7 +84,10 @@ defmodule CDPEx do
   the page-level tagged kinds and bare atoms — are hand-maintained (kinds such as
   `{:cdp_error, method, payload}` also wrap arbitrary CDP data), kept honest by a
   compile-time coverage test that fails if any member here lacks a `classify_error/1`
-  test exemplar — so a new member can't be added without being classified.
+  test exemplar — so a member can't be added to this type without being classified.
+  That guard is one-directional (type → classified): the reverse — an error a producer
+  returns but never adds here — still relies on review, and such a stray reason would
+  fall through `classify_error/1` to `:unknown`.
 
   Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
   `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
