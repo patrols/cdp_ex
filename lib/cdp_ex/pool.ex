@@ -80,8 +80,9 @@ defmodule CDPEx.Pool do
   Borrows a browser, blocking up to `timeout` ms when all are busy.
 
   Returns `{:ok, browser}`, `{:error, :timeout}`, or `{:error, reason}` if a
-  browser had to be launched and failed. **Always** `checkin/2` it when done — or
-  use `with_browser/3` / `with_page/3`, which do that for you.
+  browser had to be launched and failed. A caller still waiting when the pool stops
+  gets `{:error, :noproc}`. **Always** `checkin/2` it when done — or use
+  `with_browser/3` / `with_page/3`, which do that for you.
   """
   @spec checkout(GenServer.server(), timeout()) :: {:ok, pid()} | {:error, term()}
   def checkout(pool, timeout \\ @default_checkout_timeout) do
@@ -201,6 +202,9 @@ defmodule CDPEx.Pool do
     case result do
       {:ok, browser} -> {:noreply, browser_launched(state, browser)}
       {:error, reason} -> {:noreply, launch_failed(state, reason)}
+      # A start_fun that returns something other than {:ok, _} / {:error, _} (e.g. :ignore,
+      # valid per GenServer.on_start) is treated as a failed launch rather than crashing us.
+      other -> {:noreply, launch_failed(state, {:unexpected_launch_result, other})}
     end
   end
 
@@ -216,6 +220,13 @@ defmodule CDPEx.Pool do
       nil -> {:noreply, state}
       browser -> {:noreply, state |> release(browser) |> dispatch()}
     end
+  end
+
+  def handle_info({:EXIT, task_sup, reason}, %__MODULE__{task_sup: task_sup} = state) do
+    # Our launch-task supervisor died — without it we can't launch browsers (a checkout
+    # would crash on async_nolink to a dead sup). Stop with an attributable reason so our
+    # own supervisor restarts us with a fresh task_sup, rather than limping on as a zombie.
+    {:stop, {:task_sup_down, reason}, state}
   end
 
   def handle_info({:EXIT, browser, _reason}, state) do
@@ -238,6 +249,18 @@ defmodule CDPEx.Pool do
 
     Enum.each(state.available, &safe_stop/1)
     Enum.each(Map.keys(state.busy), &safe_stop/1)
+
+    # A launch may have finished and delivered {ref, {:ok, browser}} that we never processed
+    # (the browser is already unlinked from its task, so killing task_sup won't reap it).
+    # Drain those and stop them so a shutdown mid-launch doesn't orphan a Chrome.
+    Enum.each(Map.keys(state.launching), fn ref ->
+      receive do
+        {^ref, {:ok, browser}} -> safe_stop(browser)
+      after
+        0 -> :ok
+      end
+    end)
+
     :ok
   end
 

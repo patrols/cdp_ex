@@ -129,13 +129,14 @@ defmodule CDPEx.PoolTest do
     assert Process.alive?(pool)
   end
 
-  test "a launch task crash surfaces as an error and the pool survives" do
+  test "a launch task crash surfaces its reason as an error and the pool survives" do
     pool = start_pool(size: 1, start_fun: fn _ -> raise "launch crash" end)
-    # The launch task crash logs a (expected) SASL report — capture it so it isn't noise.
-    capture_log(fn ->
-      assert {:error, _reason} = Pool.checkout(pool, 1_000)
-    end)
 
+    # The launch task crash logs a (expected) SASL report — capture it so it isn't noise.
+    {result, _log} = with_log(fn -> Pool.checkout(pool, 1_000) end)
+
+    # The task's :DOWN reason (the raised exception) is propagated, not a bare atom.
+    assert {:error, {%RuntimeError{message: "launch crash"}, _stacktrace}} = result
     assert Process.alive?(pool)
   end
 
@@ -210,6 +211,64 @@ defmodule CDPEx.PoolTest do
     assert :sys.get_state(pool).count == 3
 
     Enum.each(holders, &send(&1, :release))
+  end
+
+  test "the pool stops with an attributable reason if its launch supervisor dies (#22)" do
+    pool = start_pool(size: 1)
+    ref = Process.monitor(pool)
+    task_sup = :sys.get_state(pool).task_sup
+
+    # The pool's stop logs an (expected) termination report — capture it so it isn't noise.
+    capture_log(fn ->
+      Process.exit(task_sup, :kill)
+
+      # Rather than limping on unable to launch, the pool stops so its own supervisor can
+      # restart it with a fresh task_sup.
+      assert_receive {:DOWN, ^ref, :process, ^pool, {:task_sup_down, :killed}}, 1_000
+    end)
+  end
+
+  test "a launch that outlives its timed-out waiter becomes a warm spare (#22)" do
+    test = self()
+
+    parked_start = fn opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 1, start_fun: parked_start)
+
+    # The waiter triggers a launch then times out before it resolves.
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
+    assert_receive {:launching, launcher}, 1_000
+
+    # The launch completes with no waiter left — its browser is kept as a warm spare, not
+    # leaked, and a later checkout reuses it (count stays 1, no second launch).
+    send(launcher, :proceed)
+    assert {:ok, _b} = Pool.checkout(pool, 1_000)
+    assert :sys.get_state(pool).count == 1
+  end
+
+  test "a launch that fails after its waiter timed out is handled without crashing (#22)" do
+    test = self()
+
+    parked_fail = fn _opts ->
+      send(test, {:launching, self()})
+      receive do: (:proceed -> :ok)
+      {:error, :late_boom}
+    end
+
+    pool = start_pool(size: 1, start_fun: parked_fail)
+
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
+    assert_receive {:launching, launcher}, 1_000
+
+    # The failure arrives with no waiter to reply to; the pool absorbs it and frees the slot.
+    send(launcher, :proceed)
+    assert Process.alive?(pool)
+    # The slot freed, so a fresh checkout can launch again (it parks, so we time it out).
+    assert {:error, :timeout} = Pool.checkout(pool, 50)
   end
 
   defp start_pool(opts) do
