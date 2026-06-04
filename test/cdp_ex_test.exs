@@ -140,20 +140,20 @@ defmodule CDPExTest do
       assert CDPEx.classify_error({:navigate, :weird}) == :unknown
     end
 
-    test "navigate net::ERR_* matching is substring-boundary safe and crash-free" do
-      # Look-alikes that embed a transient word but are not an allowlisted code must stay
-      # :unknown — these are exactly what a future @transient_net_errors edit could flip,
-      # so pin them. (ERR_DNS_TIMED_OUT is not ERR_TIMED_OUT; ERR_SOCKS_CONNECTION_
-      # HOST_UNREACHABLE is not ERR_ADDRESS_UNREACHABLE / ERR_CONNECTION_*.)
+    test "navigate net::ERR_* matching is exact-token and crash-free" do
+      # Look-alikes that embed a transient code as a fragment must stay :unknown — exact
+      # matching (not substring) guarantees this even against a future allowlist edit.
+      # (ERR_DNS_TIMED_OUT is not ERR_TIMED_OUT; ERR_SOCKS_CONNECTION_HOST_UNREACHABLE is
+      # not ERR_ADDRESS_UNREACHABLE / ERR_CONNECTION_*.)
       assert CDPEx.classify_error({:navigate, "net::ERR_DNS_TIMED_OUT"}) == :unknown
 
       assert CDPEx.classify_error({:navigate, "net::ERR_SOCKS_CONNECTION_HOST_UNREACHABLE"}) ==
                :unknown
 
+      # A missing "net::" prefix, an empty string, or any non-binary payload resolves to
+      # :unknown — never a crash (the is_binary guard keeps a charlist away from the match).
+      assert CDPEx.classify_error({:navigate, "ERR_TIMED_OUT"}) == :unknown
       assert CDPEx.classify_error({:navigate, ""}) == :unknown
-
-      # Non-binary payloads must route via the is_binary guard to :unknown, never reach
-      # String.contains?/2 (which would raise on a charlist).
       assert CDPEx.classify_error({:navigate, ~c"net::ERR_TIMED_OUT"}) == :unknown
       assert CDPEx.classify_error({:navigate, nil}) == :unknown
     end

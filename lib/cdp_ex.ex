@@ -245,22 +245,24 @@ defmodule CDPEx do
   # site-specific guesses. Genuinely ambiguous codes (DNS ERR_NAME_NOT_RESOLVED,
   # ERR_ABORTED, ERR_BLOCKED_BY_*, ERR_TOO_MANY_REDIRECTS) are deliberately left
   # :unknown for the caller to decide.
-  @transient_net_errors ~w(
-    ERR_CONNECTION_REFUSED
-    ERR_CONNECTION_RESET
-    ERR_CONNECTION_CLOSED
-    ERR_CONNECTION_ABORTED
-    ERR_CONNECTION_TIMED_OUT
-    ERR_TIMED_OUT
-    ERR_NETWORK_CHANGED
-    ERR_INTERNET_DISCONNECTED
-    ERR_ADDRESS_UNREACHABLE
-    ERR_SOCKET_NOT_CONNECTED
-  )
+  @transient_net_errors MapSet.new(~w(
+                            ERR_CONNECTION_REFUSED
+                            ERR_CONNECTION_RESET
+                            ERR_CONNECTION_CLOSED
+                            ERR_CONNECTION_ABORTED
+                            ERR_CONNECTION_TIMED_OUT
+                            ERR_TIMED_OUT
+                            ERR_NETWORK_CHANGED
+                            ERR_INTERNET_DISCONNECTED
+                            ERR_ADDRESS_UNREACHABLE
+                            ERR_SOCKET_NOT_CONNECTED
+                          ))
 
-  defp transient_net_error?(error_text) do
-    Enum.any?(@transient_net_errors, &String.contains?(error_text, &1))
-  end
+  # Exact-token match on the code after the "net::" prefix (Chrome's navigate errorText is
+  # the bare code) — not a substring scan, so a future allowlist entry can't silently flip
+  # an ambiguous code that merely contains it. A non-"net::" / suffixed text is :unknown.
+  defp transient_net_error?("net::" <> code), do: MapSet.member?(@transient_net_errors, code)
+  defp transient_net_error?(_error_text), do: false
 
   @doc """
   Launches a headless Chrome browser and returns its process pid.
