@@ -85,7 +85,9 @@ defmodule CDPEx.Page do
   `response: true` captures the document response in a short-lived helper process with
   its own `Network.responseReceived` subscription, so it composes safely with
   `observe_network/2` on the same page — the caller's subscription and any buffered
-  events are left untouched.
+  events are left untouched. A normal connection drop still surfaces as
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  internal helper returns `{:error, {:capture_failed, reason}}`.
 
   Options:
     * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`

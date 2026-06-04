@@ -1021,7 +1021,10 @@ defmodule CDPEx.PageTest do
   end
 
   # Collect every buffered Network.responseReceived event currently in this process's
-  # mailbox (the observer's copies), returning their params maps.
+  # mailbox (the observer's copies), returning their params maps. `after 0` is safe here:
+  # both copies are enqueued (local sends are synchronous) before the helper sends
+  # {:caller_done, ...} that unblocks the caller, so they are already in the mailbox by
+  # the time this runs — no flake window.
   defp drain_cdp_events(conn, acc) do
     receive do
       {:cdp_event, ^conn, "Network.responseReceived", params, _sid} ->
