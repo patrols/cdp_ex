@@ -234,7 +234,7 @@ defmodule CDPEx.FakeCDP do
 
   defp take_payload(opcode, true, len, data) do
     case data do
-      <<mask::binary-size(4), payload::binary-size(len), rest::binary>> ->
+      <<mask::binary-size(4), payload::binary-size(^len), rest::binary>> ->
         {:ok, {opcode, unmask(payload, mask)}, rest}
 
       _ ->
@@ -244,7 +244,7 @@ defmodule CDPEx.FakeCDP do
 
   defp take_payload(opcode, false, len, data) do
     case data do
-      <<payload::binary-size(len), rest::binary>> -> {:ok, {opcode, payload}, rest}
+      <<payload::binary-size(^len), rest::binary>> -> {:ok, {opcode, payload}, rest}
       _ -> :incomplete
     end
   end

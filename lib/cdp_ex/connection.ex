@@ -26,8 +26,6 @@ defmodule CDPEx.Connection do
   alias Mint.HTTP
   alias Mint.WebSocket
 
-  require Logger
-
   @upgrade_timeout 15_000
   @default_call_timeout 10_000
 
