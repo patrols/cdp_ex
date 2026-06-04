@@ -264,11 +264,70 @@ defmodule CDPEx.PoolTest do
     assert {:error, :timeout} = Pool.checkout(pool, 50)
     assert_receive {:launching, launcher}, 1_000
 
-    # The failure arrives with no waiter to reply to; the pool absorbs it and frees the slot.
+    # The failure arrives with no waiter in the queue — the pool absorbs it (no crash) and
+    # frees the slot (launching drains back to empty).
     send(launcher, :proceed)
+    assert eventually(fn -> :sys.get_state(pool).launching == %{} end)
     assert Process.alive?(pool)
-    # The slot freed, so a fresh checkout can launch again (it parks, so we time it out).
-    assert {:error, :timeout} = Pool.checkout(pool, 50)
+  end
+
+  test "the pool passes itself as :owner so an adopted browser self-reaps against it (#22)" do
+    test = self()
+
+    capturing_start = fn opts ->
+      send(test, {:launch_opts, opts})
+      FakeBrowser.start_link(opts)
+    end
+
+    pool = start_pool(size: 1, start_fun: capturing_start)
+
+    {:ok, _b} = Pool.checkout(pool, 1_000)
+    assert_receive {:launch_opts, opts}
+    assert opts[:owner] == pool
+  end
+
+  test "a launch failure doesn't fail a waiter still covered by another in-flight launch (#22)" do
+    test = self()
+
+    controlled = fn opts ->
+      send(test, {:launch, self()})
+
+      receive do
+        :proceed_ok -> FakeBrowser.start_link(opts)
+        {:proceed_error, reason} -> {:error, reason}
+      end
+    end
+
+    pool = start_pool(size: 2, start_fun: controlled)
+
+    # w2 first (long timeout) — its launch is confirmed in flight before w1 exists, so w1's
+    # short timeout can't race ahead of it. w1 then checks out (its launch fires too) and
+    # times out, leaving one waiter (w2) but BOTH launches still in flight.
+    w2 =
+      spawn(fn ->
+        send(test, {:w2, Pool.checkout(pool, 3_000)})
+        receive do: (:stop -> :ok), after: (5_000 -> :ok)
+      end)
+
+    assert_receive {:launch, lb}, 1_000
+
+    w1 =
+      spawn(fn ->
+        send(test, {:w1, Pool.checkout(pool, 100)})
+        receive do: (:stop -> :ok), after: (5_000 -> :ok)
+      end)
+
+    assert_receive {:launch, la}, 1_000
+    assert_receive {:w1, {:error, :timeout}}, 1_000
+
+    # One launch fails; the other succeeds. w2 must be served by the survivor, not failed by
+    # the casualty (pre-refinement it would have been failed to the head of the queue).
+    send(la, {:proceed_error, :boom})
+    send(lb, :proceed_ok)
+
+    assert_receive {:w2, {:ok, _browser}}, 2_000
+    send(w1, :stop)
+    send(w2, :stop)
   end
 
   defp start_pool(opts) do

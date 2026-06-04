@@ -40,6 +40,8 @@ defmodule CDPEx.Pool do
 
   @default_size 1
   @default_checkout_timeout 5_000
+  # Per-launch ceiling for terminate/2's drain of in-flight launches (see terminate/2).
+  @launch_drain_timeout 5_000
 
   defstruct [
     :size,
@@ -80,7 +82,8 @@ defmodule CDPEx.Pool do
   Borrows a browser, blocking up to `timeout` ms when all are busy.
 
   Returns `{:ok, browser}`, `{:error, :timeout}`, or `{:error, reason}` if a
-  browser had to be launched and failed. A caller still waiting when the pool stops
+  browser had to be launched and failed — a launch error is reported to a waiting
+  caller and is generally worth retrying. A caller still waiting when the pool stops
   gets `{:error, :noproc}`. **Always** `checkin/2` it when done — or use
   `with_browser/3` / `with_page/3`, which do that for you.
   """
@@ -250,14 +253,19 @@ defmodule CDPEx.Pool do
     Enum.each(state.available, &safe_stop/1)
     Enum.each(Map.keys(state.busy), &safe_stop/1)
 
-    # A launch may have finished and delivered {ref, {:ok, browser}} that we never processed
-    # (the browser is already unlinked from its task, so killing task_sup won't reap it).
-    # Drain those and stop them so a shutdown mid-launch doesn't orphan a Chrome.
+    # An in-flight launch may finish a browser we never adopted: once the task runs
+    # Process.unlink/1, that browser is linked to nobody, so killing task_sup won't reap it.
+    # task_sup is still alive here, so each launch can still deliver — block briefly per ref
+    # to catch a just-completed one and stop it (or its terminal :DOWN/error), so a shutdown
+    # mid-launch doesn't orphan Chrome. Bounded by @launch_drain_timeout; child_spec's
+    # shutdown: 30_000 gives headroom for the pool's :size.
     Enum.each(Map.keys(state.launching), fn ref ->
       receive do
         {^ref, {:ok, browser}} -> safe_stop(browser)
+        {^ref, _other} -> :ok
+        {:DOWN, ^ref, :process, _pid, _reason} -> :ok
       after
-        0 -> :ok
+        @launch_drain_timeout -> :ok
       end
     end)
 
@@ -304,16 +312,20 @@ defmodule CDPEx.Pool do
   # POOL adopts it on the result — a browser linked to the ephemeral task would lose the
   # pool's crash handling. Keyed by the task ref to correlate the result / crash.
   defp start_one_launch(%__MODULE__{} = state) do
+    pool = self()
+
     task =
       Task.Supervisor.async_nolink(state.task_sup, fn ->
-        launch(state.start_fun, state.launch_opts)
+        launch(state.start_fun, state.launch_opts, pool)
       end)
 
     %{state | launching: Map.put(state.launching, task.ref, true)}
   end
 
-  defp launch(start_fun, launch_opts) do
-    case start_fun.(launch_opts) do
+  defp launch(start_fun, launch_opts, pool) do
+    # Pass `owner: pool` so an adopted browser's owner-death self-reap targets the pool, not
+    # this throwaway task (the default Browser honours it; an injected start_fun ignores it).
+    case start_fun.(Keyword.put(launch_opts, :owner, pool)) do
       {:ok, browser} = ok ->
         # Detach from this (about-to-exit) task so the pool, not the task, owns the link.
         Process.unlink(browser)
@@ -338,18 +350,25 @@ defmodule CDPEx.Pool do
     end
   end
 
-  # A launch failed (start error or task crash). Reply the reason to the head waiter so a
-  # persistent failure surfaces to a caller instead of silently relaunching forever;
-  # remaining waiters stay queued and a later dispatch may retry for them.
+  # A launch failed (start error or task crash). Surface the reason to the head waiter ONLY
+  # when this failure leaves one uncovered — i.e. fewer in-flight launches remain than queued
+  # waiters. If every waiter is still covered by another in-flight launch (e.g. this failed
+  # launch's waiter already timed out and left the queue), don't spuriously fail a live
+  # waiter — let the other launches serve them. Replying on a genuine shortfall also bounds a
+  # relaunch loop on persistent failure (each failure consumes one waiter).
   defp launch_failed(state, reason) do
-    case :queue.out(state.waiting) do
-      {{:value, {from, timer}}, rest} ->
-        _ = cancel_timer(timer)
-        GenServer.reply(from, {:error, reason})
-        dispatch(%{state | waiting: rest})
+    if map_size(state.launching) < :queue.len(state.waiting) do
+      case :queue.out(state.waiting) do
+        {{:value, {from, timer}}, rest} ->
+          _ = cancel_timer(timer)
+          GenServer.reply(from, {:error, reason})
+          dispatch(%{state | waiting: rest})
 
-      {:empty, _} ->
-        dispatch(state)
+        {:empty, _} ->
+          dispatch(state)
+      end
+    else
+      dispatch(state)
     end
   end
 
