@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `CDPEx.Page.navigate/3` with `response: true` no longer disturbs a same-process `observe_network/2` subscription. The document-response capture now runs in a short-lived, isolated helper process with its own `Network.responseReceived` subscription and mailbox, so a caller that is also observing the network on the same page keeps its subscription and its buffered events intact (previously the navigation unsubscribed the caller and drained those events). Cross-process observation was already unaffected (#42).
+
 ## [0.4.0] - 2026-06-04
 
 ### Added
