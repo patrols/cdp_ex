@@ -9,8 +9,15 @@ defmodule CDPExTest do
     # Exemplars are kept beside CDPEx.error_reason/0: every documented member appears
     # in exactly one bucket below. The "error_reason/0 coverage" test mechanically
     # enforces this — it extracts the union's members (expanding call_error/launch_error)
-    # and fails if any lacks an exemplar here, so a new error_reason kind can't be added
+    # and fails if any lacks an exemplar here, so a member can't be added to the type
     # without being classified.
+    #
+    # The guarantee is one-directional (type -> test): it does NOT prove every error the
+    # code *produces* reaches error_reason/0. A new producer wired up without updating the
+    # type still falls through classify_error/1's catch-all to :unknown — that direction
+    # (the original {:capture_failed, _} drift) stays a review/convention responsibility,
+    # since the producing tags are scattered across {:error, _} / {:stop, _} returns and
+    # can't be enumerated mechanically without a brittle source scan.
 
     # Re-attempt may succeed: dropped connection, dead process, timeout, launch trouble,
     # or an internal capture/idle helper crash.
