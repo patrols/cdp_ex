@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-04
+
 ### Added
 - `CDPEx.Page.navigate/3` accepts `response: true` to return `{:ok, page, %{status, url}}` — the main document's HTTP status and final (post-redirect) URL, correlated to the navigation by its `loaderId`. Lets callers detect a 403 wall / 404 / login-redirect instead of treating every navigation as success. Lazily enables the `Network` domain; returns `{:error, {:no_document_response, url}}` when no document response arrives (#31).
 - `CDPEx.Page.wait_for_response/3` blocks until a network response whose URL matches a function / `Regex` / substring arrives, returning the `Network.responseReceived` params (HTTP status + `requestId` for a follow-up `response_body/3`) — for an XHR/`fetch` kicked off by a `click/3` (#32).
@@ -19,6 +21,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - `CDPEx.Page` request interception no longer bricks the page when its owner dies: `CDPEx.Browser` now monitors the process that called `enable_request_interception/2` and auto-`Fetch.disable`s the page (off the Browser process, so a hung connection can't stall other pages) if that process exits without disabling — a crashed or forgetful caller can't leave every request paused with no resolver (#30).
 - `CDPEx.Page.authenticate/4` no longer blocks the `CDPEx.Browser` GenServer for the duration of `Fetch.enable`: the per-page Fetch handler now arms asynchronously and signals readiness, so the browser keeps serving other pages while a page authenticates. `authenticate/4` still returns only once interception is armed, preserving the "armed before `navigate/3`" guarantee (#36).
+- Compiles cleanly on **Elixir 1.20** under `--warnings-as-errors` (dropped an unused `require`; pinned bitstring sizes in the test WebSocket parser). CI now covers Elixir 1.15 / 1.19 / 1.20.
 
 ## [0.3.0] - 2026-06-03
 
