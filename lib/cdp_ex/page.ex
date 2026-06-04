@@ -167,7 +167,7 @@ defmodule CDPEx.Page do
   # Like navigate_with_wait/4 but also captures the main-document Network.responseReceived
   # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
   # stays untouched. Requires the Network domain; enables it lazily. The capture itself
-  # runs in an isolated helper process (capture_via_helper/4) so it never disturbs a
+  # runs in an isolated helper process (run_in_helper/2) so it never disturbs a
   # same-process observe_network/2 subscription (#42).
   defp navigate_capturing_response(page, url, wait_until, timeout) do
     # Validate :wait_until up front (lifecycle_name/1 raises on a bad value) so an
