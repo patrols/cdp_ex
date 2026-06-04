@@ -21,19 +21,16 @@ defmodule CDPEx.Pool do
   so `:size` self-heals. Put the pool under your supervision tree; its
   `terminate/2` stops every browser, reaping Chrome.
 
-  Browser launches are **synchronous** — a browser is started inside the pool
-  process, so while one is launching (a cold Chrome can take a few seconds) the
-  pool can't serve other checkouts or checkins. A short `:checkout_timeout` is
-  therefore unreliable while the pool is still growing to `:size`; once warm,
-  checkouts are immediate.
+  Browser launches are **asynchronous** — each cold start (a cold Chrome can take a
+  few seconds) runs in its own task, so the pool keeps serving checkouts, checkins,
+  and timeouts while browsers warm up, and a pool growing to `:size` under load
+  launches them concurrently. `:checkout_timeout` is honored even during warmup.
 
   ## Options
 
     * `:size` — maximum number of browsers (default `1`)
     * `:launch_opts` — options passed to each `CDPEx.Browser` (see `CDPEx.Chrome`)
-    * `:checkout_timeout` — ms to wait for a free browser (default `5_000`). While
-      the pool is still launching browsers to `:size`, keep this above your cold
-      Chrome launch time — launches are synchronous (see below)
+    * `:checkout_timeout` — ms to wait for a free browser (default `5_000`)
     * `:name` — registers the pool process
   """
 
@@ -48,9 +45,13 @@ defmodule CDPEx.Pool do
     :size,
     :launch_opts,
     :start_fun,
+    :task_sup,
     available: [],
     busy: %{},
     waiting: :queue.new(),
+    # task_ref => true for each in-flight async launch; counts toward :size so
+    # count + map_size(launching) never exceeds it.
+    launching: %{},
     count: 0
   ]
 
@@ -151,11 +152,16 @@ defmodule CDPEx.Pool do
     # pool down, and terminate/2 runs to reap Chrome.
     Process.flag(:trap_exit, true)
 
+    # Owns the async browser-launch tasks (see start_one_launch/1). Linked to the pool, so
+    # it — and any in-flight launches — go down with us.
+    {:ok, task_sup} = Task.Supervisor.start_link()
+
     {:ok,
      %__MODULE__{
        size: Keyword.get(opts, :size, @default_size),
        launch_opts: Keyword.get(opts, :launch_opts, []),
-       start_fun: Keyword.get(opts, :start_fun, &Browser.start_link/1)
+       start_fun: Keyword.get(opts, :start_fun, &Browser.start_link/1),
+       task_sup: task_sup
      }}
   end
 
@@ -183,6 +189,25 @@ defmodule CDPEx.Pool do
         # Served between the timer firing and now — nothing to do.
         {:noreply, state}
     end
+  end
+
+  def handle_info({ref, result}, %__MODULE__{launching: launching} = state)
+      when is_reference(ref) and is_map_key(launching, ref) do
+    # An async launch task returned (a started browser, or a start error). Stop monitoring
+    # it — the task's own :DOWN follows, so flush it — then act on the result.
+    Process.demonitor(ref, [:flush])
+    state = %{state | launching: Map.delete(launching, ref)}
+
+    case result do
+      {:ok, browser} -> {:noreply, browser_launched(state, browser)}
+      {:error, reason} -> {:noreply, launch_failed(state, reason)}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %__MODULE__{launching: launching} = state)
+      when is_map_key(launching, ref) do
+    # A launch task crashed before returning a result (it never sent {ref, result}).
+    {:noreply, launch_failed(%{state | launching: Map.delete(launching, ref)}, reason)}
   end
 
   def handle_info({:DOWN, ref, :process, _owner, _reason}, state) do
@@ -218,37 +243,92 @@ defmodule CDPEx.Pool do
 
   # ── pool mechanics ──────────────────────────────────────────────────────────
 
-  # Serve queued waiters while there is capacity (a free browser, or room to launch).
+  # Serve queued waiters: hand out idle browsers, then start launches (concurrently, up to
+  # :size) for any still-waiting callers not already covered by an in-flight launch. Launches
+  # run in tasks, so the pool stays responsive while Chrome warms up (#22).
   defp dispatch(state) do
+    state |> serve_available() |> start_launches()
+  end
+
+  # Assign idle browsers to the head of the queue, FIFO, until either runs out.
+  defp serve_available(%__MODULE__{available: [browser | rest_avail]} = state) do
     case :queue.out(state.waiting) do
-      {:empty, _} -> state
-      {{:value, waiter}, rest} -> dispatch_to(state, waiter, rest)
+      {{:value, waiter}, rest} ->
+        %{state | available: rest_avail, waiting: rest}
+        |> assign(browser, waiter)
+        |> serve_available()
+
+      {:empty, _} ->
+        state
     end
   end
 
-  defp dispatch_to(%__MODULE__{available: [browser | rest_avail]} = state, waiter, rest) do
-    %{state | available: rest_avail, waiting: rest}
-    |> assign(browser, waiter)
-    |> dispatch()
+  defp serve_available(state), do: state
+
+  # Start one launch per still-uncovered waiter, bounded by free capacity so
+  # count + in-flight launches never exceeds :size. Launches are anonymous: each browser
+  # joins `available` on success and the next dispatch serves a waiter FIFO.
+  defp start_launches(%__MODULE__{count: count, size: size, launching: launching} = state) do
+    capacity = size - count - map_size(launching)
+    uncovered = :queue.len(state.waiting) - map_size(launching)
+    n = max(min(capacity, uncovered), 0)
+
+    if n > 0, do: Enum.reduce(1..n, state, fn _, acc -> start_one_launch(acc) end), else: state
   end
 
-  defp dispatch_to(%__MODULE__{count: count, size: size} = state, {from, timer}, rest)
-       when count < size do
-    case state.start_fun.(state.launch_opts) do
-      {:ok, browser} ->
-        %{state | count: count + 1, waiting: rest}
-        |> assign(browser, {from, timer})
-        |> dispatch()
+  # Launch a browser in a monitored task. async_nolink keeps a launch crash from taking the
+  # pool down (we get its {:DOWN}); the task start_links the browser then unlinks it so the
+  # POOL adopts it on the result — a browser linked to the ephemeral task would lose the
+  # pool's crash handling. Keyed by the task ref to correlate the result / crash.
+  defp start_one_launch(%__MODULE__{} = state) do
+    task =
+      Task.Supervisor.async_nolink(state.task_sup, fn ->
+        launch(state.start_fun, state.launch_opts)
+      end)
 
-      {:error, reason} ->
+    %{state | launching: Map.put(state.launching, task.ref, true)}
+  end
+
+  defp launch(start_fun, launch_opts) do
+    case start_fun.(launch_opts) do
+      {:ok, browser} = ok ->
+        # Detach from this (about-to-exit) task so the pool, not the task, owns the link.
+        Process.unlink(browser)
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  # Adopt a freshly launched browser: link it to the pool (the task unlinked it), add it to
+  # the available set, and dispatch so a waiter is served. If it died in the unlink→adopt
+  # gap, alive? routes it through launch_failed rather than handing a dead pid to a waiter;
+  # a death right after link/1 surfaces as an {:EXIT, browser, _} the EXIT clause reconciles.
+  defp browser_launched(state, browser) do
+    if Process.alive?(browser) do
+      Process.link(browser)
+
+      dispatch(%{state | count: state.count + 1, available: [browser | state.available]})
+    else
+      launch_failed(state, :noproc)
+    end
+  end
+
+  # A launch failed (start error or task crash). Reply the reason to the head waiter so a
+  # persistent failure surfaces to a caller instead of silently relaunching forever;
+  # remaining waiters stay queued and a later dispatch may retry for them.
+  defp launch_failed(state, reason) do
+    case :queue.out(state.waiting) do
+      {{:value, {from, timer}}, rest} ->
         _ = cancel_timer(timer)
         GenServer.reply(from, {:error, reason})
         dispatch(%{state | waiting: rest})
+
+      {:empty, _} ->
+        dispatch(state)
     end
   end
-
-  # No capacity — leave the queue intact (state.waiting still holds the waiter).
-  defp dispatch_to(state, _waiter, _rest), do: state
 
   # Mark `browser` busy for the waiter, monitor the owner (auto-checkin on its
   # death), cancel the wait timer, and reply.
