@@ -196,6 +196,35 @@ crashed browser is relaunched on demand.
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).
 
+## Error handling
+
+Operations return `{:error, reason}` on failure. Rather than hard-code the reason
+shapes, classify them to drive retries:
+
+```elixir
+case CDPEx.Page.navigate(page, url) do
+  {:ok, page} ->
+    {:ok, page}
+
+  {:error, reason} ->
+    if CDPEx.transient?(reason), do: retry(), else: {:error, reason}
+end
+```
+
+`CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
+couldn't be established, timeout, Chrome died or was slow to start, an internal helper
+crashed, or a connection-layer `net::ERR_*` navigation error — a fresh attempt may
+succeed), `:terminal` (selector miss, JS exception, usage/validation error — it
+won't), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*` navigation
+error or a CDP error code — you decide). The library tracks the error surface, so the
+transient/terminal decision lives in one place instead of drifting across callers.
+The reason shapes are documented as
+[`t:CDPEx.error_reason/0`](https://hexdocs.pm/cdp_ex/CDPEx.html#t:error_reason/0).
+
+Retries are yours to bound: cap attempts, back off, and on a `:transient` result
+re-establish the resource (open a fresh page/browser) rather than reusing a dead
+handle — a dead page keeps returning `:noproc`.
+
 ## Telemetry
 
 CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
