@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-04
+
 ### Added
 - `CDPEx.classify_error/1` and `CDPEx.transient?/1` — classify any `{:error, reason}` CDPEx returns as `:transient` (a fresh attempt may succeed — connection dropped or couldn't be established, timeout, Chrome died or was slow to start, an internal helper crashed, or a connection-layer `net::ERR_*` navigation failure such as `ERR_CONNECTION_REFUSED` / `ERR_TIMED_OUT`), `:terminal` (deterministic — selector miss, JS exception, usage/validation error, missing Chrome binary), or `:unknown` (payload- or timing-dependent — an ambiguous `net::ERR_*` navigation error such as DNS / blocked / aborted, a CDP error code, or a no-document navigation — you decide). The library owns the transient/terminal decision and tracks the error surface as it evolves, so retry logic isn't reimplemented (and re-drifted) in every caller. The return type is the named `t:CDPEx.error_classification/0`. See the "Error handling" section of the `CDPEx` docs (#56). **Consumer note:** `transient?/1` treats `:unknown` as **not** transient (conservative); retries remain the caller's responsibility (bound attempts, back off, and re-establish the resource — don't retry a dead handle).
 - `t:CDPEx.error_reason/0` reconciled with what the public ops actually return: added `{:capture_failed, _}` / `{:idle_wait_failed, _}` (helper crashes from `navigate/3` `response: true` and `wait_for_network_idle/2`, returned since 0.5.0) and `{:ws_connect, _}` / `{:ws_upgrade, _}` (browser-socket connect/upgrade failures from `launch/1` and `new_page/2`) — all previously missing from the aggregate type. No runtime change. A compile-time coverage test now fails if any `error_reason/0` member lacks a `classify_error/1` exemplar, so a documented member can't be added to the type without being classified (the reverse direction — an error the code produces but never adds to the type — stays a review responsibility) (#56).
@@ -119,7 +121,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/patrols/cdp_ex/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/patrols/cdp_ex/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/patrols/cdp_ex/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/patrols/cdp_ex/compare/v0.2.2...v0.3.0
