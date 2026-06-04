@@ -167,7 +167,7 @@ defmodule CDPEx.Page do
   # Like navigate_with_wait/4 but also captures the main-document Network.responseReceived
   # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
   # stays untouched. Requires the Network domain; enables it lazily. The capture itself
-  # runs in an isolated helper process (capture_via_helper/4) so it never disturbs a
+  # runs in an isolated helper process (run_in_helper/2) so it never disturbs a
   # same-process observe_network/2 subscription (#42).
   defp navigate_capturing_response(page, url, wait_until, timeout) do
     # Validate :wait_until up front (lifecycle_name/1 raises on a bad value) so an
@@ -176,27 +176,25 @@ defmodule CDPEx.Page do
     milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
 
     with :ok <- ensure_network(page, timeout) do
-      capture_via_helper(page, url, milestone, timeout)
+      run_in_helper(fn -> run_capture(page, url, milestone, timeout) end, :capture_failed)
     end
   end
 
-  # Run the response capture in its own short-lived, monitored process. The helper
-  # subscribes to Network.responseReceived (+ lifecycle) on *its* pid and drains *its*
-  # mailbox, so a caller that is also running observe_network/2 on this page keeps its
-  # subscription and its buffered events intact (#42). Connection monitors every
-  # subscriber and drops it on :DOWN, so the helper's subscription is released when it
-  # exits — no explicit unsubscribe. Every blocking op the helper makes is individually
-  # bounded (subscribe_each catches a dead conn; the Page.navigate call carries `timeout`;
-  # await_capture monitors the conn and honours `deadline`), so the helper always
-  # terminates and the caller awaits exactly one of its result or its :DOWN.
-  defp capture_via_helper(page, url, milestone, timeout) do
+  # Run a capture/wait body (`fun`) in its own short-lived, monitored process and return
+  # its result. The body subscribes to its CDP events on *the helper's* pid and drains
+  # *the helper's* mailbox, so a caller that is also running observe_network/2 on this page
+  # keeps its subscription and its buffered events intact (#42, #48). Connection monitors
+  # every subscriber and drops it on :DOWN, so the helper's subscriptions are released when
+  # it exits — no explicit unsubscribe. `fun` must bound every blocking op it makes
+  # (subscribe_each catches a dead conn; CDP calls carry a timeout; the await loops monitor
+  # the conn and honour a deadline), so the helper always terminates and the caller awaits
+  # exactly one of its result or its :DOWN. A helper that crashes before replying (a
+  # should-never-happen bug) surfaces as {:error, {on_crash, reason}}.
+  defp run_in_helper(fun, on_crash) when is_function(fun, 0) do
     parent = self()
     tag = make_ref()
 
-    {helper, mon} =
-      spawn_monitor(fn ->
-        send(parent, {tag, run_capture(page, url, milestone, timeout)})
-      end)
+    {helper, mon} = spawn_monitor(fn -> send(parent, {tag, fun.()}) end)
 
     receive do
       {^tag, result} ->
@@ -204,7 +202,7 @@ defmodule CDPEx.Page do
         result
 
       {:DOWN, ^mon, :process, ^helper, reason} ->
-        {:error, {:capture_failed, reason}}
+        {:error, {on_crash, reason}}
     end
   end
 
@@ -926,12 +924,11 @@ defmodule CDPEx.Page do
   (e.g. a streaming / SSE / long-poll connection that never closes), or
   `{:error, reason}` if the connection drops. Lazily enables the `Network` domain.
 
-  > #### Don't combine with `observe_network/2` on the same page {: .warning}
-  >
-  > This subscribes the calling process to the `Network` request-lifecycle events for
-  > the duration of the call, then unsubscribes on the way out. If the *same process*
-  > is also running `observe_network/2` on this page, that subscription is torn down.
-  > Drive the idle wait from a process that isn't also observing the network.
+  The idle wait runs in a short-lived helper process with its own subscription, so it
+  composes safely with `observe_network/2` on the same page — the caller's subscription
+  and any buffered events are left untouched. A normal connection drop surfaces as
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  internal helper returns `{:error, {:idle_wait_failed, reason}}`.
 
   Options:
     * `:idle_time` — ms of continuous idleness required (default 500)
@@ -945,9 +942,20 @@ defmodule CDPEx.Page do
     max_inflight = Keyword.get(opts, :max_inflight, 0)
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
 
-    # Subscribe BEFORE enabling so a request that starts the instant the domain turns on
-    # is counted (mirrors observe_network/2); roll the subscriptions back if enable fails.
-    # One deadline spans enable + the idle wait, so :timeout is a true overall ceiling.
+    run_in_helper(
+      fn -> run_network_idle(page, idle_time, max_inflight, deadline) end,
+      :idle_wait_failed
+    )
+  end
+
+  # The idle-wait helper body (runs in the spawned process). Subscribes BEFORE enabling so a
+  # request that starts the instant the domain turns on is counted (mirrors observe_network/2),
+  # then tracks in-flight requests until the network stays idle. `deadline` is an absolute
+  # monotonic time computed by the caller, so one deadline spans enable + the idle wait and
+  # :timeout is a true overall ceiling. Returns :ok | {:error, reason}. No try/after teardown:
+  # the helper's subscriptions are pruned by Connection on its :DOWN and its idle-tick timers
+  # die with it (an enable failure likewise just exits the helper and is auto-pruned).
+  defp run_network_idle(page, idle_time, max_inflight, deadline) do
     with :ok <- subscribe_each(page.conn, @idle_events),
          :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
@@ -962,23 +970,12 @@ defmodule CDPEx.Page do
         deadline: deadline
       }
 
-      try do
-        # Idle from the call onward: arm immediately (0 in-flight <= max_inflight).
-        case await_network_idle(ctx, %{}, arm_idle(idle_time)) do
-          :idle -> :ok
-          :timeout -> {:error, :timeout}
-          {:down, reason} -> {:error, down_reason(reason)}
-        end
-      after
-        Process.demonitor(ref, [:flush])
-        unsubscribe_each(page.conn, @idle_events)
-        Enum.each(@idle_events, &drain_events(page.conn, &1))
-        drain_idle_ticks()
+      # Idle from the call onward: arm immediately (0 in-flight <= max_inflight).
+      case await_network_idle(ctx, %{}, arm_idle(idle_time)) do
+        :idle -> :ok
+        :timeout -> {:error, :timeout}
+        {:down, reason} -> {:error, down_reason(reason)}
       end
-    else
-      {:error, _} = error ->
-        unsubscribe_each(page.conn, @idle_events)
-        error
     end
   end
 
@@ -1060,14 +1057,6 @@ defmodule CDPEx.Page do
   defp disarm_idle({timer, _tag}) do
     _ = Process.cancel_timer(timer)
     {nil, nil}
-  end
-
-  defp drain_idle_ticks do
-    receive do
-      {:idle_tick, _tag} -> drain_idle_ticks()
-    after
-      0 -> :ok
-    end
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)

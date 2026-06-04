@@ -8,6 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - `CDPEx.Page.navigate/3` with `response: true` no longer disturbs a same-process `observe_network/2` subscription. The document-response capture now runs in a short-lived, isolated helper process with its own `Network.responseReceived` subscription and mailbox, so a caller that is also observing the network on the same page keeps its subscription and its buffered events intact (previously the navigation unsubscribed the caller and drained those events). Cross-process observation was already unaffected (#42).
+- `CDPEx.Page.wait_for_network_idle/2` no longer disturbs a same-process `observe_network/2` subscription — the same fix as #42 applied to the idle wait. The in-flight tracking now runs in an isolated helper process, so a caller observing the network on the same page keeps its subscription and buffered events intact (previously the idle wait tore down the overlapping request-lifecycle subscriptions and drained those events). An abnormal crash of the internal helper surfaces as `{:error, {:idle_wait_failed, reason}}` (#48).
 
 ## [0.4.0] - 2026-06-04
 
