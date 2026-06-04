@@ -193,7 +193,7 @@ defmodule CDPEx.BrowserTest do
     test "{:armed} replies :ok to the parked caller and clears pending_auth" do
       from = {self(), make_ref()}
       fetch = spawn(fn -> :ok end)
-      state = %Browser{pending_auth: %{fetch => from}}
+      state = %Browser{pending_auth: %{fetch => {from, make_ref()}}}
 
       assert {:noreply, %Browser{pending_auth: %{}}} = Browser.handle_info({:armed, fetch}, state)
 
@@ -204,7 +204,7 @@ defmodule CDPEx.BrowserTest do
     test "{:arm_failed} fails the parked caller and clears its auths + pending_auth" do
       from = {self(), make_ref()}
       fetch = spawn(fn -> :ok end)
-      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{fetch => from}}
+      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{fetch => {from, make_ref()}}}
 
       assert {:noreply, new_state} =
                Browser.handle_info(
@@ -222,7 +222,7 @@ defmodule CDPEx.BrowserTest do
     test "a Fetch handler {:EXIT} during arming fails a still-parked caller (fallback)" do
       from = {self(), make_ref()}
       fetch = spawn(fn -> :ok end)
-      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{fetch => from}}
+      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{fetch => {from, make_ref()}}}
 
       assert {:noreply, new_state} = Browser.handle_info({:EXIT, fetch, :boom}, state)
 
@@ -241,6 +241,46 @@ defmodule CDPEx.BrowserTest do
 
       assert {:noreply, ^state} =
                Browser.handle_info({:arm_failed, spawn(fn -> :ok end), :boom}, state)
+    end
+  end
+
+  describe "auth caller-departure cleanup (#40)" do
+    test "a monitored caller's :DOWN cancels the orphaned handler and drops pending_auth" do
+      # The authenticate/4 caller departed (e.g. its 15s call timed out) while the Fetch
+      # handler was still arming. Cancel the handler (a gen_cast) and drop its pending_auth
+      # entry, but leave auths for the handler's eventual {:EXIT} to clear (two phase).
+      test = self()
+      fetch = spawn(fn -> receive(do: (msg -> send(test, {:fetch_got, msg}))) end)
+      caller = spawn(fn -> :ok end)
+      caller_ref = make_ref()
+      from = {caller, make_ref()}
+      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{fetch => {from, caller_ref}}}
+
+      assert {:noreply, new_state} =
+               Browser.handle_info({:DOWN, caller_ref, :process, caller, :timeout}, state)
+
+      assert new_state.pending_auth == %{}
+      # auths is intentionally retained — the handler's cancel-stop {:EXIT} clears it.
+      assert new_state.auths == %{"T1" => fetch}
+      assert_receive {:fetch_got, {:"$gen_cast", :cancel}}
+    end
+
+    test "the orphaned handler's later {:EXIT} clears its auths entry (re-authenticatable)" do
+      # Phase two: after the cancel, the handler stops and its {:EXIT} arrives with no
+      # pending_auth entry left — it must still drop auths so a retry isn't stuck on
+      # {:error, :already_authenticated}.
+      fetch = spawn(fn -> :ok end)
+      state = %Browser{auths: %{"T1" => fetch}, pending_auth: %{}}
+
+      assert {:noreply, %Browser{auths: %{}, pending_auth: %{}}} =
+               Browser.handle_info({:EXIT, fetch, :normal}, state)
+    end
+
+    test "a :DOWN matching neither an interception owner nor an auth caller is ignored" do
+      state = %Browser{intercepts: %{}, pending_auth: %{}}
+
+      assert {:noreply, ^state} =
+               Browser.handle_info({:DOWN, make_ref(), :process, self(), :noproc}, state)
     end
   end
 end

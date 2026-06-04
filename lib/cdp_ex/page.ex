@@ -472,6 +472,11 @@ defmodule CDPEx.Page do
   already has request interception enabled returns `{:error, {:conflict, :intercepting}}`
   (auth and interception both drive the `Fetch` domain — use one per page).
 
+  If an earlier `authenticate/4` on this page was abandoned while still arming (e.g. its
+  call timed out under heavy load), the orphaned handler is torn down automatically and
+  the page becomes re-authenticatable — a retry succeeds once that teardown completes (it
+  may briefly still see `{:error, :already_authenticated}` in the meantime).
+
   The bad-credentials loop guard keys on the request id, so a single request that
   must answer **both** a proxy and an origin challenge isn't supported — the second
   challenge is cancelled (Puppeteer-parity).

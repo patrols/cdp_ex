@@ -33,6 +33,14 @@ defmodule CDPEx.Fetch do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @doc false
+  # Cancel an armed/arming handler whose authenticate/4 caller has departed. Async so the
+  # Browser never blocks on the Fetch.disable in terminate/2; the handler stops :normal
+  # (running terminate → Fetch.disable, releasing any paused request) and its {:EXIT}
+  # lets the Browser clear its auths entry.
+  @spec cancel(pid()) :: :ok
+  def cancel(pid), do: GenServer.cast(pid, :cancel)
+
   @impl true
   def init(opts) do
     conn = Keyword.fetch!(opts, :conn)
@@ -85,6 +93,16 @@ defmodule CDPEx.Fetch do
       # The page connection died mid-arm (a close/authenticate race) — benign, no log.
       send(state.browser, {:arm_failed, self(), :noproc})
       {:stop, :normal, state}
+  end
+
+  @impl true
+  def handle_cast(:cancel, state) do
+    # The authenticate/4 caller departed before (or while) we armed. If this arrives
+    # after a successful arm, we're idle and stop now; if it was queued behind the
+    # in-flight Fetch.enable, we process it once arming returns. Either way terminate/2
+    # disables Fetch and the Browser's {:EXIT} clears its auths entry. :normal → no crash
+    # report for a benign cancellation.
+    {:stop, :normal, state}
   end
 
   @impl true
