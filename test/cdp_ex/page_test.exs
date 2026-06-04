@@ -259,7 +259,7 @@ defmodule CDPEx.PageTest do
           send(
             test,
             {:caller_done, result, subscribed?(conn, self(), "Network.responseReceived"),
-             drain_cdp_events(conn, [])}
+             drain_cdp_events(conn, "Network.responseReceived", [])}
           )
         end)
 
@@ -802,7 +802,7 @@ defmodule CDPEx.PageTest do
       fake: fake
     } do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 3_000) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # Two requests start (in-flight 2 > 0 → busy, idle timer cancelled), then both end.
       send_network_event(fake, "Network.requestWillBeSent", "R1")
@@ -816,7 +816,7 @@ defmodule CDPEx.PageTest do
 
     test "clamps in-flight at zero on extra completions", %{page: page, conn: conn, fake: fake} do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # One request, three completions: the counter must clamp at 0 (never negative)
       # and still resolve.
@@ -830,7 +830,7 @@ defmodule CDPEx.PageTest do
 
     test "times out while a request stays in flight", %{page: page, conn: conn, fake: fake} do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 200, timeout: 500) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # A request that never completes keeps in-flight at 1 (> 0), so it never idles.
       send_network_event(fake, "Network.requestWillBeSent", "R1")
@@ -842,7 +842,7 @@ defmodule CDPEx.PageTest do
       task =
         Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 1_000, timeout: 3_000) end)
 
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # Keep it busy so the idle timer can't fire, then drop the connection.
       send_network_event(fake, "Network.requestWillBeSent", "R1")
@@ -858,7 +858,7 @@ defmodule CDPEx.PageTest do
       fake: fake
     } do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 3_000) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # A redirecting request: the initial requestWillBeSent (+1), then a redirect hop
       # (requestWillBeSent carrying redirectResponse — must NOT add another +1), then the
@@ -882,7 +882,7 @@ defmodule CDPEx.PageTest do
       fake: fake
     } do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 150, timeout: 5_000) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # A NEW request (seen after the call) is in flight.
       send_network_event(fake, "Network.requestWillBeSent", "NEW")
@@ -907,7 +907,7 @@ defmodule CDPEx.PageTest do
           Page.wait_for_network_idle(page, max_inflight: 2, idle_time: 150, timeout: 5_000)
         end)
 
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # 3 in flight (> max_inflight 2) → busy: must not resolve even past idle_time.
       send_network_event(fake, "Network.requestWillBeSent", "R1")
@@ -926,7 +926,7 @@ defmodule CDPEx.PageTest do
       fake: fake
     } do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 200, timeout: 5_000) end)
-      enable_network_idle(fake, conn, task.pid)
+      enable_network_idle(fake, conn)
 
       # Request then complete → the idle timer arms (in-flight 0).
       send_network_event(fake, "Network.requestWillBeSent", "R1")
@@ -942,40 +942,71 @@ defmodule CDPEx.PageTest do
       assert :ok = Task.await(task, 3_000)
     end
 
-    test "rolls back idle subscriptions when Network.enable fails", %{
+    test "an enable failure leaves no lingering idle subscriptions", %{
       page: page,
       conn: conn,
       fake: fake
     } do
-      test = self()
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 1_000) end)
 
-      # Run from a long-lived helper (not a Task that exits) so post-rollback state
-      # reflects the explicit unsubscribe, not the connection's dead-subscriber prune.
-      runner =
-        spawn_link(fn ->
-          send(
-            test,
-            {:idle_result, Page.wait_for_network_idle(page, idle_time: 100, timeout: 1_000)}
-          )
-
-          receive do
-            :stop -> :ok
-          after
-            5_000 -> :ok
-          end
-        end)
-
-      for m <- @idle_methods, do: wait_until_subscribed(conn, runner, m)
+      # The helper subscribes to the idle methods before enabling Network.
+      for m <- @idle_methods, do: wait_until_any_subscribed(conn, m)
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{nid},"error":{"code":-32000,"message":"boom"}}))
 
-      assert_receive {:idle_result, {:error, {:cdp_error, "Network.enable", _}}}, 2_000
+      assert {:error, {:cdp_error, "Network.enable", _}} = Task.await(task)
 
-      # The enable failed → the subscribe-before-enable subscriptions were rolled back.
-      for m <- @idle_methods, do: refute(subscribed?(conn, runner, m))
+      # The helper exited on the error → Connection pruned its idle-method subscriptions
+      # on the resulting :DOWN, so nothing is left subscribed on the connection.
+      for m <- @idle_methods, do: wait_until_no_subscribers(conn, m)
+    end
 
-      send(runner, :stop)
+    test "leaves a same-process observe_network/2 subscription and buffered events intact (#48)",
+         %{page: page, conn: conn, fake: fake} do
+      test = self()
+
+      # The caller observes the network AND waits for idle on the same page. Before #48 the
+      # idle wait tore down the observer's overlapping requestWillBeSent subscription and
+      # drained its buffered events; with the isolated helper both survive.
+      caller =
+        spawn_link(fn ->
+          :ok = Page.observe_network(page)
+          send(test, :observing)
+
+          result = Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000)
+
+          send(
+            test,
+            {:caller_done, result, subscribed?(conn, self(), "Network.requestWillBeSent"),
+             drain_cdp_events(conn, "Network.requestWillBeSent", [])}
+          )
+        end)
+
+      # observe_network/2 subscribes the caller (requestWillBeSent + responseReceived), then
+      # answer its Network.enable.
+      wait_until_subscribed(conn, caller, "Network.requestWillBeSent")
+      answer_network_enable(fake)
+      assert_receive :observing, 2_000
+
+      # wait_for_network_idle re-enables Network (idempotent); the helper subscribes to the
+      # idle methods (gated on loadingFinished, which only the helper observes) and enters
+      # its loop. enable_network_idle waits for those subs + answers the second enable.
+      enable_network_idle(fake, conn)
+
+      # One request that starts and finishes: the helper counts it and, after idle_time with
+      # nothing in flight, resolves :ok. The observer gets its own copy of the
+      # requestWillBeSent (the helper's loop drains only the helper's mailbox).
+      send_network_event(fake, "Network.requestWillBeSent", "R1")
+      send_network_event(fake, "Network.loadingFinished", "R1")
+
+      assert_receive {:caller_done, result, still_subscribed?, buffered}, 3_000
+
+      assert result == :ok
+      assert still_subscribed?, "wait_for_network_idle tore down the observer's subscription"
+
+      ids = for %{"requestId" => id} <- buffered, do: id
+      assert "R1" in ids, "observer lost its buffered requestWillBeSent event"
     end
   end
 
@@ -1020,15 +1051,31 @@ defmodule CDPEx.PageTest do
     end
   end
 
-  # Collect every buffered Network.responseReceived event currently in this process's
-  # mailbox (the observer's copies), returning their params maps. `after 0` is safe here:
-  # both copies are enqueued (local sends are synchronous) before the helper sends
-  # {:caller_done, ...} that unblocks the caller, so they are already in the mailbox by
-  # the time this runs — no flake window.
-  defp drain_cdp_events(conn, acc) do
+  # Poll until `method` has zero subscribers — e.g. after an internal helper exits and
+  # Connection prunes it on the resulting :DOWN.
+  defp wait_until_no_subscribers(conn, method, retries \\ 100) do
+    cond do
+      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) == 0 ->
+        :ok
+
+      retries == 0 ->
+        flunk("subscribers for #{method} not pruned in time")
+
+      true ->
+        Process.sleep(10)
+        wait_until_no_subscribers(conn, method, retries - 1)
+    end
+  end
+
+  # Collect every buffered `method` cdp_event currently in this process's mailbox (the
+  # observer's copies), returning their params maps. `after 0` is safe here: the copies are
+  # enqueued (local sends are synchronous) before the helper sends the {:caller_done, ...}
+  # that unblocks the caller, so they are already in the mailbox by the time this runs — no
+  # flake window.
+  defp drain_cdp_events(conn, method, acc) do
     receive do
-      {:cdp_event, ^conn, "Network.responseReceived", params, _sid} ->
-        drain_cdp_events(conn, [params | acc])
+      {:cdp_event, ^conn, ^method, params, _sid} ->
+        drain_cdp_events(conn, method, [params | acc])
     after
       0 -> Enum.reverse(acc)
     end
@@ -1050,16 +1097,17 @@ defmodule CDPEx.PageTest do
     end
   end
 
-  # Answer the Network.enable that wait_for_network_idle/2 issues. When `conn`/`pid` are
-  # given, first wait until the three idle subscriptions are registered (subscribe runs
-  # before enable), so events sent afterward are delivered rather than dropped by the drain.
-  defp enable_network_idle(fake, conn \\ nil, pid \\ nil) do
-    if conn && pid, do: for(m <- @idle_methods, do: wait_until_subscribed(conn, pid, m))
+  # Answer the Network.enable that wait_for_network_idle/2 issues. When `conn` is given,
+  # first wait until the three idle subscriptions are registered (subscribe runs before
+  # enable, from the internal helper process whose pid the test can't name), so events sent
+  # afterward are delivered rather than dropped by the drain.
+  defp enable_network_idle(fake, conn \\ nil) do
+    if conn, do: for(m <- @idle_methods, do: wait_until_any_subscribed(conn, m))
     assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
     FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
-    # Let the task drain stale events and enter the receive loop before the caller sends
+    # Let the helper drain stale events and enter the receive loop before the caller sends
     # events, so they land in the loop rather than being swallowed by the pre-loop drain.
-    if conn && pid, do: Process.sleep(50)
+    if conn, do: Process.sleep(50)
   end
 
   defp send_network_event(fake, method, request_id) do
