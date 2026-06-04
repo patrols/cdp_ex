@@ -97,7 +97,8 @@ defmodule CDPEx.Page do
   Options:
     * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`
     * `:response` — `true` to also return `%{status, url}` (default `false`)
-    * `:timeout` — ms (default 30_000)
+    * `:timeout` — overall ceiling in ms (default 30_000); spans the lazy `Network.enable`,
+      the event subscription, the navigation, and the readiness/capture wait
   """
   @spec navigate(t(), String.t(), keyword()) ::
           {:ok, t()}
@@ -131,6 +132,9 @@ defmodule CDPEx.Page do
   defp navigate_metadata(url, {:error, reason}),
     do: %{url: url, status: nil, final_url: nil, error: reason}
 
+  # `:none` is a single Page.navigate call with no subscribe/wait step, so there is no
+  # multi-step budget to share — it uses the raw timeout directly (the other clauses thread
+  # an absolute deadline because they span subscribe + navigate + wait).
   defp navigate_with_wait(page, url, :none, timeout) do
     case do_call(page, "Page.navigate", %{"url" => url}, timeout) do
       {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
@@ -220,9 +224,27 @@ defmodule CDPEx.Page do
         {:error, {on_crash, reason}}
     after
       remaining(deadline) + @helper_grace ->
-        Process.exit(helper, :kill)
-        Process.demonitor(mon, [:flush])
-        {:error, {on_crash, :timeout}}
+        # Prefer a result that just landed (the helper raced the ceiling). Otherwise kill the
+        # wedged helper and drain any reply it sent right before dying, so a tagged message
+        # can't linger in the caller's mailbox — demonitor [:flush] clears only the :DOWN.
+        # Mirrors the deadline-vs-DOWN tie guards in await_lifecycle/await_capture.
+        receive do
+          {^tag, result} ->
+            Process.demonitor(mon, [:flush])
+            result
+        after
+          0 ->
+            Process.exit(helper, :kill)
+            Process.demonitor(mon, [:flush])
+
+            receive do
+              {^tag, _} -> :ok
+            after
+              0 -> :ok
+            end
+
+            {:error, {on_crash, :timeout}}
+        end
     end
   end
 
@@ -415,6 +437,7 @@ defmodule CDPEx.Page do
   defp safe_subscribe(conn, timeout) do
     Connection.subscribe(conn, @lifecycle_method, timeout)
   catch
+    :exit, {:timeout, _} -> {:error, :timeout}
     :exit, _ -> {:error, :noproc}
   end
 
@@ -815,7 +838,7 @@ defmodule CDPEx.Page do
     # Subscribe BEFORE enabling so an event emitted the instant the domain turns on
     # can't slip through before the caller is registered (mirrors navigate/3's
     # subscribe-before-trigger).
-    with :ok <- subscribe_each(page.conn, methods),
+    with :ok <- subscribe_each(page.conn, methods, timeout),
          :ok <- ensure_network(page, timeout) do
       :ok
     else
@@ -1131,7 +1154,7 @@ defmodule CDPEx.Page do
     # enable (on this process, mirroring observe_network/2); roll both back on failure.
     case Browser.reserve_interception(page.browser, page) do
       :ok ->
-        with :ok <- subscribe_each(page.conn, [@fetch_paused]),
+        with :ok <- subscribe_each(page.conn, [@fetch_paused], timeout),
              {:ok, _} <- do_call(page, "Fetch.enable", %{"patterns" => patterns}, timeout) do
           :ok
         else
@@ -1359,11 +1382,13 @@ defmodule CDPEx.Page do
   # connection that died mid-call so the observe ops surface {:error, :noproc} / :ok
   # rather than crashing the caller. `timeout` lets a caller fold the registration into an
   # overall deadline; a snapshot is fine — if one subscribe exhausts it the call exits and
-  # the catch below short-circuits the rest.
-  defp subscribe_each(conn, methods, timeout \\ @command_timeout) do
+  # the catch below short-circuits the rest. A budget-exhausted call surfaces as :timeout
+  # (the conn is alive, the deadline elapsed) vs :noproc for a genuinely dead conn.
+  defp subscribe_each(conn, methods, timeout) do
     Enum.each(methods, &Connection.subscribe(conn, &1, timeout))
     :ok
   catch
+    :exit, {:timeout, _} -> {:error, :timeout}
     :exit, _ -> {:error, :noproc}
   end
 

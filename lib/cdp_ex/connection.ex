@@ -111,7 +111,7 @@ defmodule CDPEx.Connection do
   def subscribe(conn, method, timeout \\ @default_call_timeout),
     do: GenServer.call(conn, {:subscribe, method, self()}, timeout)
 
-  @doc "Removes a subscription created with `subscribe/2`."
+  @doc "Removes a subscription created with `subscribe/3`."
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
   def unsubscribe(conn, method), do: GenServer.call(conn, {:unsubscribe, method, self()})
 
