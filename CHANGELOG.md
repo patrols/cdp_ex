@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-04
+
 ### Changed
 - `CDPEx.Pool` now launches browsers **asynchronously**. A cold Chrome start used to run synchronously inside the pool process, blocking every other checkout, checkin, and timeout for its duration (a few seconds), so a short `:checkout_timeout` was unreliable while the pool grew to `:size`. Each launch now runs in its own task: the pool stays responsive during warmup, launches for simultaneous waiters run concurrently, and `:checkout_timeout` is honored even mid-launch. Behavior is otherwise unchanged — `count + in-flight launches` never exceeds `:size`, a launch failure surfaces to the caller, and a launched browser is adopted (re-linked) by the pool so its crash handling and `terminate` reaping are preserved (#22).
 
@@ -113,7 +115,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/patrols/cdp_ex/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/patrols/cdp_ex/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/patrols/cdp_ex/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/patrols/cdp_ex/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/patrols/cdp_ex/compare/v0.2.0...v0.2.1
