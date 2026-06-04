@@ -112,8 +112,9 @@ defmodule CDPEx.PageTest do
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
 
       # Both the lifecycle and responseReceived subscriptions are in place before navigate.
-      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
-      wait_until_subscribed(conn, task.pid, "Page.lifecycleEvent")
+      # response: true captures in an internal helper process, so match any subscriber pid.
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
@@ -152,7 +153,7 @@ defmodule CDPEx.PageTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
 
-      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Network.responseReceived")
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
@@ -201,7 +202,7 @@ defmodule CDPEx.PageTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
 
-      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Network.responseReceived")
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
@@ -226,12 +227,12 @@ defmodule CDPEx.PageTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
 
-      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Network.responseReceived")
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
 
-      # The task is now in await_capture (which monitors the conn). Drop the connection
+      # The helper is now in await_capture (which monitors the conn). Drop the connection
       # before any document response: the wait must end with an error, not hang. Either
       # the await_capture {:DOWN} (-> {:ws_closed, _}) or the in-flight call (-> :noproc)
       # wins the race; both are clean errors.
@@ -239,6 +240,67 @@ defmodule CDPEx.PageTest do
 
       assert {:error, reason} = Task.await(task)
       assert reason == :noproc or match?({:ws_closed, _}, reason)
+    end
+
+    test "leaves a same-process observe_network/2 subscription and buffered events intact (#42)",
+         %{page: page, conn: conn, fake: fake} do
+      test = self()
+
+      # The caller observes the network AND navigates with response: true on the same
+      # page. Before #42 the navigation tore the observer's subscription down and drained
+      # its buffered events; with the isolated capture helper both survive.
+      caller =
+        spawn_link(fn ->
+          :ok = Page.observe_network(page)
+          send(test, :observing)
+
+          result = Page.navigate(page, "http://example.test/", response: true)
+
+          send(
+            test,
+            {:caller_done, result, subscribed?(conn, self(), "Network.responseReceived"),
+             drain_cdp_events(conn, [])}
+          )
+        end)
+
+      # observe_network/2: subscribe the caller, then answer its Network.enable.
+      wait_until_subscribed(conn, caller, "Network.responseReceived")
+      answer_network_enable(fake)
+      assert_receive :observing, 2_000
+
+      # navigate(response: true): re-enables Network (idempotent), then the helper
+      # subscribes (responseReceived count climbs to 2: caller + helper) and navigates.
+      answer_network_enable(fake)
+      wait_until_subscriber_count(conn, "Network.responseReceived", 2)
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      # A sub-resource response (only the observer cares) and the main document response
+      # (the helper captures it; the observer also gets its own copy). Both subscribers
+      # receive their own copy — the helper's capture loop drains only the helper's mailbox.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"requestId":"SUB","response":{"status":204,"url":"http://example.test/asset.js"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/landed"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert_receive {:caller_done, result, still_subscribed?, buffered}, 2_000
+
+      assert {:ok, %Page{}, %{status: 200, url: "http://example.test/landed"}} = result
+      assert still_subscribed?, "navigate(response: true) tore down the observer's subscription"
+
+      statuses = for %{"response" => %{"status" => s}} <- buffered, do: s
+      assert 204 in statuses, "observer lost its buffered sub-resource response"
+      assert 200 in statuses, "observer lost its own copy of the document response"
     end
   end
 
@@ -935,6 +997,47 @@ defmodule CDPEx.PageTest do
 
   defp subscribed?(conn, pid, method) do
     MapSet.member?(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new()), pid)
+  end
+
+  # Like wait_until_subscribed/3 but matches *any* subscriber — used where the subscriber
+  # is an internal helper process whose pid the test can't name (e.g. the response-capture
+  # helper in navigate(response: true), #42).
+  defp wait_until_any_subscribed(conn, method, retries \\ 100),
+    do: wait_until_subscriber_count(conn, method, 1, retries)
+
+  # Poll until `method` has at least `count` distinct subscriber pids.
+  defp wait_until_subscriber_count(conn, method, count, retries \\ 100) do
+    cond do
+      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) >= count ->
+        :ok
+
+      retries == 0 ->
+        flunk("fewer than #{count} subscribers for #{method} registered in time")
+
+      true ->
+        Process.sleep(10)
+        wait_until_subscriber_count(conn, method, count, retries - 1)
+    end
+  end
+
+  # Collect every buffered Network.responseReceived event currently in this process's
+  # mailbox (the observer's copies), returning their params maps. `after 0` is safe here:
+  # both copies are enqueued (local sends are synchronous) before the helper sends
+  # {:caller_done, ...} that unblocks the caller, so they are already in the mailbox by
+  # the time this runs — no flake window.
+  defp drain_cdp_events(conn, acc) do
+    receive do
+      {:cdp_event, ^conn, "Network.responseReceived", params, _sid} ->
+        drain_cdp_events(conn, [params | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # Answer one Network.enable command with an empty result.
+  defp answer_network_enable(fake) do
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+    FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
   end
 
   # Poll until at least one await_event waiter is registered on `conn` (waiters are not

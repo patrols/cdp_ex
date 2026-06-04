@@ -78,8 +78,9 @@ defmodule CDPEx.TelemetryTest do
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
 
-      wait_until_subscribed(conn, task.pid, "Network.responseReceived")
-      wait_until_subscribed(conn, task.pid, "Page.lifecycleEvent")
+      # response: true captures in an internal helper process, so match any subscriber pid.
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
       FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
@@ -158,18 +159,19 @@ defmodule CDPEx.TelemetryTest do
     send(test_pid, {:telemetry, event, measurements, metadata})
   end
 
-  # Poll until `pid` is registered as a `method` subscriber on `conn` (no send/subscribe
-  # race for the response-capture path).
-  defp wait_until_subscribed(conn, pid, method, retries \\ 100) do
+  # Poll until *any* pid is registered as a `method` subscriber on `conn` (no
+  # send/subscribe race for the response-capture path, which subscribes from an internal
+  # helper process whose pid the test can't name).
+  defp wait_until_any_subscribed(conn, method, retries \\ 100) do
     cond do
-      MapSet.member?(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new()), pid) ->
+      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) > 0 ->
         :ok
 
       retries == 0 ->
         flunk("subscriber #{method} not registered in time")
 
       true ->
-        Process.sleep(10) && wait_until_subscribed(conn, pid, method, retries - 1)
+        Process.sleep(10) && wait_until_any_subscribed(conn, method, retries - 1)
     end
   end
 end

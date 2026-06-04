@@ -82,12 +82,12 @@ defmodule CDPEx.Page do
   loads no new document, or a connection that never produced an HTTP response — though
   the latter usually surfaces earlier as `{:navigate, _}`).
 
-  > #### Don't combine with `observe_network/2` on the same page {: .warning}
-  >
-  > `response: true` subscribes the calling process to `Network.responseReceived` for
-  > the duration of the call, then unsubscribes on the way out. If the *same process*
-  > is also running `observe_network/2` on this page, the navigation tears that
-  > subscription down. Observe from a separate process, or capture via `response: true`.
+  `response: true` captures the document response in a short-lived helper process with
+  its own `Network.responseReceived` subscription, so it composes safely with
+  `observe_network/2` on the same page — the caller's subscription and any buffered
+  events are left untouched. A normal connection drop still surfaces as
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  internal helper returns `{:error, {:capture_failed, reason}}`.
 
   Options:
     * `:wait_until` — `:network_almost_idle` (default), `:load`, or `:none`
@@ -166,27 +166,64 @@ defmodule CDPEx.Page do
 
   # Like navigate_with_wait/4 but also captures the main-document Network.responseReceived
   # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
-  # stays untouched. Requires the Network domain; enables it lazily.
+  # stays untouched. Requires the Network domain; enables it lazily. The capture itself
+  # runs in an isolated helper process (capture_via_helper/4) so it never disturbs a
+  # same-process observe_network/2 subscription (#42).
   defp navigate_capturing_response(page, url, wait_until, timeout) do
     # Validate :wait_until up front (lifecycle_name/1 raises on a bad value) so an
-    # invalid option never enables Network / fires the navigation first — matching the
+    # invalid option never enables Network / spawns the helper first — matching the
     # default path, which validates before any side effect.
     milestone = if wait_until == :none, do: nil, else: lifecycle_name(wait_until)
+
+    with :ok <- ensure_network(page, timeout) do
+      capture_via_helper(page, url, milestone, timeout)
+    end
+  end
+
+  # Run the response capture in its own short-lived, monitored process. The helper
+  # subscribes to Network.responseReceived (+ lifecycle) on *its* pid and drains *its*
+  # mailbox, so a caller that is also running observe_network/2 on this page keeps its
+  # subscription and its buffered events intact (#42). Connection monitors every
+  # subscriber and drops it on :DOWN, so the helper's subscription is released when it
+  # exits — no explicit unsubscribe. Every blocking op the helper makes is individually
+  # bounded (subscribe_each catches a dead conn; the Page.navigate call carries `timeout`;
+  # await_capture monitors the conn and honours `deadline`), so the helper always
+  # terminates and the caller awaits exactly one of its result or its :DOWN.
+  defp capture_via_helper(page, url, milestone, timeout) do
+    parent = self()
+    tag = make_ref()
+
+    {helper, mon} =
+      spawn_monitor(fn ->
+        send(parent, {tag, run_capture(page, url, milestone, timeout)})
+      end)
+
+    receive do
+      {^tag, result} ->
+        Process.demonitor(mon, [:flush])
+        result
+
+      {:DOWN, ^mon, :process, ^helper, reason} ->
+        {:error, {:capture_failed, reason}}
+    end
+  end
+
+  # The capture helper body (runs in the spawned process). Subscribes on its own pid,
+  # then issues the navigation and accumulates the main-document response. Returns
+  # capture_after_navigate/6's fully mapped result: {:ok, page, %{status, url}} |
+  # {:error, reason}. No before/after drain is needed — the helper's mailbox starts empty
+  # and dies with it.
+  defp run_capture(page, url, milestone, timeout) do
     methods = [@lifecycle_method, @response_received]
 
-    with :ok <- ensure_network(page, timeout),
-         :ok <- subscribe_each(page.conn, methods) do
-      Enum.each(methods, &drain_events(page.conn, &1))
-      ref = Process.monitor(page.conn)
-      deadline = System.monotonic_time(:millisecond) + timeout
-
-      try do
+    case subscribe_each(page.conn, methods) do
+      :ok ->
+        ref = Process.monitor(page.conn)
+        deadline = System.monotonic_time(:millisecond) + timeout
         capture_after_navigate(page, url, milestone, timeout, ref, deadline)
-      after
-        Process.demonitor(ref, [:flush])
-        unsubscribe_each(page.conn, methods)
-        Enum.each(methods, &drain_events(page.conn, &1))
-      end
+
+      {:error, _} = error ->
+        error
     end
   end
 
