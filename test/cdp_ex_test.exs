@@ -214,5 +214,9 @@ defmodule CDPExTest do
   defp collect_tags({:remote_type, _, [{:atom, _, mod}, {:atom, _, name}, _]}),
     do: MapSet.to_list(union_member_tags(mod, name))
 
-  defp collect_tags(_other), do: []
+  # Fail loudly on an unrecognized member shape rather than silently dropping it — a
+  # dropped member would escape the exemplar-coverage check this test exists to enforce
+  # (e.g. a tuple not tagged by a bare atom, a local-type alias, or a built-in). Add an
+  # explicit clause for any legitimately tag-less shape so each is a deliberate decision.
+  defp collect_tags(other), do: raise("unhandled error_reason member AST shape: #{inspect(other)}")
 end
