@@ -156,8 +156,9 @@ defmodule CDPEx do
       couldn't be established (`{:ws_closed, _}`, `{:ws_connect, _}`, `{:ws_upgrade, _}`,
       `:noproc`), a wait or call timed out (`:timeout`, `{:timeout, _}`), Chrome died
       or was slow to start (`{:chrome_exited, _, _}`, `{:debug_url_not_found, _}`,
-      `{:devtools_file_malformed, _}`), or an internal capture/idle helper crashed
-      (`{:capture_failed, _}`, `{:idle_wait_failed, _}`).
+      `{:devtools_file_malformed, _}`), an internal capture/idle helper crashed
+      (`{:capture_failed, _}`, `{:idle_wait_failed, _}`), or a navigation hit a
+      connection/network-layer `net::ERR_*` (e.g. `{:navigate, "net::ERR_CONNECTION_REFUSED"}`).
     * `:terminal` — deterministic outcomes: a selector didn't match, JS threw, a
       usage/validation error, or a missing Chrome binary. Retrying the same call
       yields the same error. (`:already_authenticated` / `:already_intercepting` are
@@ -165,10 +166,12 @@ defmodule CDPEx do
       `authenticate/4` documents — where a retry can still succeed — is signalled by
       the preceding `{:timeout, _}`, which is itself `:transient`.)
     * `:unknown` — the outcome depends on a payload or timing this function does not
-      crack: the `net::ERR_*` text (`{:navigate, _}`), the CDP error code
-      (`{:cdp_error, _, _}`), the file-write posix reason (`{:write_failed, _}`), or
-      whether a `{:no_document_response, _}` was a same-document hop or a slow miss.
-      Also covers any term `CDPEx` doesn't produce. Decide the retry policy yourself.
+      crack: an ambiguous navigation `net::ERR_*` (DNS `ERR_NAME_NOT_RESOLVED`,
+      `ERR_ABORTED`, `ERR_BLOCKED_BY_*` — unlike the connection-layer codes above), the
+      CDP error code (`{:cdp_error, _, _}`), the file-write posix reason
+      (`{:write_failed, _}`), or whether a `{:no_document_response, _}` was a
+      same-document hop or a slow miss. Also covers any term `CDPEx` doesn't produce.
+      Decide the retry policy yourself.
 
   Retries are the caller's responsibility: bound the attempts and back off. A
   `:transient` result means **re-establish the resource** — open a fresh page/browser
@@ -207,10 +210,18 @@ defmodule CDPEx do
   def classify_error(:unknown_page), do: :terminal
   def classify_error(:already_authenticated), do: :terminal
   def classify_error(:already_intercepting), do: :terminal
+  # A navigation failure carries Chrome's net::ERR_* text: connection/network-layer
+  # codes are transient (a fresh attempt may succeed); everything else stays :unknown
+  # (see @transient_net_errors). A non-string payload can't be inspected -> :unknown.
+  def classify_error({:navigate, error_text}) when is_binary(error_text) do
+    if transient_net_error?(error_text), do: :transient, else: :unknown
+  end
+
   # Ambiguous — :unknown until the caller (or a future refinement) inspects the payload
-  # or timing: the net::ERR_* text, the CDP error code, the file-write posix reason, or
-  # whether a no-document navigation was a same-document hop vs a slow miss. Explicit
-  # (not the catch-all) so they read as decisions and the coverage test holds them.
+  # or timing: a non-string navigate reason, an ambiguous net::ERR_* (DNS / blocked /
+  # aborted), the CDP error code, the file-write posix reason, or whether a no-document
+  # navigation was a same-document hop vs a slow miss. Explicit (not the catch-all) so
+  # they read as decisions and the coverage test holds them.
   def classify_error({:navigate, _}), do: :unknown
   def classify_error({:cdp_error, _, _}), do: :unknown
   def classify_error({:write_failed, _}), do: :unknown
@@ -228,6 +239,28 @@ defmodule CDPEx do
   """
   @spec transient?(term()) :: boolean()
   def transient?(reason), do: classify_error(reason) == :transient
+
+  # Connection/network-layer net::ERR_* codes whose retry outcome is unambiguous: a
+  # fresh attempt may succeed. These are site-independent Chromium semantics, not
+  # site-specific guesses. Genuinely ambiguous codes (DNS ERR_NAME_NOT_RESOLVED,
+  # ERR_ABORTED, ERR_BLOCKED_BY_*, ERR_TOO_MANY_REDIRECTS) are deliberately left
+  # :unknown for the caller to decide.
+  @transient_net_errors ~w(
+    ERR_CONNECTION_REFUSED
+    ERR_CONNECTION_RESET
+    ERR_CONNECTION_CLOSED
+    ERR_CONNECTION_ABORTED
+    ERR_CONNECTION_TIMED_OUT
+    ERR_TIMED_OUT
+    ERR_NETWORK_CHANGED
+    ERR_INTERNET_DISCONNECTED
+    ERR_ADDRESS_UNREACHABLE
+    ERR_SOCKET_NOT_CONNECTED
+  )
+
+  defp transient_net_error?(error_text) do
+    Enum.any?(@transient_net_errors, &String.contains?(error_text, &1))
+  end
 
   @doc """
   Launches a headless Chrome browser and returns its process pid.

@@ -211,10 +211,11 @@ case CDPEx.Page.navigate(page, url) do
 end
 ```
 
-`CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped,
-timeout, Chrome died or was slow to start, an internal helper crashed — a fresh
-attempt may succeed), `:terminal` (selector miss, JS exception, usage/validation
-error — it won't), or `:unknown` (payload-dependent, e.g. a `net::ERR_*` navigation
+`CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
+couldn't be established, timeout, Chrome died or was slow to start, an internal helper
+crashed, or a connection-layer `net::ERR_*` navigation error — a fresh attempt may
+succeed), `:terminal` (selector miss, JS exception, usage/validation error — it
+won't), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*` navigation
 error or a CDP error code — you decide). The library tracks the error surface, so the
 transient/terminal decision lives in one place instead of drifting across callers.
 The reason shapes are documented as

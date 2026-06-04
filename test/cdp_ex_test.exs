@@ -27,7 +27,9 @@ defmodule CDPExTest do
       {:debug_url_not_found, "stdout excerpt"},
       {:devtools_file_malformed, "contents excerpt"},
       {:capture_failed, :timeout},
-      {:idle_wait_failed, {:badmatch, nil}}
+      {:idle_wait_failed, {:badmatch, nil}},
+      {:navigate, "net::ERR_CONNECTION_REFUSED"},
+      {:navigate, "net::ERR_TIMED_OUT"}
     ]
 
     # Deterministic: retrying the same call yields the same error (semantic, usage, or
@@ -57,7 +59,8 @@ defmodule CDPExTest do
     # whether a no-document navigation was a same-document hop vs a slow miss.
     @payload_dependent [
       {:navigate, "net::ERR_NAME_NOT_RESOLVED"},
-      {:navigate, "net::ERR_CONNECTION_REFUSED"},
+      {:navigate, "net::ERR_BLOCKED_BY_CLIENT"},
+      {:navigate, "net::ERR_ABORTED"},
       {:cdp_error, "Page.navigate", %{"code" => -32_000, "message" => "boom"}},
       {:write_failed, :eacces},
       {:write_failed, :enospc},
@@ -110,6 +113,43 @@ defmodule CDPExTest do
                "#{inspect(reason)} unexpectedly classified as :unknown"
       end
     end
+
+    test "splits navigation net::ERR_* into connection-layer transient vs ambiguous unknown" do
+      # Connection/network-layer codes — a fresh attempt may succeed.
+      assert CDPEx.classify_error({:navigate, "net::ERR_CONNECTION_REFUSED"}) == :transient
+      assert CDPEx.classify_error({:navigate, "net::ERR_CONNECTION_RESET"}) == :transient
+      assert CDPEx.classify_error({:navigate, "net::ERR_TIMED_OUT"}) == :transient
+      assert CDPEx.classify_error({:navigate, "net::ERR_INTERNET_DISCONNECTED"}) == :transient
+
+      # Ambiguous codes — the caller decides.
+      assert CDPEx.classify_error({:navigate, "net::ERR_NAME_NOT_RESOLVED"}) == :unknown
+      assert CDPEx.classify_error({:navigate, "net::ERR_BLOCKED_BY_CLIENT"}) == :unknown
+      assert CDPEx.classify_error({:navigate, "net::ERR_ABORTED"}) == :unknown
+
+      # ERR_CONNECTION_TIMED_OUT must still read as transient (and not via a stray
+      # ERR_TIMED_OUT substring match), and a non-string navigate payload can't be
+      # inspected — both resolve cleanly rather than crashing.
+      assert CDPEx.classify_error({:navigate, "net::ERR_CONNECTION_TIMED_OUT"}) == :transient
+      assert CDPEx.classify_error({:navigate, :weird}) == :unknown
+    end
+
+    test "navigate net::ERR_* matching is substring-boundary safe and crash-free" do
+      # Look-alikes that embed a transient word but are not an allowlisted code must stay
+      # :unknown — these are exactly what a future @transient_net_errors edit could flip,
+      # so pin them. (ERR_DNS_TIMED_OUT is not ERR_TIMED_OUT; ERR_SOCKS_CONNECTION_
+      # HOST_UNREACHABLE is not ERR_ADDRESS_UNREACHABLE / ERR_CONNECTION_*.)
+      assert CDPEx.classify_error({:navigate, "net::ERR_DNS_TIMED_OUT"}) == :unknown
+
+      assert CDPEx.classify_error({:navigate, "net::ERR_SOCKS_CONNECTION_HOST_UNREACHABLE"}) ==
+               :unknown
+
+      assert CDPEx.classify_error({:navigate, ""}) == :unknown
+
+      # Non-binary payloads must route via the is_binary guard to :unknown, never reach
+      # String.contains?/2 (which would raise on a charlist).
+      assert CDPEx.classify_error({:navigate, ~c"net::ERR_TIMED_OUT"}) == :unknown
+      assert CDPEx.classify_error({:navigate, nil}) == :unknown
+    end
   end
 
   describe "transient?/1" do
@@ -117,6 +157,7 @@ defmodule CDPExTest do
       assert CDPEx.transient?({:ws_closed, :closed})
       assert CDPEx.transient?(:noproc)
       assert CDPEx.transient?({:capture_failed, :timeout})
+      assert CDPEx.transient?({:navigate, "net::ERR_CONNECTION_REFUSED"})
     end
 
     test "is false for terminal, payload-dependent, and unrecognized reasons" do
