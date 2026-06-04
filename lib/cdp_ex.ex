@@ -28,6 +28,24 @@ defmodule CDPEx do
   Observability is via `:telemetry` — see `CDPEx.Telemetry` for the event taxonomy
   (launch / navigate spans, page open/close, and error events). Silent by default.
 
+  ## Error handling
+
+  Every operation returns `{:error, reason}` on failure; `t:error_reason/0` documents
+  the reason shapes. To drive retries without hard-coding that list, classify the
+  reason instead of matching it:
+
+      case CDPEx.Page.navigate(page, url) do
+        {:ok, page} ->
+          {:ok, page}
+        {:error, reason} ->
+          if CDPEx.transient?(reason), do: retry(), else: {:error, reason}
+      end
+
+  `classify_error/1` buckets a reason as `:transient` (a fresh attempt may succeed),
+  `:terminal` (it won't), or `:unknown` (payload-dependent — you decide). It tracks
+  the error surface as the library evolves, so the transient/terminal decision stays
+  in one place rather than being reimplemented (and re-drifting) downstream.
+
   > #### Status {: .info}
   >
   > Pages default to one WebSocket each (strong crash isolation); opt into
@@ -54,13 +72,16 @@ defmodule CDPEx do
   tagged instead (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
   `{:invalid_screenshot_data, excerpt}`).
 
-  Only part of this union is machine-checked: `t:CDPEx.Connection.call_error/0` and
+  To act on a failure without hard-coding this list, use `classify_error/1` — it
+  buckets any reason as `:transient` / `:terminal` / `:unknown` and tracks this union,
+  so retry logic isn't reimplemented (and re-drifted) downstream.
+
+  Two sub-unions are machine-checked: `t:CDPEx.Connection.call_error/0` and
   `t:CDPEx.Chrome.launch_error/0` are precisely specced on `call/5` / `launch/1`, so
   Dialyzer catches a shape change in *those* at the source. The remaining members —
-  the page-level tagged kinds and bare atoms — are hand-maintained documentation:
-  the union itself is referenced by no `@spec`, so it is best-effort and
-  **not** closed (kinds such as `{:cdp_error, method, payload}` also wrap arbitrary
-  CDP data, and a renamed page-level producer would drift silently).
+  the page-level tagged kinds and bare atoms — are hand-maintained (kinds such as
+  `{:cdp_error, method, payload}` also wrap arbitrary CDP data), kept honest by
+  `classify_error/1`'s coverage test rather than by Dialyzer.
 
   Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
   `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
@@ -82,6 +103,8 @@ defmodule CDPEx do
           | {:conflict, :authenticated | :intercepting}
           | {:navigate, String.t()}
           | {:no_document_response, String.t()}
+          | {:capture_failed, term()}
+          | {:idle_wait_failed, term()}
           | {:selector_not_found, String.t()}
           | {:evaluate_exception, term()}
           | {:unexpected_evaluate, term()}
@@ -94,6 +117,88 @@ defmodule CDPEx do
           | {:invalid_pdf_data, String.t()}
           | {:invalid_screenshot_data, String.t()}
           | {:write_failed, term()}
+
+  @doc """
+  Classifies an error `reason` as `:transient`, `:terminal`, or `:unknown`.
+
+  `reason` is the value from any `{:error, reason}` this library returns (see
+  `t:error_reason/0`). The classification answers one question — **might a fresh
+  attempt succeed?** — so you drive retries from one place instead of reimplementing
+  the decision (and re-drifting it) in every caller:
+
+      case CDPEx.Page.navigate(page, url) do
+        {:ok, page} ->
+          {:ok, page}
+        {:error, reason} ->
+          case CDPEx.classify_error(reason) do
+            :transient -> retry_with_fresh_page()
+            _ -> {:error, reason}
+          end
+      end
+
+  The buckets:
+
+    * `:transient` — environmental or timing failures: the connection dropped
+      (`{:ws_closed, _}`, `:noproc`), a wait or call timed out (`:timeout`,
+      `{:timeout, _}`), Chrome died or was slow to start (`{:chrome_exited, _, _}`,
+      `{:debug_url_not_found, _}`, `{:devtools_file_malformed, _}`), or an internal
+      capture/idle helper crashed (`{:capture_failed, _}`, `{:idle_wait_failed, _}`).
+      Re-establish the resource (page / browser / `CDPEx.Pool` checkout) and retry.
+    * `:terminal` — deterministic outcomes: a selector didn't match, JS threw, a
+      usage/validation error, a missing Chrome binary, or a navigation that produced
+      no document. Retrying the same call yields the same error.
+    * `:unknown` — the outcome depends on a payload this function does not crack
+      (`{:navigate, errorText}`, `{:cdp_error, _, _}`, `{:write_failed, _}`), or the
+      term isn't one `CDPEx` produces. Decide the retry policy yourself (e.g. inspect
+      the `net::ERR_*` text or the CDP error code).
+  """
+  @spec classify_error(term()) :: :transient | :terminal | :unknown
+  # Transient — a fresh attempt may succeed (connection / process / launch / helper).
+  def classify_error({:ws_closed, _}), do: :transient
+  def classify_error(:noproc), do: :transient
+  def classify_error(:timeout), do: :transient
+  def classify_error({:timeout, _}), do: :transient
+  def classify_error({:chrome_exited, _, _}), do: :transient
+  def classify_error({:debug_url_not_found, _}), do: :transient
+  def classify_error({:devtools_file_malformed, _}), do: :transient
+  def classify_error({:capture_failed, _}), do: :transient
+  def classify_error({:idle_wait_failed, _}), do: :transient
+  # Terminal — deterministic; retrying the same call yields the same error.
+  def classify_error({:chrome_not_found, _}), do: :terminal
+  def classify_error({:no_document_response, _}), do: :terminal
+  def classify_error({:selector_not_found, _}), do: :terminal
+  def classify_error({:evaluate_exception, _}), do: :terminal
+  def classify_error({:unexpected_evaluate, _}), do: :terminal
+  def classify_error({:invalid_args, _}), do: :terminal
+  def classify_error({:invalid_source, _}), do: :terminal
+  def classify_error({:invalid_error_reason, _}), do: :terminal
+  def classify_error({:invalid_transport, _}), do: :terminal
+  def classify_error({:unsupported_transport, _}), do: :terminal
+  def classify_error({:invalid_response_body, _}), do: :terminal
+  def classify_error({:invalid_pdf_data, _}), do: :terminal
+  def classify_error({:invalid_screenshot_data, _}), do: :terminal
+  def classify_error({:conflict, _}), do: :terminal
+  def classify_error(:unknown_page), do: :terminal
+  def classify_error(:already_authenticated), do: :terminal
+  def classify_error(:already_intercepting), do: :terminal
+  # Payload-dependent — left :unknown until/unless we crack the payload (the net::ERR_*
+  # text, the CDP error code, the file-write posix reason). Explicit (not the catch-all)
+  # so they read as decisions and the coverage test holds them in place.
+  def classify_error({:navigate, _}), do: :unknown
+  def classify_error({:cdp_error, _, _}), do: :unknown
+  def classify_error({:write_failed, _}), do: :unknown
+  # Anything else — a reason CDPEx doesn't produce, or a future shape.
+  def classify_error(_other), do: :unknown
+
+  @doc """
+  Convenience over `classify_error/1`: `true` only when the error is `:transient`.
+
+  Conservative by design — `:unknown` is **not** transient, so an unrecognized or
+  payload-dependent error won't be auto-retried. Match `classify_error/1` directly
+  when you want to treat `:unknown` specially.
+  """
+  @spec transient?(term()) :: boolean()
+  def transient?(reason), do: classify_error(reason) == :transient
 
   @doc """
   Launches a headless Chrome browser and returns its process pid.

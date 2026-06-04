@@ -6,6 +6,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.classify_error/1` and `CDPEx.transient?/1` — classify any `{:error, reason}` CDPEx returns as `:transient` (a fresh attempt may succeed — dropped connection, timeout, Chrome died or was slow to start, an internal helper crashed), `:terminal` (deterministic — selector miss, JS exception, usage/validation error, missing Chrome binary, no-document navigation), or `:unknown` (payload-dependent, such as a `net::ERR_*` navigation error or a CDP error code — you decide). The library owns the transient/terminal decision and tracks the error surface as it evolves, so retry logic isn't reimplemented (and re-drifted) in every caller. See the "Error handling" section of the `CDPEx` docs (#56).
+- `t:CDPEx.error_reason/0` now lists `{:capture_failed, _}` and `{:idle_wait_failed, _}` — the helper-crash reasons that `navigate/3` (with `response: true`) and `wait_for_network_idle/2` have been able to return since 0.5.0 but that were missing from the aggregate type. No runtime change; the union (and `classify_error/1`'s coverage test) now cover them, and the typedoc points to `classify_error/1` as the supported way to act on a failure (#56).
+
 ## [0.5.0] - 2026-06-04
 
 ### Changed
