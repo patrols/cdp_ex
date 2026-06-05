@@ -349,7 +349,7 @@ defmodule CDPEx.IntegrationTest do
                Task.await(waiter, 10_000)
 
       assert url =~ "/data"
-      assert {:ok, "fetched-data"} = Page.response_body(page, req)
+      assert {:ok, "fetched-data"} = read_body_eventually(page, req)
     end
 
     test "wait_for_network_idle settles even when the fetch redirects", %{
@@ -906,6 +906,26 @@ defmodule CDPEx.IntegrationTest do
       true ->
         Process.sleep(20)
         eventually(fun, retries - 1)
+    end
+  end
+
+  # wait_for_response/3 resolves on Network.responseReceived (headers/status arrived),
+  # but Chrome only guarantees the body via Network.getResponseBody after
+  # loadingFinished. In that window getResponseBody returns -32000 "No data found for
+  # resource with given identifier" — a transient race, widened under CI load. Retry only
+  # that specific error so the assertion still surfaces any genuine failure verbatim.
+  defp read_body_eventually(page, req, retries \\ 20)
+
+  defp read_body_eventually(page, req, 0), do: Page.response_body(page, req)
+
+  defp read_body_eventually(page, req, retries) do
+    case Page.response_body(page, req) do
+      {:error, {:cdp_error, "Network.getResponseBody", %{"code" => -32_000}}} ->
+        Process.sleep(50)
+        read_body_eventually(page, req, retries - 1)
+
+      other ->
+        other
     end
   end
 end
