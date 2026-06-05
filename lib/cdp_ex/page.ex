@@ -875,8 +875,16 @@ defmodule CDPEx.Page do
   `observe_network/2`) **when the request was captured** — unlike the other Network
   ops this does not lazily enable it, since enabling now can't recover a past body.
   If it wasn't enabled, the call surfaces as
-  `{:error, {:cdp_error, "Network.getResponseBody", _}}`. Options: `:timeout`
-  (default 10_000).
+  `{:error, {:cdp_error, "Network.getResponseBody", _}}`.
+
+  The body is only retrievable once the request has finished loading. Calling this in
+  the window between `Network.responseReceived` (what `wait_for_response/3` resolves on)
+  and `Network.loadingFinished` can return
+  `{:error, {:cdp_error, "Network.getResponseBody", %{"code" => -32000}}}`
+  ("No data found …"). Wait for the network to settle (e.g. `wait_for_network_idle/2`)
+  before reading, or retry on that transient error.
+
+  Options: `:timeout` (default 10_000).
   """
   @spec response_body(t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
   def response_body(%__MODULE__{} = page, request_id, opts \\ []) when is_binary(request_id) do
