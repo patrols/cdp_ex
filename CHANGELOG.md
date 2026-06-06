@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-06
+
 ### Added
 - `CDPEx.launch/1` (and `with_page/3`, `CDPEx.Pool`) accept a `:proxy` option — a URL (`"http://user:pass@host:8080"`) or keyword list (`[server:, scheme:, username:, password:]`). It sets Chrome's `--proxy-server` and, for an authenticated proxy, **automatically answers the auth challenge on each `:dedicated` page**, so callers just `new_page` + `navigate` (no manual `authenticate/4`). A credentialed proxy requires `:dedicated` transport (`:session` returns `{:error, {:unsupported_transport, :session}}`) and can't combine with `enable_request_interception/2` on the same page (both drive `Fetch`); a malformed value — or combining `:proxy` with a full `:args` override (which would discard the injected `--proxy-server`) — fails the launch with `{:error, {:invalid_proxy, _}}`. Parsing lives in the new `CDPEx.Proxy` module (#62).
 - `CDPEx.Page.set_user_agent/3` accepts `:user_agent_metadata` (a CDP `Emulation.UserAgentMetadata` map) and `:accept_language`, passed through to `Emulation.setUserAgentOverride`. Overriding only the UA string leaves the UA Client Hints surface (`navigator.userAgentData`, the `Sec-CH-UA*` headers) at Chrome's defaults — a visible `navigator.userAgent` ↔ Client-Hints mismatch; `:user_agent_metadata` keeps them consistent (#34).
@@ -125,7 +127,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/patrols/cdp_ex/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/patrols/cdp_ex/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/patrols/cdp_ex/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/patrols/cdp_ex/compare/v0.3.0...v0.4.0
