@@ -286,6 +286,17 @@ defmodule CDPEx.IntegrationTest do
     } do
       {:ok, _} = Page.navigate(page, fixture)
       assert :ok = Page.wait_for_navigation(page, wait_until: :none)
+
+      # navigate/3 waits for networkAlmostIdle, which for a trivial page can fire before
+      # the main-frame `load` (lifecycle is matched by name, not loaderId, so there is no
+      # guaranteed ordering between the two). Gate on document.readyState == "complete" so
+      # the no-nav :load wait below starts from a definitively post-load state and cannot
+      # catch a trailing `load` event — the source of the #67 flake (a fresh subscriber
+      # only receives future events, so once `load` is in the past the wait must time out).
+      assert eventually(fn ->
+               match?({:ok, "complete"}, Page.evaluate(page, "document.readyState"))
+             end)
+
       assert {:error, :timeout} = Page.wait_for_navigation(page, wait_until: :load, timeout: 300)
     end
 
