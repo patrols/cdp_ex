@@ -1304,7 +1304,10 @@ defmodule CDPEx.Page do
       UA Client Hints surface (`navigator.userAgentData`, the `Sec-CH-UA*` headers) so
       it stays consistent with the UA string. Overriding only the string leaves Client
       Hints at Chrome's defaults — a visible `navigator.userAgent` ↔ Client-Hints
-      mismatch. Passed through verbatim, so it must match the CDP shape.
+      mismatch. Passed through verbatim, so it must match the CDP shape: a partial or
+      empty map is **not** dropped — it's sent as-is and Chrome rejects the whole
+      `setUserAgentOverride` call. Omit the option entirely to leave Client Hints at
+      Chrome's default.
     * `:accept_language` — value for the `Accept-Language` header and `navigator.language`
       (e.g. `"en-US"`).
     * `:timeout` (default 10_000).
