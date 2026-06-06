@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.Page.set_user_agent/3` accepts `:user_agent_metadata` (a CDP `Emulation.UserAgentMetadata` map) and `:accept_language`, passed through to `Emulation.setUserAgentOverride`. Overriding only the UA string leaves the UA Client Hints surface (`navigator.userAgentData`, the `Sec-CH-UA*` headers) at Chrome's defaults — a visible `navigator.userAgent` ↔ Client-Hints mismatch; `:user_agent_metadata` keeps them consistent (#34).
+
 ## [0.6.0] - 2026-06-04
 
 ### Added

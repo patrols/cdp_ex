@@ -179,7 +179,10 @@ defmodule CDPEx do
   Retries are the caller's responsibility: bound the attempts and back off. A
   `:transient` result means **re-establish the resource** — open a fresh page/browser
   or call `CDPEx.Pool.checkout/2` again — not retry the same handle (a dead page keeps
-  returning `:noproc`). The input is typed `term()` so the catch-all stays reachable;
+  returning `:noproc`). Some `:transient` reasons are still a judgment call for your
+  environment — retrying a `:timeout` / `net::ERR_TIMED_OUT` multiplies wall-time and
+  browser memory, so a resource-constrained caller may reasonably treat timeouts as
+  terminal. The input is typed `term()` so the catch-all stays reachable;
   routing through this instead of matching `t:error_reason/0` directly trades Dialyzer
   exhaustiveness for a stable, library-maintained dispatch point.
   """

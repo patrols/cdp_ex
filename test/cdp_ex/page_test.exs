@@ -61,6 +61,56 @@ defmodule CDPEx.PageTest do
     }
   end
 
+  describe "set_user_agent/3" do
+    test "passes userAgentMetadata + acceptLanguage through to setUserAgentOverride", %{
+      fake: fake,
+      page: page
+    } do
+      meta = %{
+        "platform" => "macOS",
+        "mobile" => false,
+        "brands" => [%{"brand" => "Chromium", "version" => "120"}]
+      }
+
+      task =
+        Task.async(fn ->
+          Page.set_user_agent(page, "UA/1.0", user_agent_metadata: meta, accept_language: "en-US")
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{
+                        "id" => id,
+                        "method" => "Emulation.setUserAgentOverride",
+                        "params" => params
+                      }},
+                     2_000
+
+      assert params["userAgent"] == "UA/1.0"
+      assert params["userAgentMetadata"] == meta
+      assert params["acceptLanguage"] == "en-US"
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+
+    test "omits userAgentMetadata/acceptLanguage when not given", %{fake: fake, page: page} do
+      task = Task.async(fn -> Page.set_user_agent(page, "UA/1.0") end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{
+                        "id" => id,
+                        "method" => "Emulation.setUserAgentOverride",
+                        "params" => params
+                      }},
+                     2_000
+
+      assert params == %{"userAgent" => "UA/1.0"}
+
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      assert :ok = Task.await(task)
+    end
+  end
+
   describe "wait_for_navigation/2" do
     test "resolves only on a matching Page.lifecycleEvent — not another method or name", %{
       page: page,
