@@ -89,6 +89,24 @@ defmodule CDPEx.ProxyTest do
     end
   end
 
+  describe "credential redaction in error terms" do
+    test "the malformed-url error strips userinfo (no password leak)" do
+      assert {:error, {:invalid_proxy, {:malformed_url, redacted}}} =
+               Proxy.parse("socks5://user:supersecret@host")
+
+      refute redacted =~ "supersecret"
+      refute redacted =~ "user"
+    end
+
+    test "the missing-server error echoes only the option keys, not their values" do
+      assert {:error, {:invalid_proxy, {:missing_server, keys}}} =
+               Proxy.parse(username: "u", password: "supersecret")
+
+      assert :password in keys
+      refute Enum.any?(keys, &(to_string(&1) =~ "supersecret"))
+    end
+  end
+
   describe "to_arg/1 and credentials/1" do
     test "to_arg builds the --proxy-server flag" do
       {:ok, proxy} = Proxy.parse("http://host:8080")

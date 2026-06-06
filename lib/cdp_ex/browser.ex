@@ -84,7 +84,12 @@ defmodule CDPEx.Browser do
     * `:prevent_alerts` — inject no-op `alert`/`confirm`/`prompt` (default `true`)
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
-  def new_page(browser, opts \\ []), do: GenServer.call(browser, {:new_page, opts}, 30_000)
+  # The call timeout covers the worst-case internal budget — Target.createTarget
+  # (@create_timeout) + bootstrap (up to ~4 × @bootstrap_timeout) + the proxy-auth arm
+  # (@arm_timeout) — so a stalled stage can't make the caller give up while the Browser is
+  # still working, which would orphan an armed page. Normal new_page returns in well under
+  # a second; this is only the pathological ceiling.
+  def new_page(browser, opts \\ []), do: GenServer.call(browser, {:new_page, opts}, 75_000)
 
   @doc """
   Closes a page opened with `new_page/2`.

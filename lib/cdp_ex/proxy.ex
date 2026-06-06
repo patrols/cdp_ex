@@ -56,7 +56,7 @@ defmodule CDPEx.Proxy do
          %{server: "#{scheme}://#{host_for_server(host)}:#{port}", username: user, password: pass}}
 
       _ ->
-        {:error, {:invalid_proxy, {:malformed_url, url}}}
+        {:error, {:invalid_proxy, {:malformed_url, redact(url)}}}
     end
   end
 
@@ -71,9 +71,14 @@ defmodule CDPEx.Proxy do
      }}
   end
 
-  defp parse_opts(opts), do: {:error, {:invalid_proxy, {:missing_server, opts}}}
+  # Echo only the keys, never the values — opts may carry :password.
+  defp parse_opts(opts), do: {:error, {:invalid_proxy, {:missing_server, Map.keys(opts)}}}
 
   defp scheme(opts), do: Map.get(opts, :scheme, "http")
+
+  # Strip any "user:pass@" userinfo so a credentialed proxy URL never lands in an error
+  # term (these surface from launch/1 and callers routinely log them).
+  defp redact(url) when is_binary(url), do: String.replace(url, ~r{//[^/@]*@}, "//***@")
 
   # URI strips the brackets from an IPv6 literal (host: "::1"); re-wrap so the rebuilt
   # `host:port` stays unambiguous for Chrome (`[::1]:8080`, not `::1:8080`).
