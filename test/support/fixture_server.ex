@@ -10,6 +10,8 @@ defmodule CDPEx.FixtureServer do
   #     {:ok, %{url: url}} = FixtureServer.start()
   #     CDPEx.Page.navigate(page, url)
 
+  alias CDPEx.HttpFixture
+
   @spec start() :: {:ok, %{port: non_neg_integer(), url: String.t()}}
   def start do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
@@ -33,7 +35,7 @@ defmodule CDPEx.FixtureServer do
   defp serve(socket) do
     # Read the full request headers (they may arrive across TCP segments) so the
     # header reflection and auth check are deterministic, then respond.
-    request = recv_request(socket, "")
+    request = HttpFixture.recv_request(socket)
     _ = :gen_tcp.send(socket, respond(request))
     :gen_tcp.close(socket)
   end
@@ -56,46 +58,36 @@ defmodule CDPEx.FixtureServer do
     cond do
       String.starts_with?(path, "/basic-auth") and not authorized?(request) ->
         body = ~s(<!doctype html><html><body><p id="status">401</p></body></html>)
-        http_response("401 Unauthorized", body, ["WWW-Authenticate: Basic realm=\"cdpex\""])
+
+        HttpFixture.http_response("401 Unauthorized", body, [
+          "WWW-Authenticate: Basic realm=\"cdpex\""
+        ])
 
       String.starts_with?(path, "/redirect") ->
-        http_response("302 Found", "", ["Location: /"])
+        HttpFixture.http_response("302 Found", "", ["Location: /"])
 
       String.starts_with?(path, "/missing") ->
         body = ~s(<!doctype html><html><body><p id="status">404</p></body></html>)
-        http_response("404 Not Found", body, [])
+        HttpFixture.http_response("404 Not Found", body)
 
       String.starts_with?(path, "/data") ->
-        http_response("200 OK", "fetched-data", [])
+        HttpFixture.http_response("200 OK", "fetched-data")
 
       true ->
-        http_response("200 OK", render(request), [])
+        HttpFixture.http_response("200 OK", render(request))
     end
   end
 
-  defp authorized?(request), do: header_value(request, "authorization") == @basic_auth
+  defp authorized?(request), do: HttpFixture.header_value(request, "authorization") == @basic_auth
 
   defp request_path(request) do
     request |> String.split("\r\n", parts: 2) |> hd() |> String.split(" ") |> Enum.at(1, "/")
   end
 
-  defp http_response(status, body, extra_headers) do
-    headers =
-      [
-        "HTTP/1.1 #{status}",
-        "Content-Type: text/html; charset=utf-8",
-        "Content-Length: #{byte_size(body)}",
-        "Connection: close"
-        | extra_headers
-      ]
-
-    Enum.join(headers, "\r\n") <> "\r\n\r\n" <> body
-  end
-
   # Reflects the X-CDPEx-Test request header into #echo-header so integration
   # tests can assert that extra headers were actually sent on the request.
   defp render(request) do
-    echo = html_escape(header_value(request, "x-cdpex-test"))
+    echo = html_escape(HttpFixture.header_value(request, "x-cdpex-test"))
 
     """
     <!doctype html>
@@ -110,37 +102,6 @@ defmodule CDPEx.FixtureServer do
       </body>
     </html>
     """
-  end
-
-  defp header_value(request, name) do
-    request
-    |> String.split("\r\n")
-    |> Enum.find_value("", &match_header(&1, name))
-  end
-
-  defp match_header(line, name) do
-    case String.split(line, ":", parts: 2) do
-      [k, v] -> if String.downcase(String.trim(k)) == name, do: String.trim(v)
-      _ -> nil
-    end
-  end
-
-  # Read until the end-of-headers marker (or a sane cap), so a request split
-  # across TCP segments still yields the full headers for reflection.
-  defp recv_request(socket, acc) do
-    cond do
-      String.contains?(acc, "\r\n\r\n") ->
-        acc
-
-      byte_size(acc) > 65_536 ->
-        acc
-
-      true ->
-        case :gen_tcp.recv(socket, 0, 5_000) do
-          {:ok, data} -> recv_request(socket, acc <> data)
-          _ -> acc
-        end
-    end
   end
 
   defp html_escape(value) do

@@ -1,7 +1,11 @@
 defmodule CDPEx.BrowserTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias CDPEx.Browser
+  alias CDPEx.Connection
+  alias CDPEx.FakeCDP
   alias CDPEx.Page
 
   describe "new_page/2 transport validation" do
@@ -309,6 +313,77 @@ defmodule CDPEx.BrowserTest do
 
       assert {:noreply, ^state} =
                Browser.handle_info({:DOWN, make_ref(), :process, self(), :noproc}, state)
+    end
+  end
+
+  describe "proxy auto-auth cleanup (FakeCDP fault injection)" do
+    test "an arm failure during new_page tears down the just-created page and surfaces the error" do
+      # Drive the full new_page → reply_proxy_authed_page path against a fake Chrome and
+      # make Fetch.enable fail, so the synchronous arm (await_fetch_armed) returns an error
+      # and close_failed_auth_page must close the page that was never handed back. Runs the
+      # handle_call in a Task (it blocks on the CDP conversation) while this process plays
+      # the fake Chrome, answering each frame — and failing Fetch.enable.
+      {:ok, server} = FakeCDP.start()
+      {:ok, browser_conn} = Connection.start_link(server.url)
+      assert_receive {:fake_cdp_connected, _fake_browser}, 1_000
+
+      state = %Browser{
+        browser_conn: browser_conn,
+        host: "127.0.0.1",
+        port: server.port,
+        proxy_auth: %{username: "u", password: "p"}
+      }
+
+      log =
+        capture_log(fn ->
+          task =
+            Task.async(fn ->
+              Browser.handle_call({:new_page, []}, {self(), make_ref()}, state)
+            end)
+
+          choreograph_failing_arm()
+
+          assert {:reply, {:error, {:cdp_error, "Fetch.enable", _}}, new_state} =
+                   Task.await(task, 5_000)
+
+          # The page was opened then torn down: not retained, and never recorded as authed.
+          assert new_state.pages == %{}
+          assert new_state.auths == %{}
+        end)
+
+      assert log =~ "arming failed"
+
+      Connection.close(browser_conn)
+    end
+  end
+
+  # Answer the CDP frames new_page issues against the fake Chrome: a targetId for
+  # Target.createTarget, an OK for the bootstrap calls (and the teardown Fetch.disable),
+  # but an ERROR for Fetch.enable — the fault that makes the proxy-auth arm fail. Returns
+  # once Target.closeTarget arrives, which is the last frame close_failed_auth_page sends.
+  defp choreograph_failing_arm do
+    receive do
+      {:fake_cdp_connected, _fake} ->
+        # The dedicated page's connection came up; keep answering.
+        choreograph_failing_arm()
+
+      {:fake_cdp_recv, fake, %{"id" => id, "method" => "Target.createTarget"}} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"targetId":"T1"}}))
+        choreograph_failing_arm()
+
+      {:fake_cdp_recv, fake, %{"id" => id, "method" => "Fetch.enable"}} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
+        choreograph_failing_arm()
+
+      {:fake_cdp_recv, fake, %{"id" => id, "method" => "Target.closeTarget"}} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+        :ok
+
+      {:fake_cdp_recv, fake, %{"id" => id}} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+        choreograph_failing_arm()
+    after
+      5_000 -> flunk("timed out waiting for new_page CDP frames")
     end
   end
 end

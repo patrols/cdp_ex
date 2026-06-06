@@ -17,6 +17,7 @@ defmodule CDPEx.IntegrationTest do
   alias CDPEx.FixtureServer
   alias CDPEx.Page
   alias CDPEx.Pool
+  alias CDPEx.ProxyAuthServer
 
   @moduletag :integration
   # Real Chrome launches are slower than the default 60s in aggregate.
@@ -586,6 +587,32 @@ defmodule CDPEx.IntegrationTest do
       on_exit(fn -> stop_quietly(browser) end)
 
       assert {:ok, _page} = CDPEx.new_page(browser, transport: :session)
+    end
+
+    # The above use an unreachable proxy and never navigate. These two drive the full
+    # round-trip against a real authenticating proxy: the auto-armed handler answers a
+    # 407 (source: Proxy) with the launch credentials so traffic flows. The target host
+    # is non-resolvable on purpose — a load can only happen THROUGH the proxy.
+    test "auto-auth answers a proxy 407 so a navigation succeeds through the proxy" do
+      {:ok, %{port: proxy_port}} = ProxyAuthServer.start(username: "puser", password: "ppass")
+      {:ok, browser} = CDPEx.launch(proxy: "http://puser:ppass@127.0.0.1:#{proxy_port}")
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert {:ok, _} = Page.navigate(page, "http://proxied.test/")
+      assert {:ok, "Proxied"} = Page.text(page, "#greeting")
+    end
+
+    test "without credentials a proxy 407 blocks the navigation (the proxy enforces auth)" do
+      # Same proxy, but launched with a credential-less URL: no Fetch handler is armed,
+      # so Chrome can't answer the 407 and the navigation fails — which also proves the
+      # positive test above isn't a no-op (the proxy genuinely challenges).
+      {:ok, %{port: proxy_port}} = ProxyAuthServer.start(username: "puser", password: "ppass")
+      {:ok, browser} = CDPEx.launch(proxy: "http://127.0.0.1:#{proxy_port}")
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert {:error, {:navigate, _}} = Page.navigate(page, "http://proxied.test/")
     end
   end
 
