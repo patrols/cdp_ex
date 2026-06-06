@@ -606,7 +606,9 @@ defmodule CDPEx.IntegrationTest do
     test "without credentials a proxy 407 blocks the navigation (the proxy enforces auth)" do
       # Same proxy, but launched with a credential-less URL: no Fetch handler is armed,
       # so Chrome can't answer the 407 and the navigation fails — which also proves the
-      # positive test above isn't a no-op (the proxy genuinely challenges).
+      # positive test above isn't a no-op (the proxy genuinely challenges). The assertion
+      # hinges on Chrome surfacing the unanswered 407 as a navigate errorText (net::ERR_*),
+      # not on a readiness-wait timeout (which navigate/3 reports as a best-effort {:ok, _}).
       {:ok, %{port: proxy_port}} = ProxyAuthServer.start(username: "puser", password: "ppass")
       {:ok, browser} = CDPEx.launch(proxy: "http://127.0.0.1:#{proxy_port}")
       on_exit(fn -> stop_quietly(browser) end)

@@ -7,11 +7,9 @@ defmodule CDPEx.HttpFixture do
   # Kept deliberately tiny — just enough for a single request/response per socket,
   # so the fixtures stay readable and don't each re-implement the same parsing.
 
-  @doc """
-  Read request bytes until the end-of-headers marker (or a sane cap), so a request
-  split across TCP segments still yields the full headers. Returns what it has on
-  a recv error/timeout rather than blocking forever.
-  """
+  # Read request bytes until the end-of-headers marker (or a sane cap), so a request
+  # split across TCP segments still yields the full headers. Returns what it has on a
+  # recv error/timeout rather than blocking forever.
   @spec recv_request(:gen_tcp.socket()) :: String.t()
   def recv_request(socket), do: recv_request(socket, "")
 
@@ -31,7 +29,7 @@ defmodule CDPEx.HttpFixture do
     end
   end
 
-  @doc "The (case-insensitive) value of request header `name`, or `\"\"` if absent."
+  # The (case-insensitive) value of request header `name`, or "" if absent.
   @spec header_value(String.t(), String.t()) :: String.t()
   def header_value(request, name) do
     request
@@ -46,7 +44,7 @@ defmodule CDPEx.HttpFixture do
     end
   end
 
-  @doc "Build a complete `Connection: close` HTTP/1.1 response with the given status and body."
+  # Build a complete `Connection: close` HTTP/1.1 response with the given status and body.
   @spec http_response(String.t(), String.t(), [String.t()]) :: String.t()
   def http_response(status, body, extra_headers \\ []) do
     headers =
