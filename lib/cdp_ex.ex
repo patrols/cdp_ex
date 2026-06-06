@@ -120,6 +120,7 @@ defmodule CDPEx do
           | {:invalid_source, term()}
           | {:invalid_error_reason, term()}
           | {:invalid_transport, term()}
+          | {:invalid_proxy, term()}
           | {:unsupported_transport, term()}
           | {:invalid_response_body, String.t()}
           | {:invalid_pdf_data, String.t()}
@@ -208,6 +209,7 @@ defmodule CDPEx do
   def classify_error({:invalid_source, _}), do: :terminal
   def classify_error({:invalid_error_reason, _}), do: :terminal
   def classify_error({:invalid_transport, _}), do: :terminal
+  def classify_error({:invalid_proxy, _}), do: :terminal
   def classify_error({:unsupported_transport, _}), do: :terminal
   def classify_error({:invalid_response_body, _}), do: :terminal
   def classify_error({:invalid_pdf_data, _}), do: :terminal
@@ -278,6 +280,27 @@ defmodule CDPEx do
   cold-start hosts (e.g. headless Chrome in a constrained container) raise
   `:launch_timeout` — it is a ceiling, not a fixed wait. For long-lived use, prefer
   putting `CDPEx.Browser` under your own supervisor with a `:shutdown` timeout.
+
+  ## Proxy
+
+  Pass `:proxy` to route the browser through a proxy — a URL or a keyword list:
+
+      CDPEx.launch(proxy: "http://user:pass@host:8080")
+      CDPEx.launch(proxy: [server: "host:8080", username: "u", password: "p"])
+
+  It sets Chrome's `--proxy-server` and, when credentials are given, **automatically
+  answers the proxy auth challenge on each page** — so you just `new_page/2` and
+  `CDPEx.Page.navigate/3`, no manual `CDPEx.Page.authenticate/4`. See `CDPEx.Proxy` for
+  the accepted forms (the keyword form avoids percent-encoding special-character
+  passwords).
+
+  A credentialed proxy requires the default `:dedicated` transport: `new_page(transport:
+  :session)` on such a browser returns `{:error, {:unsupported_transport, :session}}`,
+  and an auto-armed page can't also use `enable_request_interception/2` (both drive the
+  `Fetch` domain). A malformed `:proxy` — or combining it with a full `:args` override —
+  fails the launch with `{:error, {:invalid_proxy, _}}` (`:proxy` appends to `:extra_args`,
+  which an `:args` override discards, so the two are mutually exclusive; use one). Don't
+  set `--proxy-server` in `:extra_args` yourself when using `:proxy`.
   """
   @spec launch(keyword()) :: GenServer.on_start()
   def launch(opts \\ []) do

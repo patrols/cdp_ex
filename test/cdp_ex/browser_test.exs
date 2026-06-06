@@ -15,6 +15,34 @@ defmodule CDPEx.BrowserTest do
       assert {:reply, {:error, {:invalid_transport, :bogus}}, ^state} =
                Browser.handle_call({:new_page, [transport: :bogus]}, {self(), make_ref()}, state)
     end
+
+    test "a :session page is rejected when the browser has authenticated-proxy creds" do
+      # An authenticated proxy auto-arms per-page Fetch, which only works on :dedicated
+      # pages — the rejection fires before any I/O, so drive the callback directly.
+      state = %Browser{proxy_auth: %{username: "u", password: "p"}}
+
+      assert {:reply, {:error, {:unsupported_transport, :session}}, ^state} =
+               Browser.handle_call({:new_page, [transport: :session]}, {self(), make_ref()}, state)
+    end
+  end
+
+  describe "launch/1 :proxy validation" do
+    test "a malformed :proxy fails the launch with {:invalid_proxy, _} (no Chrome launched)" do
+      # apply_proxy runs before Chrome.launch in init/1, so a bad proxy stops init early.
+      # start_link's failing init also link-exits the caller (as any launch failure does),
+      # so trap exits to observe the {:error, _} return rather than be killed.
+      Process.flag(:trap_exit, true)
+      assert {:error, {:invalid_proxy, _}} = Browser.start_link(proxy: "not a url")
+    end
+
+    test "rejects :proxy combined with a full :args override (the flag would be dropped)" do
+      # :proxy appends --proxy-server to :extra_args, which an :args override discards;
+      # arming auth for a proxy Chrome never received is worse than a no-op, so reject.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {:invalid_proxy, :args_override}} =
+               Browser.start_link(proxy: "http://host:8080", args: ["--headless=new"])
+    end
   end
 
   describe "session pruning" do

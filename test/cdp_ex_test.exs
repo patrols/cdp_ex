@@ -50,6 +50,7 @@ defmodule CDPExTest do
       {:invalid_source, :bogus},
       {:invalid_error_reason, :bogus},
       {:invalid_transport, :bogus},
+      {:invalid_proxy, {:malformed_url, "nope"}},
       {:unsupported_transport, :session},
       {:invalid_response_body, "not-base64"},
       {:invalid_pdf_data, "not-base64"},
