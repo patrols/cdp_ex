@@ -324,7 +324,8 @@ defmodule CDPEx.BrowserTest do
       # dedicated process plays the fake Chrome (the FakeCDP controller, answering every
       # CDP frame and erroring only Fetch.enable), leaving this process free to run the
       # blocking handle_call in a Task and await its reply.
-      fake = spawn_link(&fake_chrome_failing_arm/0)
+      test = self()
+      fake = spawn_link(fn -> fake_chrome_failing_arm(test) end)
       {:ok, server} = FakeCDP.start(fake)
       {:ok, browser_conn} = Connection.start_link(server.url)
 
@@ -343,11 +344,13 @@ defmodule CDPEx.BrowserTest do
             end)
 
           assert {:reply, {:error, {:cdp_error, "Fetch.enable", _}}, new_state} =
-                   Task.await(task, 15_000)
+                   Task.await(task, 30_000)
 
-          # The page was opened then torn down: not retained, and never recorded as authed.
+          # The page was opened then torn down: dropped from state, never recorded as
+          # authed, and its orphaned Chrome tab actually closed (Target.closeTarget sent).
           assert new_state.pages == %{}
           assert new_state.auths == %{}
+          assert_receive :close_target_sent, 1_000
         end)
 
       assert log =~ "arming failed"
@@ -358,16 +361,21 @@ defmodule CDPEx.BrowserTest do
 
   # A fake Chrome for the test above: answer every CDP frame the new_page conversation
   # issues — a targetId for Target.createTarget, an OK for the bootstrap calls (and the
-  # teardown Fetch.disable/closeTarget), but an ERROR for Fetch.enable, the fault that
-  # makes the proxy-auth arm fail. Loops until its linker (the test process) exits, so
-  # there's no per-message timeout to race CI load — Task.await is the sole deadline.
-  defp fake_chrome_failing_arm do
+  # teardown Fetch.disable), but an ERROR for Fetch.enable, the fault that makes the
+  # proxy-auth arm fail. Tells `test` when it sees Target.closeTarget, so the test can
+  # assert the orphaned tab was actually closed. Loops until its linker (the test process)
+  # exits, so there's no per-message timeout to race CI load — Task.await is the deadline.
+  defp fake_chrome_failing_arm(test) do
     receive do
       {:fake_cdp_recv, fake, %{"id" => id, "method" => "Target.createTarget"}} ->
         FakeCDP.send_text(fake, ~s({"id":#{id},"result":{"targetId":"T1"}}))
 
       {:fake_cdp_recv, fake, %{"id" => id, "method" => "Fetch.enable"}} ->
         FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32000,"message":"boom"}}))
+
+      {:fake_cdp_recv, fake, %{"id" => id, "method" => "Target.closeTarget"}} ->
+        send(test, :close_target_sent)
+        FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
 
       {:fake_cdp_recv, fake, %{"id" => id}} ->
         FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
@@ -376,6 +384,6 @@ defmodule CDPEx.BrowserTest do
         :ok
     end
 
-    fake_chrome_failing_arm()
+    fake_chrome_failing_arm(test)
   end
 end
