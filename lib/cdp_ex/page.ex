@@ -1298,12 +1298,45 @@ defmodule CDPEx.Page do
   @doc """
   Overrides the page's User-Agent (`Emulation.setUserAgentOverride`).
 
-  Options: `:timeout` (default 10_000).
+  Options:
+    * `:user_agent_metadata` — a CDP `Emulation.UserAgentMetadata` map (string keys,
+      e.g. `%{"platform" => "macOS", "mobile" => false, "brands" => [...]}`). Sets the
+      UA Client Hints surface (`navigator.userAgentData`, the `Sec-CH-UA*` headers) so
+      it stays consistent with the UA string. Overriding only the string leaves Client
+      Hints at Chrome's defaults — a visible `navigator.userAgent` ↔ Client-Hints
+      mismatch. Passed through verbatim, so it must match the CDP shape: a partial or
+      empty map is **not** dropped — it's sent as-is and Chrome rejects the whole
+      `setUserAgentOverride` call. Omit the option entirely to leave Client Hints at
+      Chrome's default.
+    * `:accept_language` — value for the `Accept-Language` header and `navigator.language`
+      (e.g. `"en-US"`).
+    * `:timeout` (default 10_000).
+
+  ## Example
+
+      Page.set_user_agent(page, "Mozilla/5.0 (Macintosh…) Chrome/120.0.0.0 Safari/537.36",
+        user_agent_metadata: %{
+          "platform" => "macOS",
+          "platformVersion" => "14.0.0",
+          "architecture" => "arm",
+          "model" => "",
+          "mobile" => false,
+          "brands" => [
+            %{"brand" => "Chromium", "version" => "120"},
+            %{"brand" => "Not=A?Brand", "version" => "24"}
+          ]
+        },
+        accept_language: "en-US"
+      )
   """
   @spec set_user_agent(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def set_user_agent(%__MODULE__{} = page, user_agent, opts \\ []) when is_binary(user_agent) do
     timeout = Keyword.get(opts, :timeout, @command_timeout)
-    params = %{"userAgent" => user_agent}
+
+    params =
+      %{"userAgent" => user_agent}
+      |> put_present("userAgentMetadata", Keyword.get(opts, :user_agent_metadata))
+      |> put_present("acceptLanguage", Keyword.get(opts, :accept_language))
 
     case do_call(page, "Emulation.setUserAgentOverride", params, timeout) do
       {:ok, _} -> :ok
