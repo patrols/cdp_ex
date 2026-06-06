@@ -544,6 +544,43 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "proxy" do
+    # The proxy is unreachable, but we never navigate — the auto-arm only enables Fetch
+    # locally, and target/session creation goes over the debug socket, not through the
+    # proxy. So these exercise the launch wiring without needing a real proxy server.
+
+    test "launch(proxy: creds) auto-arms a dedicated page (no manual authenticate/4)" do
+      {:ok, browser} = CDPEx.launch(proxy: "http://user:pass@127.0.0.1:9")
+
+      try do
+        assert {:ok, _page} = CDPEx.new_page(browser)
+      after
+        CDPEx.stop(browser)
+      end
+    end
+
+    test "launch(proxy: creds) rejects a :session page" do
+      {:ok, browser} = CDPEx.launch(proxy: "http://user:pass@127.0.0.1:9")
+
+      try do
+        assert {:error, {:unsupported_transport, :session}} =
+                 CDPEx.new_page(browser, transport: :session)
+      after
+        CDPEx.stop(browser)
+      end
+    end
+
+    test "launch(proxy: url) without creds sets the flag only — any transport works" do
+      {:ok, browser} = CDPEx.launch(proxy: "http://127.0.0.1:9")
+
+      try do
+        assert {:ok, _page} = CDPEx.new_page(browser, transport: :session)
+      after
+        CDPEx.stop(browser)
+      end
+    end
+  end
+
   describe "request interception" do
     test "fulfill_request serves a synthetic response for an intercepted navigation", %{
       fixture: fixture

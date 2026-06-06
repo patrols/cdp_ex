@@ -22,12 +22,15 @@ defmodule CDPEx.Browser do
   alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.Protocol
+  alias CDPEx.Proxy
   alias CDPEx.Telemetry
 
   require Logger
 
   @create_timeout 10_000
   @bootstrap_timeout 10_000
+  # Ceiling for the synchronous proxy-auth arm during new_page (see reply_proxy_authed_page).
+  @arm_timeout 15_000
 
   defstruct [
     :chrome,
@@ -36,6 +39,7 @@ defmodule CDPEx.Browser do
     :port,
     :opts,
     :parent,
+    :proxy_auth,
     pages: %{},
     sessions: %{},
     auths: %{},
@@ -139,17 +143,39 @@ defmodule CDPEx.Browser do
     # (the {:EXIT, parent, _} clause) still targets the real owner (the pool) rather than
     # the already-dead task — otherwise a hard-killed pool would orphan the browser.
     {owner, launch_opts} = Keyword.pop(launch_opts, :owner)
+    {proxy, launch_opts} = Keyword.pop(launch_opts, :proxy)
 
-    case Chrome.launch(launch_opts) do
-      {:ok, chrome} -> connect_browser(chrome, launch_opts, owner || parent_pid())
+    with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
+         {:ok, chrome} <- Chrome.launch(launch_opts) do
+      connect_browser(chrome, launch_opts, owner || parent_pid(), proxy_auth)
+    else
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # Translate the `:proxy` launch option into a `--proxy-server` flag (appended to
+  # `:extra_args`) plus the credentials to arm each page with. A bad proxy value stops
+  # init with `{:invalid_proxy, _}`, surfaced from `launch/1` as `{:error, _}`.
+  # NOTE: the flag is injected via `:extra_args`, which a full `:args` override bypasses —
+  # if you fully override `:args`, manage `--proxy-server` yourself.
+  defp apply_proxy(nil, launch_opts), do: {:ok, nil, launch_opts}
+
+  defp apply_proxy(proxy, launch_opts) do
+    case Proxy.parse(proxy) do
+      {:ok, parsed} ->
+        arg = Proxy.to_arg(parsed)
+        launch_opts = Keyword.update(launch_opts, :extra_args, [arg], &(&1 ++ [arg]))
+        {:ok, Proxy.credentials(parsed), launch_opts}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
   # Chrome is running now. If the browser WebSocket fails to connect, init/1
   # returns {:stop, _} *before* the GenServer loop starts, so terminate/2 never
   # runs — we must reap Chrome here or leak the OS process and temp profile.
-  defp connect_browser(chrome, launch_opts, parent) do
+  defp connect_browser(chrome, launch_opts, parent, proxy_auth) do
     {host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
 
     case Connection.start_link(chrome.debug_url) do
@@ -171,7 +197,8 @@ defmodule CDPEx.Browser do
              host: host,
              port: port,
              opts: launch_opts,
-             parent: parent
+             parent: parent,
+             proxy_auth: proxy_auth
            }}
         catch
           :exit, reason ->
@@ -538,11 +565,82 @@ defmodule CDPEx.Browser do
     case open_page(state, opts) do
       {:ok, page} ->
         Telemetry.page(:start, %{target_id: page.target_id, transport: :dedicated})
-        {:reply, {:ok, page}, %{state | pages: Map.put(state.pages, page.target_id, page.conn)}}
+        state = %{state | pages: Map.put(state.pages, page.target_id, page.conn)}
+
+        case state.proxy_auth do
+          nil -> {:reply, {:ok, page}, state}
+          creds -> reply_proxy_authed_page(state, page, creds)
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # Browser launched with an authenticated `:proxy`: arm this page's proxy auth before
+  # returning it, so the caller navigates straight away (no manual authenticate/4). Done
+  # synchronously within new_page — which already blocks the Browser for target creation +
+  # bootstrap — so it needs none of the async pending_auth machinery authenticate/4 uses
+  # for its separate, concurrently-served call. The Fetch handler is recorded in `auths`
+  # exactly like authenticate/4, so mutual exclusion with interception and the
+  # drop-on-EXIT teardown apply unchanged. On any arm failure the just-created page (never
+  # handed to the caller) is closed and the error surfaced.
+  defp reply_proxy_authed_page(state, %Page{conn: conn, target_id: tid} = page, creds) do
+    fetch_opts = [
+      conn: conn,
+      session_id: nil,
+      browser: self(),
+      username: creds.username,
+      password: creds.password,
+      source: :proxy
+    ]
+
+    case Fetch.start_link(fetch_opts) do
+      {:ok, pid} ->
+        case await_fetch_armed(pid) do
+          :ok ->
+            {:reply, {:ok, page}, %{state | auths: Map.put(state.auths, tid, pid)}}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, close_failed_auth_page(state, tid, conn)}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, close_failed_auth_page(state, tid, conn)}
+    end
+  end
+
+  # The proxy-auth arm failed; the just-created page was never handed to the caller, so
+  # close its target + connection and drop it from `pages` (best-effort — either may
+  # already be gone). Returns the updated state for the {:reply, …} tuple.
+  defp close_failed_auth_page(state, tid, conn) do
+    safe_close(conn)
+    close_target(state.browser_conn, tid)
+    %{state | pages: Map.delete(state.pages, tid)}
+  end
+
+  # Block (inside the new_page call) until the Fetch handler signals it's armed. It is
+  # linked and we trap exits, so a crash arrives as {:EXIT, pid, _}. Bounded by
+  # @arm_timeout; on timeout cancel the handler so it can't linger. A late {:armed}/{:EXIT}
+  # for this pid arriving after we return is handled harmlessly by the handle_info clauses
+  # (on success the pid is in `auths`, so drop-on-EXIT applies; otherwise it's a no-op).
+  defp await_fetch_armed(pid) do
+    receive do
+      {:armed, ^pid} -> :ok
+      {:arm_failed, ^pid, reason} -> {:error, reason}
+      {:EXIT, ^pid, reason} -> {:error, reason}
+    after
+      @arm_timeout ->
+        Fetch.cancel(pid)
+        {:error, :timeout}
+    end
+  end
+
+  defp reply_session_page(%{proxy_auth: creds} = state, _opts) when not is_nil(creds) do
+    # An authenticated proxy needs per-page Fetch auth, only supported on :dedicated pages
+    # (a :session page rides the shared connection close_page never stops). Reject rather
+    # than hand back a session page that can't answer the proxy challenge.
+    {:reply, {:error, {:unsupported_transport, :session}}, state}
   end
 
   defp reply_session_page(state, opts) do

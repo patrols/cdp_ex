@@ -267,17 +267,25 @@ case CDPEx.Page.navigate(page, url, response: true) do
 end
 ```
 
-### Authenticated proxy (or HTTP Basic)
+### Authenticated proxy
 
-Answer the challenge with `authenticate/4` *before* navigating:
+Pass `:proxy` — CDPEx sets `--proxy-server` and answers the proxy's auth challenge on
+each page automatically, so you just navigate:
 
 ```elixir
-{:ok, browser} = CDPEx.launch(extra_args: ["--proxy-server=proxy.example.com:8080"])
-{:ok, page}    = CDPEx.new_page(browser)
+{:ok, browser} = CDPEx.launch(proxy: "http://user:pass@proxy.example.com:8080")
+# keyword form avoids percent-encoding a special-char password:
+# CDPEx.launch(proxy: [server: "proxy.example.com:8080", username: "u", password: "p@ss"])
 
-:ok          = CDPEx.Page.authenticate(page, "user", "pass")
-{:ok, _page} = CDPEx.Page.navigate(page, "https://example.com")
+CDPEx.with_page(browser, fn page ->
+  {:ok, _} = CDPEx.Page.navigate(page, "https://example.com")
+  CDPEx.Page.html(page)
+end)
 ```
+
+For a one-off HTTP Basic challenge on an *origin* (not a proxy), arm it per page with
+`authenticate/4` before navigating:
+`CDPEx.Page.authenticate(page, "user", "pass", source: :server)`.
 
 ## Error handling
 
