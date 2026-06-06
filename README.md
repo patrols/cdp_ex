@@ -196,6 +196,89 @@ crashed browser is relaunched on demand.
 
 Full API: [hexdocs.pm/cdp_ex](https://hexdocs.pm/cdp_ex).
 
+## Recipes
+
+End-to-end patterns for the event-driven features. Each `CDPEx.Page` function is
+documented in full on [hexdocs](https://hexdocs.pm/cdp_ex/CDPEx.Page.html).
+
+### Block or rewrite requests (interception)
+
+Interception is event-driven: the process that enables it receives one
+`Fetch.requestPaused` event per request and must resolve every one — with
+`continue_request/3`, `fulfill_request/3`, or `fail_request/3`. Drive it from a single
+long-lived process (an unresolved request stalls the page).
+
+```elixir
+defmodule ImageBlocker do
+  # Drops image requests; lets everything else through.
+  def run(page) do
+    :ok = CDPEx.Page.enable_request_interception(page)
+    loop(page)
+  end
+
+  defp loop(page) do
+    receive do
+      {:cdp_event, _conn, "Fetch.requestPaused", %{"requestId" => id, "request" => request}, _sid} ->
+        if String.ends_with?(request["url"], [".png", ".jpg", ".webp"]) do
+          CDPEx.Page.fail_request(page, id, reason: :blocked_by_client)
+        else
+          CDPEx.Page.continue_request(page, id)
+        end
+
+        loop(page)
+    after
+      1_000 -> :ok
+    end
+  end
+end
+```
+
+### Grab an API response triggered by a click (SPA)
+
+Arm the waiter *before* the action that fires the request. The matcher is a substring,
+a `Regex`, or a `(url -> boolean)` function.
+
+```elixir
+CDPEx.with_page([], fn page ->
+  {:ok, _} = CDPEx.Page.navigate(page, "https://example.com/app")
+
+  waiter = Task.async(fn -> CDPEx.Page.wait_for_response(page, ~r{/api/items}) end)
+  :ok = CDPEx.Page.click(page, "#load-more")
+
+  {:ok, %{"requestId" => id, "response" => %{"status" => 200}}} = Task.await(waiter)
+  CDPEx.Page.response_body(page, id)
+end)
+```
+
+When you just need the page to settle after hydration (no specific response to match),
+use `wait_for_network_idle/2` instead.
+
+### Detect a 403 wall / 404 / login redirect
+
+`navigate/3` returns `{:ok, page}` even for a 403 or a redirect-to-login. Pass
+`response: true` to also get the main document's HTTP status and final (post-redirect)
+URL:
+
+```elixir
+case CDPEx.Page.navigate(page, url, response: true) do
+  {:ok, _page, %{status: 200, url: final_url}} -> {:landed, final_url}
+  {:ok, _page, %{status: status}}              -> {:blocked, status}
+  {:error, reason}                             -> {:error, reason}
+end
+```
+
+### Authenticated proxy (or HTTP Basic)
+
+Answer the challenge with `authenticate/4` *before* navigating:
+
+```elixir
+{:ok, browser} = CDPEx.launch(extra_args: ["--proxy-server=proxy.example.com:8080"])
+{:ok, page}    = CDPEx.new_page(browser)
+
+:ok          = CDPEx.Page.authenticate(page, "user", "pass")
+{:ok, _page} = CDPEx.Page.navigate(page, "https://example.com")
+```
+
 ## Error handling
 
 Operations return `{:error, reason}` on failure. Rather than hard-code the reason
