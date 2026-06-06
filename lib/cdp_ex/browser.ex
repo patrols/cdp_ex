@@ -156,19 +156,25 @@ defmodule CDPEx.Browser do
   # Translate the `:proxy` launch option into a `--proxy-server` flag (appended to
   # `:extra_args`) plus the credentials to arm each page with. A bad proxy value stops
   # init with `{:invalid_proxy, _}`, surfaced from `launch/1` as `{:error, _}`.
-  # NOTE: the flag is injected via `:extra_args`, which a full `:args` override bypasses —
-  # if you fully override `:args`, manage `--proxy-server` yourself.
   defp apply_proxy(nil, launch_opts), do: {:ok, nil, launch_opts}
 
   defp apply_proxy(proxy, launch_opts) do
-    case Proxy.parse(proxy) do
-      {:ok, parsed} ->
-        arg = Proxy.to_arg(parsed)
-        launch_opts = Keyword.update(launch_opts, :extra_args, [arg], &(&1 ++ [arg]))
-        {:ok, Proxy.credentials(parsed), launch_opts}
+    # The flag is appended to :extra_args, which a full :args override discards — and
+    # then arming auth for a proxy Chrome never received would be worse than a no-op
+    # (every page paused through Fetch, interception blocked, no actual proxy). Reject
+    # the ambiguous combination: use :extra_args, or put --proxy-server in :args yourself.
+    if Keyword.has_key?(launch_opts, :args) do
+      {:error, {:invalid_proxy, :args_override}}
+    else
+      case Proxy.parse(proxy) do
+        {:ok, parsed} ->
+          arg = Proxy.to_arg(parsed)
+          launch_opts = Keyword.update(launch_opts, :extra_args, [arg], &(&1 ++ [arg]))
+          {:ok, Proxy.credentials(parsed), launch_opts}
 
-      {:error, _reason} = error ->
-        error
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 

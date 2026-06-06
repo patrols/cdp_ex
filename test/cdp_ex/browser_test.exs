@@ -34,6 +34,15 @@ defmodule CDPEx.BrowserTest do
       Process.flag(:trap_exit, true)
       assert {:error, {:invalid_proxy, _}} = Browser.start_link(proxy: "not a url")
     end
+
+    test "rejects :proxy combined with a full :args override (the flag would be dropped)" do
+      # :proxy appends --proxy-server to :extra_args, which an :args override discards;
+      # arming auth for a proxy Chrome never received is worse than a no-op, so reject.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {:invalid_proxy, :args_override}} =
+               Browser.start_link(proxy: "http://host:8080", args: ["--headless=new"])
+    end
   end
 
   describe "session pruning" do

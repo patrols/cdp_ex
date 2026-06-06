@@ -548,36 +548,44 @@ defmodule CDPEx.IntegrationTest do
     # The proxy is unreachable, but we never navigate — the auto-arm only enables Fetch
     # locally, and target/session creation goes over the debug socket, not through the
     # proxy. So these exercise the launch wiring without needing a real proxy server.
+    @creds_proxy "http://user:pass@127.0.0.1:9"
 
     test "launch(proxy: creds) auto-arms a dedicated page (no manual authenticate/4)" do
-      {:ok, browser} = CDPEx.launch(proxy: "http://user:pass@127.0.0.1:9")
+      {:ok, browser} = CDPEx.launch(proxy: @creds_proxy)
+      on_exit(fn -> stop_quietly(browser) end)
 
-      try do
-        assert {:ok, _page} = CDPEx.new_page(browser)
-      after
-        CDPEx.stop(browser)
-      end
+      assert {:ok, _page} = CDPEx.new_page(browser)
+    end
+
+    test "an auto-armed page rejects a second authenticate/4 (proxy occupies the Fetch slot)" do
+      {:ok, browser} = CDPEx.launch(proxy: @creds_proxy)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert {:error, :already_authenticated} = Page.authenticate(page, "user", "pass")
+    end
+
+    test "an auto-armed page rejects request interception (Fetch mutual exclusion)" do
+      {:ok, browser} = CDPEx.launch(proxy: @creds_proxy)
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, page} = CDPEx.new_page(browser)
+      assert {:error, {:conflict, :authenticated}} = Page.enable_request_interception(page)
     end
 
     test "launch(proxy: creds) rejects a :session page" do
-      {:ok, browser} = CDPEx.launch(proxy: "http://user:pass@127.0.0.1:9")
+      {:ok, browser} = CDPEx.launch(proxy: @creds_proxy)
+      on_exit(fn -> stop_quietly(browser) end)
 
-      try do
-        assert {:error, {:unsupported_transport, :session}} =
-                 CDPEx.new_page(browser, transport: :session)
-      after
-        CDPEx.stop(browser)
-      end
+      assert {:error, {:unsupported_transport, :session}} =
+               CDPEx.new_page(browser, transport: :session)
     end
 
     test "launch(proxy: url) without creds sets the flag only — any transport works" do
       {:ok, browser} = CDPEx.launch(proxy: "http://127.0.0.1:9")
+      on_exit(fn -> stop_quietly(browser) end)
 
-      try do
-        assert {:ok, _page} = CDPEx.new_page(browser, transport: :session)
-      after
-        CDPEx.stop(browser)
-      end
+      assert {:ok, _page} = CDPEx.new_page(browser, transport: :session)
     end
   end
 

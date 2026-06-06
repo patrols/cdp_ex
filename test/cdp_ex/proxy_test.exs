@@ -37,6 +37,18 @@ defmodule CDPEx.ProxyTest do
       assert {:error, {:invalid_proxy, _}} = Proxy.parse("socks5://host")
       assert {:error, {:invalid_proxy, _}} = Proxy.parse("not a url")
     end
+
+    test "wraps an IPv6 literal host in brackets in the server string" do
+      assert {:ok, %{server: "http://[::1]:8080"}} = Proxy.parse("http://[::1]:8080")
+
+      assert {:ok, %{server: "socks5://[2001:db8::1]:1080"}} =
+               Proxy.parse("socks5://[2001:db8::1]:1080")
+    end
+
+    test "treats an empty username or password as absent (no auth, not a blank credential)" do
+      assert {:ok, %{username: nil, password: "pass"}} = Proxy.parse("http://:pass@host:8080")
+      assert {:ok, %{username: "user", password: nil}} = Proxy.parse("http://user:@host:8080")
+    end
   end
 
   describe "parse/1 — keyword / map form" do
@@ -63,6 +75,11 @@ defmodule CDPEx.ProxyTest do
       assert {:error, {:invalid_proxy, _}} = Proxy.parse(username: "u", password: "p")
       assert {:error, {:invalid_proxy, _}} = Proxy.parse(server: "")
     end
+
+    test "treats blank credentials as absent" do
+      assert {:ok, %{username: nil, password: nil}} =
+               Proxy.parse(server: "host:8080", username: "", password: "")
+    end
   end
 
   describe "parse/1 — bad input" do
@@ -87,6 +104,9 @@ defmodule CDPEx.ProxyTest do
 
       {:ok, half} = Proxy.parse("http://u@host:8080")
       assert Proxy.credentials(half) == nil
+
+      {:ok, empty_pass} = Proxy.parse("http://u:@host:8080")
+      assert Proxy.credentials(empty_pass) == nil
     end
   end
 end

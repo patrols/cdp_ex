@@ -37,7 +37,8 @@ defmodule CDPEx.Proxy do
   @doc """
   Credentials (`%{username, password}`) when the proxy needs auth, else `nil`.
 
-  Both parts must be present; a half-credential is treated as no auth.
+  Both parts must be present and non-empty; a missing or empty half is treated as no
+  auth (the proxy is used unauthenticated).
   """
   @spec credentials(t()) :: %{username: String.t(), password: String.t()} | nil
   def credentials(%{username: u, password: p}) when is_binary(u) and is_binary(p),
@@ -50,7 +51,9 @@ defmodule CDPEx.Proxy do
       %URI{scheme: scheme, host: host, port: port} = uri
       when is_binary(scheme) and is_binary(host) and host != "" and is_integer(port) ->
         {user, pass} = split_userinfo(uri.userinfo)
-        {:ok, %{server: "#{scheme}://#{host}:#{port}", username: user, password: pass}}
+
+        {:ok,
+         %{server: "#{scheme}://#{host_for_server(host)}:#{port}", username: user, password: pass}}
 
       _ ->
         {:error, {:invalid_proxy, {:malformed_url, url}}}
@@ -59,20 +62,37 @@ defmodule CDPEx.Proxy do
 
   defp parse_opts(%{server: server} = opts) when is_binary(server) and server != "" do
     server = if String.contains?(server, "://"), do: server, else: "#{scheme(opts)}://#{server}"
-    {:ok, %{server: server, username: opts[:username], password: opts[:password]}}
+
+    {:ok,
+     %{
+       server: server,
+       username: blank_to_nil(opts[:username]),
+       password: blank_to_nil(opts[:password])
+     }}
   end
 
   defp parse_opts(opts), do: {:error, {:invalid_proxy, {:missing_server, opts}}}
 
   defp scheme(opts), do: Map.get(opts, :scheme, "http")
 
+  # URI strips the brackets from an IPv6 literal (host: "::1"); re-wrap so the rebuilt
+  # `host:port` stays unambiguous for Chrome (`[::1]:8080`, not `::1:8080`).
+  defp host_for_server(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
+  end
+
   # URI keeps userinfo encoded; decode the parts so a percent-encoded password round-trips.
+  # An empty user/password is treated as absent (nil) so credentials/1 reads it as no auth.
   defp split_userinfo(nil), do: {nil, nil}
 
   defp split_userinfo(info) do
     case String.split(info, ":", parts: 2) do
-      [user, pass] -> {URI.decode(user), URI.decode(pass)}
-      [user] -> {URI.decode(user), nil}
+      [user, pass] -> {blank_to_nil(URI.decode(user)), blank_to_nil(URI.decode(pass))}
+      [user] -> {blank_to_nil(URI.decode(user)), nil}
     end
   end
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 end
