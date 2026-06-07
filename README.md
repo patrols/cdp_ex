@@ -7,7 +7,7 @@
 
 OTP-native [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
 browser automation for Elixir. Launch headless Chrome and drive it directly over a
-`Mint.WebSocket` connection — **no ChromeDriver, no Node.js**.
+`Mint.WebSocket` connection. **No ChromeDriver, no Node.js.**
 
 ```elixir
 CDPEx.with_page([], fn page ->
@@ -19,12 +19,15 @@ end)
 
 ## Why CDPEx?
 
-It drives Chrome over CDP the way Puppeteer and Playwright do — but it's pure
+It drives Chrome over CDP the way Puppeteer and Playwright do, but in pure
 Elixir: the browser and each page's CDP connection are **supervised OTP
 processes** (a page is a lightweight handle over its connection). A Chrome crash
 or a dropped socket surfaces to the caller as `{:error, reason}` instead of a
 hung session, and `terminate/2` guarantees the OS process is reaped (no zombie
 Chromes).
+
+It's production-tested: it runs as the sole browser engine for a JavaScript-heavy
+scraper, where it replaced a Wallaby/ChromeDriver setup.
 
 | | CDPEx | chrome_remote_interface | ChromicPDF | Wallaby |
 |---|---|---|---|---|
@@ -32,15 +35,15 @@ Chromes).
 | Runtime deps | `mint_web_socket`, `jason` | `hackney` + others | a few | ChromeDriver process |
 | Supervised lifecycle | ✅ | — | ✅ (PDF pool) | partial |
 | Scope | general automation | low-level client | PDF / screenshots | testing |
-| Node.js required | no | no | no | no |
 
-If you want a small, dependency-light CDP client with proper OTP supervision — and
-you don't want a ChromeDriver process or a Node sidecar — that's the gap CDPEx fills.
+If you want a small, dependency-light CDP client with proper OTP supervision, and
+you'd rather not run a ChromeDriver process (like Wallaby) or a Node sidecar (like
+Playwright or Puppeteer), that's the gap CDPEx fills.
 
 > #### Status {: .info}
 >
 > **Transports:** pages default to one WebSocket each (strong crash isolation).
-> Opt into `sessionId` multiplexing — many pages over the one browser socket —
+> Opt into `sessionId` multiplexing (many pages over the one browser socket)
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
@@ -53,7 +56,7 @@ Add `cdp_ex` to your deps in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:cdp_ex, "~> 0.1"}
+    {:cdp_ex, "~> 0.7"}
   ]
 end
 ```
@@ -188,6 +191,8 @@ crashed browser is relaunched on demand.
 | `click/3` | Synthetic `.click()` on the first match |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
 | `screenshot/2` | PNG bytes, or write to `:path` |
+| `pdf/2` | Render the page to PDF bytes, or write to `:path` |
+| `set_user_agent/3` | Override the UA string, with optional Client-Hints metadata + `Accept-Language` |
 | `observe_network/2` | Stream `Network` request/response events to the caller |
 | `response_body/3` | Fetch a response body by requestId (`Network.getResponseBody`) |
 | `enable_request_interception/2` | Pause matching requests for the caller to resolve |
@@ -304,10 +309,10 @@ end
 
 `CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
 couldn't be established, timeout, Chrome died or was slow to start, an internal helper
-crashed, or a connection-layer `net::ERR_*` navigation error — a fresh attempt may
-succeed), `:terminal` (selector miss, JS exception, usage/validation error — it
+crashed, or a connection-layer `net::ERR_*` navigation error, so a fresh attempt may
+succeed), `:terminal` (selector miss, JS exception, usage/validation error, so it
 won't), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*` navigation
-error or a CDP error code — you decide). The library tracks the error surface, so the
+error or a CDP error code, so you decide). The library tracks the error surface, so the
 transient/terminal decision lives in one place instead of drifting across callers.
 The reason shapes are documented as
 [`t:CDPEx.error_reason/0`](https://hexdocs.pm/cdp_ex/CDPEx.html#t:error_reason/0).
@@ -319,7 +324,7 @@ handle — a dead page keeps returning `:noproc`.
 ## Telemetry
 
 CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
-handlers — attach your own to record them (emitting with nothing attached is a no-op).
+handlers; attach your own to record them (emitting with nothing attached is a no-op).
 Events: `[:cdp_ex, :launch, …]` and `[:cdp_ex, :navigate, …]` spans,
 `[:cdp_ex, :page, :start | :stop]`, and `[:cdp_ex, :error]`. See
 [`CDPEx.Telemetry`](https://hexdocs.pm/cdp_ex/CDPEx.Telemetry.html) for the full
@@ -360,4 +365,4 @@ by Puppeteer's protocol layer.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
