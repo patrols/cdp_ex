@@ -32,7 +32,7 @@ scraper, where it replaced a Wallaby/ChromeDriver setup.
 | | CDPEx | chrome_remote_interface | ChromicPDF | Wallaby |
 |---|---|---|---|---|
 | Transport | CDP (WebSocket) | CDP (WebSocket) | CDP (WebSocket) | WebDriver / ChromeDriver |
-| Runtime deps | `mint_web_socket`, `jason` | `hackney` + others | a few | ChromeDriver process |
+| Runtime deps | `mint_web_socket`, `jason`, `telemetry` | `hackney` + others | a few | ChromeDriver process |
 | Supervised lifecycle | ✅ | — | ✅ (PDF pool) | partial |
 | Scope | general automation | low-level client | PDF / screenshots | testing |
 
@@ -310,9 +310,9 @@ end
 `CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
 couldn't be established, timeout, Chrome died or was slow to start, an internal helper
 crashed, or a connection-layer `net::ERR_*` navigation error, so a fresh attempt may
-succeed), `:terminal` (selector miss, JS exception, usage/validation error, so it
-won't), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*` navigation
-error or a CDP error code, so you decide). The library tracks the error surface, so the
+succeed), `:terminal` (selector miss, JS exception, usage/validation error, which a
+retry won't fix), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*`
+navigation error or a CDP error code; you decide). The library tracks the error surface, so the
 transient/terminal decision lives in one place instead of drifting across callers.
 The reason shapes are documented as
 [`t:CDPEx.error_reason/0`](https://hexdocs.pm/cdp_ex/CDPEx.html#t:error_reason/0).
