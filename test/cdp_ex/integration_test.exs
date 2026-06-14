@@ -111,15 +111,31 @@ defmodule CDPEx.IntegrationTest do
       {:ok, b} = CDPEx.connect("http://#{host}:#{port}")
 
       {:ok, page} = CDPEx.new_page(b, transport: :session)
+      b_target = page.target_id
       {:ok, _} = Page.navigate(page, fixture)
       assert {:ok, "Hello"} = Page.text(page, "#greeting")
+
+      # A tab opened directly on A (a "pre-existing" tab from B's perspective) that
+      # B's teardown must leave untouched.
+      {:ok, a_pre} = CDPEx.new_page(a, transport: :session)
+      a_pre_target = a_pre.target_id
 
       # Dedicated transport is not supported over a connected browser yet.
       assert {:error, {:unsupported_transport, :dedicated}} =
                CDPEx.new_page(b, transport: :dedicated)
 
-      # Stopping B must NOT kill the Chrome A owns: A still works afterward.
+      # Stopping B must NOT kill the Chrome A owns...
       assert :ok = CDPEx.stop(b)
+
+      # ...and it must close only the tabs B opened, leaving pre-existing ones alone.
+      # (Query the live targets through A's own browser connection.)
+      %{browser_conn: a_conn} = :sys.get_state(a)
+      {:ok, %{"targetInfos" => infos}} = Connection.call(a_conn, "Target.getTargets", %{})
+      live = Enum.map(infos, & &1["targetId"])
+      refute b_target in live, "B's session tab should have been closed on the remote by stop(b)"
+      assert a_pre_target in live, "a pre-existing tab on A must survive B's teardown"
+
+      # A still works afterward.
       assert {:ok, a_page} = CDPEx.new_page(a, transport: :session)
       {:ok, _} = Page.navigate(a_page, fixture)
       assert {:ok, "Hello"} = Page.text(a_page, "#greeting")

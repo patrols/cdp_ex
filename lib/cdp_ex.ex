@@ -353,15 +353,20 @@ defmodule CDPEx do
   connected browser).
 
   Options: `:insecure` (skip `wss://` cert verification, default `false`),
-  `:cacertfile` / `:cacerts` (custom CA for `wss://`), `:name` (register the process).
+  `:cacertfile` / `:cacerts` (custom CA for `wss://`), `:discovery_timeout` (ceiling
+  in ms for the whole `http(s)://` `/json/version` exchange — TCP connect, recv, and
+  body — default `5_000`; raise it for a slow remote endpoint), `:name` (register the
+  process).
   """
   @spec connect(String.t(), keyword()) :: GenServer.on_start()
   def connect(endpoint, opts \\ []) when is_binary(endpoint) do
     Telemetry.span(:connect, %{}, fn ->
       {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
+      {disc_timeout, opts} = Keyword.pop(opts, :discovery_timeout)
+      disc_opts = if disc_timeout, do: [timeout: disc_timeout], else: []
 
       result =
-        case Connect.resolve(endpoint, tls_opts) do
+        case Connect.resolve(endpoint, tls_opts, disc_opts) do
           {:ok, ws_url} -> Browser.start_link([connect: ws_url, conn_opts: tls_opts] ++ opts)
           {:error, _} = error -> error
         end

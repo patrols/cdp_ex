@@ -29,7 +29,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Pages default to `:session` transport (`:dedicated` over a connected browser is
   not yet supported — returns `{:error, {:unsupported_transport, :dedicated}}`).
   `wss://` is verified against the OS trust store (`:public_key.cacerts_get()`),
-  with `:insecure` / `:cacertfile` / `:cacerts` escape hatches. A failed endpoint
+  with `:insecure` / `:cacertfile` / `:cacerts` escape hatches; `:discovery_timeout`
+  bounds a slow remote `/json/version`. A failed endpoint
   discovery returns `{:error, {:connect_discovery_failed, reason}}` (classified
   `:unknown`). Combining `:proxy` with `:connect` is rejected with
   `{:error, {:unsupported_with_connect, :proxy}}` (a `--proxy-server` flag can't
