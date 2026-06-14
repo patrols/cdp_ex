@@ -16,8 +16,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page.click/3` doc now states it dispatches a **synthetic** DOM `.click()`
   (not a trusted OS-level input event); real `Input`-domain dispatch is tracked
   in #72.
-- `CDPEx.Page.evaluate/3` doc now notes non-serializable results (DOM nodes,
-  `window`, functions, circular structures) return `{:error, {:unexpected_evaluate, _}}`.
+- `CDPEx.Page.evaluate/3` / `CDPEx.Protocol.evaluate_result/1` docs now describe
+  the real `returnByValue` outcomes (verified against live Chrome): a DOM node or
+  function serializes lossily to `{:ok, %{}}`; an unserializable number (`NaN` /
+  `Infinity` / `-0` / `BigInt`) surfaces as `{:error, {:unexpected_evaluate, _}}`;
+  a value Chrome can't serialize (`window`, a circular object, a `Symbol`) fails
+  the call as `{:error, {:cdp_error, "Runtime.evaluate", _}}`. Covered by a unit
+  test (the `unserializableValue` shape) and an integration test (live shapes).
 
 ## [0.7.0] - 2026-06-06
 

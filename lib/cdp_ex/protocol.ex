@@ -154,9 +154,11 @@ defmodule CDPEx.Protocol do
 
   A thrown JS exception becomes `{:error, {:evaluate_exception, details}}`; a
   returned value (with `returnByValue: true`) becomes `{:ok, value}`; `undefined`
-  becomes `{:ok, nil}`. A non-serializable result (a DOM node, `window`, a
-  function, a circular structure) has no `returnByValue` value and falls through
-  to `{:error, {:unexpected_evaluate, _}}`.
+  becomes `{:ok, nil}`. A result Chrome can only express as an `unserializableValue`
+  — `NaN`, `Infinity`, `-0`, or a `BigInt` — has no by-value `value` and falls
+  through to `{:error, {:unexpected_evaluate, _}}`. (Inputs Chrome can't serialize
+  at all, like `window` or a circular object, never reach here — the
+  `Runtime.evaluate` call fails first; see `CDPEx.Page.evaluate/3`.)
 
   ## Examples
 
@@ -171,6 +173,9 @@ defmodule CDPEx.Protocol do
 
       iex> {:error, {:evaluate_exception, _}} =
       ...>   CDPEx.Protocol.evaluate_result(%{"exceptionDetails" => %{"text" => "Uncaught"}})
+
+      iex> {:error, {:unexpected_evaluate, _}} =
+      ...>   CDPEx.Protocol.evaluate_result(%{"result" => %{"type" => "bigint", "unserializableValue" => "10n"}})
   """
   @spec evaluate_result(map()) :: {:ok, term()} | {:error, term()}
   def evaluate_result(%{"exceptionDetails" => details}),
@@ -188,7 +193,8 @@ defmodule CDPEx.Protocol do
 
   Only `ws://` is accepted: CDPEx launches a local Chrome and talks plaintext to
   its `DevToolsActivePort` (no TLS). `wss://` — a remote/TLS DevTools endpoint —
-  has no entry point yet (see the connect-to-remote-endpoint tracker on GitHub).
+  has no entry point yet (tracked in
+  [#73](https://github.com/patrols/cdp_ex/issues/73)).
 
   ## Examples
 

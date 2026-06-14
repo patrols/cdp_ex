@@ -112,6 +112,15 @@ defmodule CDPEx.ProtocolTest do
     test "unrecognised shape is an error" do
       assert {:error, {:unexpected_evaluate, %{}}} = Protocol.evaluate_result(%{})
     end
+
+    test "an unserializableValue result (BigInt/NaN/Infinity) is unexpected_evaluate" do
+      # Chrome returns these with `unserializableValue` and no by-value `value`
+      # key under returnByValue, so they hit the catch-all rather than {:ok, _}.
+      for uv <- ["10n", "NaN", "Infinity", "-0"] do
+        result = %{"result" => %{"type" => "number", "unserializableValue" => uv}}
+        assert {:error, {:unexpected_evaluate, ^result}} = Protocol.evaluate_result(result)
+      end
+    end
   end
 
   describe "parse_ws_url/1" do

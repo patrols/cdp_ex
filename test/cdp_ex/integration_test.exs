@@ -228,6 +228,31 @@ defmodule CDPEx.IntegrationTest do
                Page.evaluate(page, "throw new Error('boom')")
     end
 
+    test "evaluate's non-serializable outcomes match the documented shapes", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      # A DOM node or function is serialized lossily to an empty object under
+      # returnByValue — NOT an error, and NOT the object itself.
+      assert {:ok, %{}} = Page.evaluate(page, "document.body")
+      assert {:ok, %{}} = Page.evaluate(page, "(function () { return 1; })")
+
+      # An unserializable number (returned by Chrome as `unserializableValue`,
+      # so no by-value `value` key) falls through to the catch-all.
+      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "10n")
+      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "NaN")
+      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "1 / 0")
+
+      # A value Chrome can't serialize at all (self-referential / circular)
+      # fails the Runtime.evaluate call itself.
+      assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Page.evaluate(page, "window")
+
+      assert {:error, {:cdp_error, "Runtime.evaluate", _}} =
+               Page.evaluate(page, "(function () { var o = {}; o.self = o; return o; })()")
+    end
+
     test "call_function applies JSON args and returns the result", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert {:ok, 5} = Page.call_function(page, "(a, b) => a + b", [2, 3])

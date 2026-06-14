@@ -546,10 +546,18 @@ defmodule CDPEx.Page do
 
   A thrown JS exception is `{:error, {:evaluate_exception, details}}`.
 
-  The value must be JSON-serializable. A non-serializable result — a DOM node,
-  `window`, a function, a circular structure — comes back as
-  `{:error, {:unexpected_evaluate, _}}`; return a serializable projection
-  instead (e.g. `el.outerHTML` or `el.id`, not the element).
+  The value must be JSON-serializable. Under `returnByValue`, three results are
+  worth knowing (return a serializable projection like `el.outerHTML` / `el.id`
+  to avoid them):
+
+    * a DOM node or function serializes **lossily** to `{:ok, %{}}` — an empty
+      map, not the object and not an error;
+    * an unserializable number Chrome reports only as an `unserializableValue`
+      (`NaN`, `Infinity`, `-0`, a `BigInt`) has no by-value value and surfaces as
+      `{:error, {:unexpected_evaluate, _}}`;
+    * a value Chrome can't serialize at all — a self-referential object like
+      `window`, a circular structure, or a `Symbol` — fails the call as
+      `{:error, {:cdp_error, "Runtime.evaluate", _}}`.
 
   Options: `:timeout` (default 15_000), `:await_promise` (default `false`).
   """
