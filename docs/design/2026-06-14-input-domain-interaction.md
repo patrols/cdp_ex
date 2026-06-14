@@ -24,10 +24,10 @@ keyboard entry, replacing the synthetic click as the default.
    escape hatch may be **deprecated and removed in a future release** (removal is
    breaking, so it goes through a deprecation cycle, not a yank). It is documented
    as an escape hatch, not an equal alternative.
-2. **Keyboard surface = `type/3` + `press/3`.** `type` uses `Input.insertText`
+2. **Keyboard surface = `type/4` + `press/4`.** `type` uses `Input.insertText`
    (fast; fires `input`/`change`; no per-character `keydown`/`keyup`). `press`
    uses `Input.dispatchKeyEvent` for a curated set of named keys. Realistic
-   per-character key events (a full keymap) are deferred — a future `type/3`
+   per-character key events (a full keymap) are deferred — a future `type/4`
    `realistic:`/`delay:` option if demand appears.
 3. **All functions live on `CDPEx.Page`** (consistent with the flat `Page.*` API;
    `click/3` already lives here so nothing moves). A dedicated `CDPEx.Input` /
@@ -99,13 +99,13 @@ Each requires, atomically (the compile-time coverage invariant, as in #75):
 ## Docs / release
 
 - Rewrite the `click/3` `@doc` (trusted default + `trusted: false` escape hatch);
-  add `type/3` and `press/3` docs.
+  add `type/4` and `press/4` docs.
 - README: add `type`/`press` to the Page-operations table, update the `click`
   row, and remove the "synthetic click" warning from the Status callout (it's
   real now). Update the `#72` reference to point at shipped behavior.
 - CHANGELOG `[Unreleased]`: `### Breaking` (click default now a trusted event;
-  may newly error on off-screen/zero-box elements) + `### Added` (`type/3`,
-  `press/3`). → **0.9.0**.
+  may newly error on off-screen/zero-box elements) + `### Added` (`type/4`,
+  `press/4`). → **0.9.0**.
 
 ## Testing (real Chrome — extend `test/support/fixture_server.ex`)
 

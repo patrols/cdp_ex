@@ -62,9 +62,31 @@ defmodule CDPEx.PageTest do
   end
 
   describe "keymap/1" do
-    test "returns CDP key fields for a supported key" do
-      assert {:ok, %{"key" => "Enter", "code" => "Enter", "windowsVirtualKeyCode" => 13}} =
-               Page.keymap("Enter")
+    test "every supported key maps to its standard windows virtual key code" do
+      # Guards against a transposed keyCode (e.g. ArrowUp/ArrowDown), which Chrome
+      # would silently honor as the wrong key with no CDP error.
+      expected = %{
+        "Enter" => 13,
+        "Tab" => 9,
+        "Escape" => 27,
+        "Backspace" => 8,
+        "Delete" => 46,
+        "ArrowUp" => 38,
+        "ArrowDown" => 40,
+        "ArrowLeft" => 37,
+        "ArrowRight" => 39,
+        "Home" => 36,
+        "End" => 35
+      }
+
+      for {key, vk} <- expected do
+        assert {:ok, %{"key" => ^key, "code" => ^key, "windowsVirtualKeyCode" => ^vk}} =
+                 Page.keymap(key)
+      end
+    end
+
+    test "Enter carries text so its default action fires" do
+      assert {:ok, %{"text" => "\r"}} = Page.keymap("Enter")
     end
 
     test "unknown key is an error" do

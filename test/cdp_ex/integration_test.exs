@@ -282,10 +282,13 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, {:selector_not_found, "#nope"}} = Page.click(page, "#nope")
     end
 
-    test "type/4 enters text into a field", %{page: page, fixture: fixture} do
+    test "type/4 enters text into a field and fires input events", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert :ok = Page.type(page, "#name", "Ada")
       assert {:ok, "Ada"} = Page.evaluate(page, "document.getElementById('name').value")
+      # #typed is written by an `oninput` handler, so this proves a real input
+      # event fired (a JS `.value =` assignment would not trigger it).
+      assert {:ok, "Ada"} = Page.text(page, "#typed")
     end
 
     test "type/4 returns :selector_not_found for no match", %{page: page, fixture: fixture} do
@@ -298,6 +301,19 @@ defmodule CDPEx.IntegrationTest do
       assert :ok = Page.type(page, "#search", "hi")
       assert :ok = Page.press(page, "#search", "Enter")
       assert {:ok, "submitted"} = Page.text(page, "#greeting")
+    end
+
+    test "press/4 with a nil selector targets the focused element", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      # type/4 focuses #search; press(nil, ...) must reach the still-focused field.
+      assert :ok = Page.type(page, "#search", "hi")
+      assert :ok = Page.press(page, nil, "Enter")
+      assert {:ok, "submitted"} = Page.text(page, "#greeting")
+    end
+
+    test "press/4 returns :selector_not_found for no match", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:error, {:selector_not_found, "#nope"}} = Page.press(page, "#nope", "Enter")
     end
 
     test "press/4 returns :unknown_key for an unsupported key", %{page: page, fixture: fixture} do

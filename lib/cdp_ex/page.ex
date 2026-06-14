@@ -16,7 +16,7 @@ defmodule CDPEx.Page do
     * **Navigation** — `navigate/3`, `wait_for_navigation/2`
     * **Evaluation** — `evaluate/3`, `call_function/4`, `html/2`
     * **Waiting** — `wait_for_selector/3`, `wait_for_function/3`
-    * **Elements** — `text/3`, `attribute/4`, `visible?/3`, `click/3`
+    * **Elements** — `text/3`, `attribute/4`, `visible?/3`, `click/3`, `type/4`, `press/4`
     * **Capture** — `screenshot/2`, `pdf/2`
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
@@ -758,8 +758,14 @@ defmodule CDPEx.Page do
   Clicks the first element matching `css` with a real, trusted mouse event.
 
   Scrolls the element into view, then dispatches `Input.dispatchMouseEvent`
-  `mousePressed`/`mouseReleased` at its center, so `event.isTrusted` is `true` and
-  the click is hit-tested like a user's.
+  `mousePressed`/`mouseReleased` at its center, so `event.isTrusted` is `true`.
+
+  The click is dispatched at the element's center but is **not** verified against
+  what is actually on top — if an overlay covers the center, the overlay receives
+  the event and the call still returns `:ok`. `{:error, {:not_clickable, css}}`
+  reflects the layout at call time; on pages that animate or lazy-render content
+  in, the box may not be ready yet, so retry at the caller (e.g. after
+  `wait_for_selector/3`) rather than treating it as permanent.
 
   Options:
     * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
