@@ -144,6 +144,30 @@ even if the function raises:
 :ok = CDPEx.stop(browser)
 ```
 
+### Connecting to an existing Chrome
+
+Drive a Chrome that CDPEx didn't launch — one you started yourself, a sidecar
+container, or a cloud browser provider — with `connect/2`:
+
+```elixir
+# An http(s):// base URL is discovered via GET /json/version:
+{:ok, browser} = CDPEx.connect("http://localhost:9222")
+# …or pass the browser WebSocket URL directly (ws:// or, for a TLS endpoint, wss://):
+{:ok, browser} = CDPEx.connect("wss://chrome.example.com/cdp?token=…")
+
+{:ok, page} = CDPEx.new_page(browser, transport: :session)
+{:ok, _}    = CDPEx.Page.navigate(page, "https://example.com")
+
+# stop/1 closes the pages YOU opened and disconnects — it never kills that Chrome.
+:ok = CDPEx.stop(browser)
+```
+
+A connected browser uses `:session` transport (many pages over the one socket);
+`:dedicated` over a connection isn't supported yet. `wss://` is verified against
+the OS trust store — pass `:cacertfile` for a private CA, or `insecure: true` to
+skip verification. `with_page([connect: "http://localhost:9222"], fun)` is the
+one-shot form.
+
 ### Under your supervision tree
 
 Because `terminate/2` reaps Chrome, supervise the browser with a `:shutdown`
