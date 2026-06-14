@@ -114,6 +114,8 @@ defmodule CDPEx do
           | {:capture_failed, term()}
           | {:idle_wait_failed, term()}
           | {:selector_not_found, String.t()}
+          | {:not_clickable, String.t()}
+          | {:unknown_key, String.t()}
           | {:evaluate_exception, term()}
           | {:unserializable_value, String.t()}
           | {:unexpected_evaluate, term()}
@@ -204,6 +206,8 @@ defmodule CDPEx do
   # Terminal — deterministic; retrying the same call yields the same error.
   def classify_error({:chrome_not_found, _}), do: :terminal
   def classify_error({:selector_not_found, _}), do: :terminal
+  def classify_error({:not_clickable, _}), do: :terminal
+  def classify_error({:unknown_key, _}), do: :terminal
   def classify_error({:evaluate_exception, _}), do: :terminal
   def classify_error({:unserializable_value, _}), do: :terminal
   def classify_error({:unexpected_evaluate, _}), do: :terminal
