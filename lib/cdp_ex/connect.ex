@@ -6,7 +6,10 @@ defmodule CDPEx.Connect do
   # the returned `webSocketDebuggerUrl`: Chrome echoes the request `Host` into that
   # field and can report `127.0.0.1`/localhost for a remote endpoint.
 
-  alias Mint.HTTP
+  # Chrome's /json/version endpoint is HTTP/1.1-only; using Mint.HTTP1 directly (vs
+  # the Mint.HTTP facade) also keeps the conn a single opaque type, sidestepping a
+  # `call_with_opaque` dialyzer false positive on the facade's struct union (OTP 26).
+  alias Mint.HTTP1
 
   @discovery_timeout 5_000
 
@@ -28,8 +31,8 @@ defmodule CDPEx.Connect do
     transport = if scheme == "https", do: :https, else: :http
     ws_scheme = if scheme == "https", do: "wss", else: "ws"
 
-    with {:ok, conn} <- HTTP.connect(transport, host, port, mode: :passive),
-         {:ok, conn, ref} <- HTTP.request(conn, "GET", "/json/version", [], nil),
+    with {:ok, conn} <- HTTP1.connect(transport, host, port, mode: :passive),
+         {:ok, conn, ref} <- HTTP1.request(conn, "GET", "/json/version", [], nil),
          {:ok, body} <- recv_body(conn, ref, []),
          {:ok, %{"webSocketDebuggerUrl" => discovered}} <- Jason.decode(body),
          %URI{path: path} when is_binary(path) <- URI.parse(discovered) do
@@ -42,12 +45,12 @@ defmodule CDPEx.Connect do
   end
 
   defp recv_body(conn, ref, acc) do
-    case HTTP.recv(conn, 0, @discovery_timeout) do
+    case HTTP1.recv(conn, 0, @discovery_timeout) do
       {:ok, conn, responses} ->
         acc = acc ++ for({:data, ^ref, chunk} <- responses, do: chunk)
 
         if Enum.any?(responses, &match?({:done, ^ref}, &1)) do
-          _ = HTTP.close(conn)
+          _ = HTTP1.close(conn)
           {:ok, IO.iodata_to_binary(acc)}
         else
           recv_body(conn, ref, acc)
