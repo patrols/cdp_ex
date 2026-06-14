@@ -154,7 +154,9 @@ defmodule CDPEx.Protocol do
 
   A thrown JS exception becomes `{:error, {:evaluate_exception, details}}`; a
   returned value (with `returnByValue: true`) becomes `{:ok, value}`; `undefined`
-  becomes `{:ok, nil}`.
+  becomes `{:ok, nil}`. A non-serializable result (a DOM node, `window`, a
+  function, a circular structure) has no `returnByValue` value and falls through
+  to `{:error, {:unexpected_evaluate, _}}`.
 
   ## Examples
 
@@ -179,10 +181,14 @@ defmodule CDPEx.Protocol do
   def evaluate_result(other), do: {:error, {:unexpected_evaluate, other}}
 
   @doc """
-  Splits a Chrome DevTools `ws://` (or `wss://`) URL into `{host, port, path}`.
+  Splits a Chrome DevTools `ws://` URL into `{host, port, path}`.
 
   Uses `URI.parse/1`, so IPv6 hosts, explicit ports, and paths are handled
-  correctly; a non-`ws(s)://` URL or one missing a host/port raises `ArgumentError`.
+  correctly; a non-`ws://` URL or one missing a host/port raises `ArgumentError`.
+
+  Only `ws://` is accepted: CDPEx launches a local Chrome and talks plaintext to
+  its `DevToolsActivePort` (no TLS). `wss://` — a remote/TLS DevTools endpoint —
+  has no entry point yet (see the connect-to-remote-endpoint tracker on GitHub).
 
   ## Examples
 
@@ -195,13 +201,14 @@ defmodule CDPEx.Protocol do
   @spec parse_ws_url(String.t()) :: {String.t(), pos_integer(), String.t()}
   def parse_ws_url(ws_url) when is_binary(ws_url) do
     case URI.parse(ws_url) do
-      %URI{scheme: scheme, host: host, port: port, path: path}
-      when scheme in ["ws", "wss"] and is_binary(host) and host != "" and is_integer(port) ->
+      %URI{scheme: "ws", host: host, port: port, path: path}
+      when is_binary(host) and host != "" and is_integer(port) ->
         {host, port, path || "/"}
 
       _ ->
         raise ArgumentError,
-              "expected a ws:// or wss:// URL with a host and port, got: #{inspect(ws_url)}"
+              "expected a ws:// URL with a host and port (wss:// / remote endpoints " <>
+                "are not supported yet), got: #{inspect(ws_url)}"
     end
   end
 

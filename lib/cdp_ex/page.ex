@@ -546,6 +546,11 @@ defmodule CDPEx.Page do
 
   A thrown JS exception is `{:error, {:evaluate_exception, details}}`.
 
+  The value must be JSON-serializable. A non-serializable result — a DOM node,
+  `window`, a function, a circular structure — comes back as
+  `{:error, {:unexpected_evaluate, _}}`; return a serializable projection
+  instead (e.g. `el.outerHTML` or `el.id`, not the element).
+
   Options: `:timeout` (default 15_000), `:await_promise` (default `false`).
   """
   @spec evaluate(t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
@@ -725,6 +730,12 @@ defmodule CDPEx.Page do
 
   @doc """
   Clicks the first element matching `css` (a synthetic JS `.click()`).
+
+  This dispatches a synthetic DOM `.click()` via `Runtime.evaluate`, **not** a
+  trusted OS-level input event: `event.isTrusted` is `false` and there's no real
+  hit-testing, so sites that gate on trusted input won't react. Real
+  `Input`-domain dispatch is tracked in
+  [#72](https://github.com/patrols/cdp_ex/issues/72).
 
   Returns `:ok`, or `{:error, {:selector_not_found, css}}` when nothing matches.
   """

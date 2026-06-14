@@ -124,6 +124,16 @@ defmodule CDPEx.ProtocolTest do
       assert Protocol.parse_ws_url("ws://localhost:5000/devtools/page/DEADBEEF") ==
                {"localhost", 5000, "/devtools/page/DEADBEEF"}
     end
+
+    test "rejects wss:// (no remote/TLS endpoint support yet)" do
+      assert_raise ArgumentError, ~r{ws:// URL}, fn ->
+        Protocol.parse_ws_url("wss://127.0.0.1:9222/devtools/browser/abc-123")
+      end
+    end
+
+    test "rejects a non-ws scheme" do
+      assert_raise ArgumentError, fn -> Protocol.parse_ws_url("http://127.0.0.1:9222/x") end
+    end
   end
 
   test "prevent_alerts_js/0 overrides the three modal dialog functions" do
