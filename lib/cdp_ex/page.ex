@@ -546,6 +546,19 @@ defmodule CDPEx.Page do
 
   A thrown JS exception is `{:error, {:evaluate_exception, details}}`.
 
+  The value must be JSON-serializable. Under `returnByValue`, three results are
+  worth knowing (return a serializable projection like `el.outerHTML` / `el.id`
+  to avoid them):
+
+    * a DOM node or function serializes **lossily** to `{:ok, %{}}` — an empty
+      map, not the object and not an error;
+    * an unserializable number Chrome reports only as an `unserializableValue`
+      (`NaN`, `Infinity`, `-0`, a `BigInt`) has no by-value value and surfaces as
+      `{:error, {:unexpected_evaluate, _}}`;
+    * a value Chrome can't serialize at all — a self-referential object like
+      `window`, a circular structure, or a `Symbol` — fails the call as
+      `{:error, {:cdp_error, "Runtime.evaluate", _}}`.
+
   Options: `:timeout` (default 15_000), `:await_promise` (default `false`).
   """
   @spec evaluate(t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
@@ -725,6 +738,12 @@ defmodule CDPEx.Page do
 
   @doc """
   Clicks the first element matching `css` (a synthetic JS `.click()`).
+
+  This dispatches a synthetic DOM `.click()` via `Runtime.evaluate`, **not** a
+  trusted OS-level input event: `event.isTrusted` is `false` and there's no real
+  hit-testing, so sites that gate on trusted input won't react. Real
+  `Input`-domain dispatch is tracked in
+  [#72](https://github.com/patrols/cdp_ex/issues/72).
 
   Returns `:ok`, or `{:error, {:selector_not_found, css}}` when nothing matches.
   """

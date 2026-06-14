@@ -112,6 +112,22 @@ defmodule CDPEx.ProtocolTest do
     test "unrecognised shape is an error" do
       assert {:error, {:unexpected_evaluate, %{}}} = Protocol.evaluate_result(%{})
     end
+
+    test "an unserializableValue result (BigInt/NaN/Infinity) is unexpected_evaluate" do
+      # Chrome returns these with `unserializableValue` and no by-value `value`
+      # key under returnByValue, so they hit the catch-all rather than {:ok, _}.
+      # `type` mirrors what real Chrome reports (bigint for 10n, number for the
+      # rest); `evaluate_result/1` keys only off the missing `value`, not `type`.
+      for {type, uv} <- [
+            {"bigint", "10n"},
+            {"number", "NaN"},
+            {"number", "Infinity"},
+            {"number", "-0"}
+          ] do
+        result = %{"result" => %{"type" => type, "unserializableValue" => uv}}
+        assert {:error, {:unexpected_evaluate, ^result}} = Protocol.evaluate_result(result)
+      end
+    end
   end
 
   describe "parse_ws_url/1" do
@@ -123,6 +139,16 @@ defmodule CDPEx.ProtocolTest do
     test "handles a page target path" do
       assert Protocol.parse_ws_url("ws://localhost:5000/devtools/page/DEADBEEF") ==
                {"localhost", 5000, "/devtools/page/DEADBEEF"}
+    end
+
+    test "rejects wss:// (no remote/TLS endpoint support yet)" do
+      assert_raise ArgumentError, ~r{ws:// URL}, fn ->
+        Protocol.parse_ws_url("wss://127.0.0.1:9222/devtools/browser/abc-123")
+      end
+    end
+
+    test "rejects a non-ws scheme" do
+      assert_raise ArgumentError, fn -> Protocol.parse_ws_url("http://127.0.0.1:9222/x") end
     end
   end
 

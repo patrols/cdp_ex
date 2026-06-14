@@ -47,6 +47,11 @@ Playwright or Puppeteer), that's the gap CDPEx fills.
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
+> **`click/3`** dispatches a synthetic DOM `.click()` (via `Runtime.evaluate`),
+> not a trusted OS-level input event — it won't satisfy sites that gate on
+> `event.isTrusted` or real hit-testing. Real `Input`-domain dispatch is tracked
+> in [#72](https://github.com/patrols/cdp_ex/issues/72).
+>
 > Stealth / anti-fingerprinting presets remain out of scope for now (evidence-gated).
 
 ## Installation
