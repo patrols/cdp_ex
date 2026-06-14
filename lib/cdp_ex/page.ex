@@ -790,8 +790,7 @@ defmodule CDPEx.Page do
   (default #{@evaluate_timeout}).
   """
   @spec type(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
-  def type(%__MODULE__{} = page, css, text, opts \\ [])
-      when is_binary(css) and is_binary(text) do
+  def type(%__MODULE__{} = page, css, text, opts \\ []) when is_binary(css) and is_binary(text) do
     timeout = Keyword.get(opts, :timeout, @evaluate_timeout)
 
     case focus(page, css, opts) do
@@ -824,8 +823,10 @@ defmodule CDPEx.Page do
 
     with {:ok, fields} <- keymap(key),
          :ok <- maybe_focus(page, css, opts),
-         {:ok, _} <- do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyDown"), timeout),
-         {:ok, _} <- do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyUp"), timeout) do
+         {:ok, _} <-
+           do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyDown"), timeout),
+         {:ok, _} <-
+           do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyUp"), timeout) do
       :ok
     end
   end
@@ -874,9 +875,8 @@ defmodule CDPEx.Page do
         {:error, {:not_clickable, css}}
 
       {:ok, %{"clickable" => true, "x" => x, "y" => y}} ->
-        with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout),
-             :ok <- dispatch_mouse(page, "mouseReleased", x, y, 0, timeout) do
-          :ok
+        with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout) do
+          dispatch_mouse(page, "mouseReleased", x, y, 0, timeout)
         end
 
       {:error, _} = error ->
