@@ -148,13 +148,22 @@ defmodule CDPEx.Browser do
     # (the {:EXIT, parent, _} clause) still targets the real owner (the pool) rather than
     # the already-dead task — otherwise a hard-killed pool would orphan the browser.
     {owner, launch_opts} = Keyword.pop(launch_opts, :owner)
-    {proxy, launch_opts} = Keyword.pop(launch_opts, :proxy)
+    {connect_ws, launch_opts} = Keyword.pop(launch_opts, :connect)
+    {conn_opts, launch_opts} = Keyword.pop(launch_opts, :conn_opts, [])
 
-    with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
-         {:ok, chrome} <- Chrome.launch(launch_opts) do
-      connect_browser(chrome, launch_opts, owner || parent_pid(), proxy_auth)
+    if connect_ws do
+      # Connect-mode: attach to an already-running Chrome. No Chrome.launch, and
+      # chrome: nil so terminate/2 never reaps a process we didn't start.
+      connect_browser(nil, connect_ws, launch_opts, owner || parent_pid(), nil, conn_opts)
     else
-      {:error, reason} -> {:stop, reason}
+      {proxy, launch_opts} = Keyword.pop(launch_opts, :proxy)
+
+      with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
+           {:ok, chrome} <- Chrome.launch(launch_opts) do
+        connect_browser(chrome, chrome.debug_url, launch_opts, owner || parent_pid(), proxy_auth, [])
+      else
+        {:error, reason} -> {:stop, reason}
+      end
     end
   end
 
@@ -183,13 +192,14 @@ defmodule CDPEx.Browser do
     end
   end
 
-  # Chrome is running now. If the browser WebSocket fails to connect, init/1
+  # Connect the browser WebSocket (the launched Chrome's debug URL, or a remote
+  # endpoint for connect-mode where `chrome` is nil). If the connect fails, init/1
   # returns {:stop, _} *before* the GenServer loop starts, so terminate/2 never
-  # runs — we must reap Chrome here or leak the OS process and temp profile.
-  defp connect_browser(chrome, launch_opts, parent, proxy_auth) do
-    {_scheme, host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
+  # runs — reap Chrome here (when we own it) or leak the OS process and temp profile.
+  defp connect_browser(chrome, ws_url, launch_opts, parent, proxy_auth, conn_opts) do
+    {_scheme, host, port, _path} = Protocol.parse_ws_url(ws_url)
 
-    case Connection.start_link(chrome.debug_url) do
+    case Connection.start_link(ws_url, conn_opts) do
       {:ok, conn} ->
         # Prune session entries when their target ends (tab closed/crashed, or our
         # own close_page) so long-lived browsers don't accumulate stale sessions —
@@ -214,12 +224,12 @@ defmodule CDPEx.Browser do
         catch
           :exit, reason ->
             safe_close(conn)
-            Chrome.stop(chrome)
+            if chrome, do: Chrome.stop(chrome)
             {:stop, reason}
         end
 
       {:error, reason} ->
-        Chrome.stop(chrome)
+        if chrome, do: Chrome.stop(chrome)
         {:stop, reason}
     end
   end
@@ -237,10 +247,22 @@ defmodule CDPEx.Browser do
 
   @impl true
   def handle_call({:new_page, opts}, _from, state) do
-    case Keyword.get(opts, :transport, :dedicated) do
-      :dedicated -> reply_dedicated_page(state, opts)
-      :session -> reply_session_page(state, opts)
-      other -> {:reply, {:error, {:invalid_transport, other}}, state}
+    # A connected browser (chrome: nil) defaults to :session and can't do
+    # :dedicated yet — a per-page socket would have to target the remote host.
+    default = if state.chrome, do: :dedicated, else: :session
+
+    case Keyword.get(opts, :transport, default) do
+      :dedicated when is_nil(state.chrome) ->
+        {:reply, {:error, {:unsupported_transport, :dedicated}}, state}
+
+      :dedicated ->
+        reply_dedicated_page(state, opts)
+
+      :session ->
+        reply_session_page(state, opts)
+
+      other ->
+        {:reply, {:error, {:invalid_transport, other}}, state}
     end
   end
 
@@ -555,6 +577,14 @@ defmodule CDPEx.Browser do
     # dying — its exit must not abort us before Chrome.stop/1, the no-orphan
     # guarantee). Closing browser_conn here makes teardown deterministic instead
     # of leaving it to stop reactively when its socket drops on Chrome exit.
+    if is_nil(state.chrome) and Process.alive?(state.browser_conn) do
+      # Connect-mode: we don't own Chrome, so closing the socket wouldn't reap the
+      # tabs we opened. Close just OUR targets (best-effort; close_target tolerates
+      # a dead conn), leaving Chrome and any pre-existing tabs untouched.
+      for {tid, _sid} <- state.sessions, do: close_target(state.browser_conn, tid)
+      for {tid, _conn} <- state.pages, do: close_target(state.browser_conn, tid)
+    end
+
     Enum.each(state.pages, fn {_tid, conn} -> safe_close(conn) end)
     safe_close(state.browser_conn)
     if state.chrome, do: Chrome.stop(state.chrome)
@@ -682,7 +712,7 @@ defmodule CDPEx.Browser do
   # page connection, if opened) — otherwise we leak a Chrome tab/socket that
   # isn't tracked in state.pages and can't be cleaned up deterministically.
   defp open_target(state, tid, opts) do
-    page_url = "ws://#{state.host}:#{state.port}/devtools/page/#{tid}"
+    page_url = "ws://#{bracket_host(state.host)}:#{state.port}/devtools/page/#{tid}"
 
     case Connection.start_link(page_url) do
       {:ok, conn} ->
@@ -806,6 +836,12 @@ defmodule CDPEx.Browser do
   defp close_target(browser_conn, tid) do
     _ = Connection.call(browser_conn, "Target.closeTarget", %{"targetId" => tid}, @create_timeout)
     :ok
+  end
+
+  # Bracket an IPv6 literal so the page WebSocket URL is well-formed
+  # (`ws://[::1]:9222/…` rather than the malformed `ws://::1:9222/…`).
+  defp bracket_host(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 
   # Stop a page connection, tolerating an already-dead process. `Connection.close/1`
