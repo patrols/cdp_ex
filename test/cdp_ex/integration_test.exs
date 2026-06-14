@@ -240,17 +240,23 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, %{}} = Page.evaluate(page, "(function () { return 1; })")
 
       # An unserializable number (returned by Chrome as `unserializableValue`,
-      # so no by-value `value` key) falls through to the catch-all.
-      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "10n")
-      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "NaN")
-      assert {:error, {:unexpected_evaluate, _}} = Page.evaluate(page, "1 / 0")
+      # so no by-value `value` key) gets the dedicated recoverable tag, carrying
+      # the raw string.
+      assert {:error, {:unserializable_value, "10n"}} = Page.evaluate(page, "10n")
+      assert {:error, {:unserializable_value, "NaN"}} = Page.evaluate(page, "NaN")
+      assert {:error, {:unserializable_value, "Infinity"}} = Page.evaluate(page, "1 / 0")
 
-      # A value Chrome can't serialize at all (self-referential / circular)
-      # fails the Runtime.evaluate call itself.
+      # call_function/3 delegates to evaluate/3, so it surfaces the same tag.
+      assert {:error, {:unserializable_value, "NaN"}} = Page.call_function(page, "() => NaN", [])
+
+      # A value Chrome can't serialize at all (self-referential / circular / a
+      # Symbol) fails the Runtime.evaluate call itself.
       assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Page.evaluate(page, "window")
 
       assert {:error, {:cdp_error, "Runtime.evaluate", _}} =
                Page.evaluate(page, "(function () { var o = {}; o.self = o; return o; })()")
+
+      assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Page.evaluate(page, "Symbol(\"x\")")
     end
 
     test "call_function applies JSON args and returns the result", %{page: page, fixture: fixture} do

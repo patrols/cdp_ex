@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+- `CDPEx.Page.evaluate/3` (and `call_function/3`, which delegates to it) now
+  return `{:error, {:unserializable_value, uv}}` for a result Chrome can only
+  express as an `unserializableValue` (`NaN` / `Infinity` / `-0` / `BigInt`),
+  carrying the raw string. These previously fell through to
+  `{:error, {:unexpected_evaluate, _}}` — which now means only an *unrecognized*
+  result envelope. Update any matcher; the new reason classifies as `:terminal`.
+  This lets callers tell a recoverable unserializable value from a malformed
+  result (#75).
+
 ### Changed
 - `CDPEx.Protocol.parse_ws_url/1` now rejects `wss://` (and any non-`ws://`
   scheme) with an `ArgumentError`. CDPEx launches a local Chrome and speaks
@@ -19,10 +29,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page.evaluate/3` / `CDPEx.Protocol.evaluate_result/1` docs now describe
   the real `returnByValue` outcomes (verified against live Chrome): a DOM node or
   function serializes lossily to `{:ok, %{}}`; an unserializable number (`NaN` /
-  `Infinity` / `-0` / `BigInt`) surfaces as `{:error, {:unexpected_evaluate, _}}`;
-  a value Chrome can't serialize (`window`, a circular object, a `Symbol`) fails
-  the call as `{:error, {:cdp_error, "Runtime.evaluate", _}}`. Covered by a unit
-  test (the `unserializableValue` shape) and an integration test (live shapes).
+  `Infinity` / `-0` / `BigInt`) surfaces as `{:error, {:unserializable_value, _}}`
+  (see Breaking, above); a value Chrome can't serialize (`window`, a circular
+  object, a `Symbol`) fails the call as `{:error, {:cdp_error, "Runtime.evaluate", _}}`.
+  Covered by unit, doctest, and integration tests.
 
 ## [0.7.0] - 2026-06-06
 

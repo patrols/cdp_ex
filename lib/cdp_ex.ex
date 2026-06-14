@@ -115,6 +115,7 @@ defmodule CDPEx do
           | {:idle_wait_failed, term()}
           | {:selector_not_found, String.t()}
           | {:evaluate_exception, term()}
+          | {:unserializable_value, String.t()}
           | {:unexpected_evaluate, term()}
           | {:invalid_args, term()}
           | {:invalid_source, term()}
@@ -204,6 +205,7 @@ defmodule CDPEx do
   def classify_error({:chrome_not_found, _}), do: :terminal
   def classify_error({:selector_not_found, _}), do: :terminal
   def classify_error({:evaluate_exception, _}), do: :terminal
+  def classify_error({:unserializable_value, _}), do: :terminal
   def classify_error({:unexpected_evaluate, _}), do: :terminal
   def classify_error({:invalid_args, _}), do: :terminal
   def classify_error({:invalid_source, _}), do: :terminal

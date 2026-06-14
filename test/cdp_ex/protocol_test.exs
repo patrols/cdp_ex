@@ -113,11 +113,12 @@ defmodule CDPEx.ProtocolTest do
       assert {:error, {:unexpected_evaluate, %{}}} = Protocol.evaluate_result(%{})
     end
 
-    test "an unserializableValue result (BigInt/NaN/Infinity) is unexpected_evaluate" do
+    test "an unserializableValue result (BigInt/NaN/Infinity/-0) is unserializable_value" do
       # Chrome returns these with `unserializableValue` and no by-value `value`
-      # key under returnByValue, so they hit the catch-all rather than {:ok, _}.
-      # `type` mirrors what real Chrome reports (bigint for 10n, number for the
-      # rest); `evaluate_result/1` keys only off the missing `value`, not `type`.
+      # key under returnByValue, so they get the dedicated recoverable tag rather
+      # than {:ok, _} or the unrecognized-envelope catch-all. `type` mirrors what
+      # real Chrome reports (bigint for 10n, number for the rest); the clause keys
+      # only off `unserializableValue`, and the tag carries that raw string.
       for {type, uv} <- [
             {"bigint", "10n"},
             {"number", "NaN"},
@@ -125,7 +126,7 @@ defmodule CDPEx.ProtocolTest do
             {"number", "-0"}
           ] do
         result = %{"result" => %{"type" => type, "unserializableValue" => uv}}
-        assert {:error, {:unexpected_evaluate, ^result}} = Protocol.evaluate_result(result)
+        assert {:error, {:unserializable_value, ^uv}} = Protocol.evaluate_result(result)
       end
     end
   end

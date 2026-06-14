@@ -46,7 +46,8 @@ defmodule CDPEx.MixProject do
   defp deps do
     [
       # CDP wire layer: WebSocket over Mint (brings in :mint + :hpax). No hackney;
-      # castore is not needed because CDP speaks ws:// to localhost (no TLS).
+      # castore is not needed because CDPEx speaks plaintext ws:// to a local
+      # Chrome DevToolsActivePort (no TLS) — wss:// is rejected (see Protocol).
       {:mint_web_socket, "~> 1.0"},
       # JSON-RPC encoding/decoding for the CDP protocol.
       {:jason, "~> 1.4"},
