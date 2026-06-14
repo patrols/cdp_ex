@@ -167,7 +167,7 @@ defmodule CDPEx.Connection do
 
   @impl true
   def init({ws_url, opts}) do
-    {host, port, path} = Protocol.parse_ws_url(ws_url)
+    {_scheme, host, port, path} = Protocol.parse_ws_url(ws_url)
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)
 
     # The handshake runs synchronously in init so its frames can't interleave

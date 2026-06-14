@@ -187,7 +187,7 @@ defmodule CDPEx.Browser do
   # returns {:stop, _} *before* the GenServer loop starts, so terminate/2 never
   # runs — we must reap Chrome here or leak the OS process and temp profile.
   defp connect_browser(chrome, launch_opts, parent, proxy_auth) do
-    {host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
+    {_scheme, host, port, _path} = Protocol.parse_ws_url(chrome.debug_url)
 
     case Connection.start_link(chrome.debug_url) do
       {:ok, conn} ->

@@ -132,23 +132,22 @@ defmodule CDPEx.ProtocolTest do
   end
 
   describe "parse_ws_url/1" do
-    test "splits host, port, and path" do
+    test "splits scheme, host, port, and path" do
       assert Protocol.parse_ws_url("ws://127.0.0.1:9222/devtools/browser/abc-123") ==
-               {"127.0.0.1", 9222, "/devtools/browser/abc-123"}
+               {"ws", "127.0.0.1", 9222, "/devtools/browser/abc-123"}
     end
 
     test "handles a page target path" do
       assert Protocol.parse_ws_url("ws://localhost:5000/devtools/page/DEADBEEF") ==
-               {"localhost", 5000, "/devtools/page/DEADBEEF"}
+               {"ws", "localhost", 5000, "/devtools/page/DEADBEEF"}
     end
 
-    test "rejects wss:// (no remote/TLS endpoint support yet)" do
-      assert_raise ArgumentError, ~r{ws:// URL}, fn ->
-        Protocol.parse_ws_url("wss://127.0.0.1:9222/devtools/browser/abc-123")
-      end
+    test "accepts wss:// and reports the scheme" do
+      assert Protocol.parse_ws_url("wss://example.com:443/devtools/browser/abc") ==
+               {"wss", "example.com", 443, "/devtools/browser/abc"}
     end
 
-    test "rejects a non-ws scheme" do
+    test "rejects a non-ws(s) scheme" do
       assert_raise ArgumentError, fn -> Protocol.parse_ws_url("http://127.0.0.1:9222/x") end
     end
   end
