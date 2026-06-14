@@ -35,8 +35,12 @@ defmodule CDPEx.Connection do
     :websocket,
     next_id: 1,
     pending: %{},
+    # method => %{pid => MapSet<session_filter>}; a pid can hold several filters
+    # (e.g. observing two sessions), and a nil filter receives every session's
+    # events (see subscribe/4).
     subscribers: %{},
-    all_subscribers: MapSet.new(),
+    # pid => MapSet<session_filter> for :all subscribers; nil = all sessions.
+    all_subscribers: %{},
     monitors: %{},
     waiters: [],
     ws_send_error: nil
@@ -106,12 +110,17 @@ defmodule CDPEx.Connection do
 
   `timeout` bounds the registration call so a caller can fold it into an overall
   deadline (defaults to the standard call timeout).
-  """
-  @spec subscribe(GenServer.server(), String.t() | :all, timeout()) :: :ok
-  def subscribe(conn, method, timeout \\ @default_call_timeout),
-    do: GenServer.call(conn, {:subscribe, method, self()}, timeout)
 
-  @doc "Removes a subscription created with `subscribe/3`."
+  Pass `opts` with `session_id: sid` to receive only events from that session —
+  the matching that `await_event/4` already does for waiters. The default (`nil`)
+  receives every session's events (current behaviour); on a `:dedicated`
+  connection, where every event is for the one page, the two are equivalent.
+  """
+  @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) :: :ok
+  def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
+    do: GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
+
+  @doc "Removes a subscription created with `subscribe/4`."
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
   def unsubscribe(conn, method), do: GenServer.call(conn, {:unsubscribe, method, self()})
 
@@ -203,24 +212,32 @@ defmodule CDPEx.Connection do
     end
   end
 
-  def handle_call({:subscribe, :all, pid}, _from, state) do
+  def handle_call({:subscribe, :all, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
-    {:reply, :ok, %{state | all_subscribers: MapSet.put(state.all_subscribers, pid)}}
+    {:reply, :ok, %{state | all_subscribers: add_filter(state.all_subscribers, pid, session_id)}}
   end
 
-  def handle_call({:subscribe, method, pid}, _from, state) do
+  def handle_call({:subscribe, method, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
-    subs = Map.update(state.subscribers, method, MapSet.new([pid]), &MapSet.put(&1, pid))
+
+    subs =
+      Map.update(
+        state.subscribers,
+        method,
+        %{pid => MapSet.new([session_id])},
+        &add_filter(&1, pid, session_id)
+      )
+
     {:reply, :ok, %{state | subscribers: subs}}
   end
 
   def handle_call({:unsubscribe, :all, pid}, _from, state) do
-    state = %{state | all_subscribers: MapSet.delete(state.all_subscribers, pid)}
+    state = %{state | all_subscribers: Map.delete(state.all_subscribers, pid)}
     {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
 
   def handle_call({:unsubscribe, method, pid}, _from, state) do
-    subs = Map.update(state.subscribers, method, MapSet.new(), &MapSet.delete(&1, pid))
+    subs = Map.update(state.subscribers, method, %{}, &Map.delete(&1, pid))
     state = %{state | subscribers: subs}
     {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
@@ -404,11 +421,19 @@ defmodule CDPEx.Connection do
   defp session_match?(_want, _event), do: false
 
   defp notify_subscribers(state, method, session_id, params) do
-    method_subs = Map.get(state.subscribers, method, MapSet.new())
+    method_subs = Map.get(state.subscribers, method, %{})
 
+    # A pid may hold several session filters for one method (e.g. observing two
+    # `:session` pages on the shared connection) and may also be an `:all`
+    # subscriber. Union the filter sets per pid so delivery is most-permissive — a
+    # nil filter or any matching session delivers — and each pid gets one send.
     method_subs
-    |> MapSet.union(state.all_subscribers)
-    |> Enum.each(fn pid -> send(pid, {:cdp_event, self(), method, params, session_id}) end)
+    |> Map.merge(state.all_subscribers, fn _pid, fs1, fs2 -> MapSet.union(fs1, fs2) end)
+    |> Enum.each(fn {pid, filters} ->
+      if Enum.any?(filters, &session_match?(&1, session_id)) do
+        send(pid, {:cdp_event, self(), method, params, session_id})
+      end
+    end)
 
     state
   end
@@ -426,6 +451,14 @@ defmodule CDPEx.Connection do
   end
 
   # ── subscriber lifecycle ────────────────────────────────────────────────────
+
+  # Add a session filter to a pid's set in a `%{pid => MapSet<filter>}` map,
+  # creating the set on first subscribe. Re-subscribing a pid for another session
+  # accumulates filters rather than overwriting (so one process can scope-observe
+  # several sessions on the shared connection).
+  defp add_filter(map, pid, session_id) do
+    Map.update(map, pid, MapSet.new([session_id]), &MapSet.put(&1, session_id))
+  end
 
   # Monitor a subscriber the first time it subscribes, so we learn if it dies.
   # At most one monitor per pid, however many methods it subscribes to.
@@ -456,19 +489,19 @@ defmodule CDPEx.Connection do
   end
 
   defp subscribed_anywhere?(state, pid) do
-    MapSet.member?(state.all_subscribers, pid) or
-      Enum.any?(state.subscribers, fn {_method, set} -> MapSet.member?(set, pid) end)
+    Map.has_key?(state.all_subscribers, pid) or
+      Enum.any?(state.subscribers, fn {_method, subs} -> Map.has_key?(subs, pid) end)
   end
 
   # Remove a (dead) subscriber from every subscription and forget its monitor.
   defp drop_subscriber(state, pid) do
     subscribers =
-      Map.new(state.subscribers, fn {method, set} -> {method, MapSet.delete(set, pid)} end)
+      Map.new(state.subscribers, fn {method, subs} -> {method, Map.delete(subs, pid)} end)
 
     %{
       state
       | subscribers: subscribers,
-        all_subscribers: MapSet.delete(state.all_subscribers, pid),
+        all_subscribers: Map.delete(state.all_subscribers, pid),
         monitors: Map.delete(state.monitors, pid)
     }
   end

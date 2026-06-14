@@ -1126,7 +1126,7 @@ defmodule CDPEx.PageTest do
   end
 
   defp subscribed?(conn, pid, method) do
-    MapSet.member?(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new()), pid)
+    Map.has_key?(Map.get(:sys.get_state(conn).subscribers, method, %{}), pid)
   end
 
   # Like wait_until_subscribed/3 but matches *any* subscriber — used where the subscriber
@@ -1138,7 +1138,7 @@ defmodule CDPEx.PageTest do
   # Poll until `method` has at least `count` distinct subscriber pids.
   defp wait_until_subscriber_count(conn, method, count, retries \\ 100) do
     cond do
-      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) >= count ->
+      map_size(Map.get(:sys.get_state(conn).subscribers, method, %{})) >= count ->
         :ok
 
       retries == 0 ->
@@ -1154,7 +1154,7 @@ defmodule CDPEx.PageTest do
   # Connection prunes it on the resulting :DOWN.
   defp wait_until_no_subscribers(conn, method, retries \\ 100) do
     cond do
-      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) == 0 ->
+      map_size(Map.get(:sys.get_state(conn).subscribers, method, %{})) == 0 ->
         :ok
 
       retries == 0 ->
