@@ -73,6 +73,12 @@ defmodule CDPEx.FixtureServer do
       String.starts_with?(path, "/data") ->
         HttpFixture.http_response("200 OK", "fetched-data")
 
+      String.starts_with?(path, "/json/version") ->
+        # The host/port here are deliberately bogus (127.0.0.1:1): CDPEx.Connect must
+        # rewrite them to the endpoint's host/port, keeping only the discovered path.
+        body = ~s({"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/browser/FAKE-GUID"})
+        HttpFixture.http_response("200 OK", body, ["Content-Type: application/json"])
+
       true ->
         HttpFixture.http_response("200 OK", render(request))
     end
