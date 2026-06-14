@@ -198,6 +198,22 @@ defmodule CDPEx.ConnectionTest do
     refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 2}, "S2"}, 200
   end
 
+  test "an :all subscription broadens delivery over a co-existing method+session subscription",
+       %{conn: conn, fake: fake} do
+    # Same pid: a method scoped to S1 AND :all (unscoped). :all means "every
+    # event", so on the merge collision it must win — the pid still receives this
+    # method's events from OTHER sessions (union semantics), not just S1's.
+    :ok = Connection.subscribe(conn, "Network.requestWillBeSent", 5_000, session_id: "S1")
+    :ok = Connection.subscribe(conn, :all)
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S2","params":{"n":2}})
+    )
+
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 2}, "S2"}, 2_000
+  end
+
   test "await_event with a session gate ignores other sessions", %{conn: conn, fake: fake} do
     # A waiter scoped to session A must NOT resolve on a matching event from B.
     task =

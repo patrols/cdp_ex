@@ -35,9 +35,10 @@ defmodule CDPEx.Connection do
     :websocket,
     next_id: 1,
     pending: %{},
-    # %{method => %{pid => session_filter}} and %{pid => session_filter}, where a
-    # nil filter receives every session's events (see subscribe/4).
+    # method => %{pid => session_filter}; a nil filter receives every session's
+    # events (see subscribe/4).
     subscribers: %{},
+    # pid => session_filter, for subscribers to :all events; nil = all sessions.
     all_subscribers: %{},
     monitors: %{},
     waiters: [],
@@ -118,7 +119,7 @@ defmodule CDPEx.Connection do
   def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
     do: GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
 
-  @doc "Removes a subscription created with `subscribe/3`."
+  @doc "Removes a subscription created with `subscribe/4`."
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
   def unsubscribe(conn, method), do: GenServer.call(conn, {:unsubscribe, method, self()})
 
@@ -416,8 +417,12 @@ defmodule CDPEx.Connection do
   defp notify_subscribers(state, method, session_id, params) do
     method_subs = Map.get(state.subscribers, method, %{})
 
-    # A pid in both the method map and :all is deduped to one send; a per-pid
-    # nil filter (or one matching event_session_id) receives the event.
+    # A pid in both the method map and :all is deduped to one send. On that
+    # collision Map.merge keeps the :all filter (right-hand wins), which is the
+    # intended union semantics: an :all subscription means "every event", so it
+    # broadens delivery rather than being narrowed by a co-existing method+session
+    # subscription. Each survivor receives the event when its filter is nil or
+    # matches the event's session.
     method_subs
     |> Map.merge(state.all_subscribers)
     |> Enum.each(fn {pid, want_session_id} ->
