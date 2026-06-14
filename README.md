@@ -47,6 +47,10 @@ Playwright or Puppeteer), that's the gap CDPEx fills.
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
+> **Connect to a running Chrome:** attach to a Chrome you didn't launch — local,
+> a sidecar, or a remote/cloud `wss://` endpoint — with `connect/2` (`:session`
+> transport; it never reaps a process it didn't start). See below.
+>
 > Stealth / anti-fingerprinting presets remain out of scope for now (evidence-gated).
 
 ## Installation
@@ -165,7 +169,8 @@ container, or a cloud browser provider — with `connect/2`:
 A connected browser uses `:session` transport (many pages over the one socket);
 `:dedicated` over a connection isn't supported yet. `wss://` is verified against
 the OS trust store — pass `:cacertfile` for a private CA, or `insecure: true` to
-skip verification. `with_page([connect: "http://localhost:9222"], fun)` is the
+skip verification. Raise `:discovery_timeout` (default `5_000` ms) for a slow
+remote `/json/version`. `with_page([connect: "http://localhost:9222"], fun)` is the
 one-shot form.
 
 > **`http(s)://` discovery is IP/localhost only.** Chrome's DevTools HTTP endpoint
@@ -356,8 +361,9 @@ handle — a dead page keeps returning `:noproc`.
 
 CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
 handlers; attach your own to record them (emitting with nothing attached is a no-op).
-Events: `[:cdp_ex, :launch, …]` and `[:cdp_ex, :navigate, …]` spans,
-`[:cdp_ex, :page, :start | :stop]`, and `[:cdp_ex, :error]`. See
+Events: `[:cdp_ex, :launch, …]`, `[:cdp_ex, :connect, …]`, and
+`[:cdp_ex, :navigate, …]` spans, `[:cdp_ex, :page, :start | :stop]`, and
+`[:cdp_ex, :error]`. See
 [`CDPEx.Telemetry`](https://hexdocs.pm/cdp_ex/CDPEx.Telemetry.html) for the full
 taxonomy (measurements + metadata).
 
