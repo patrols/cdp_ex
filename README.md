@@ -47,11 +47,6 @@ Playwright or Puppeteer), that's the gap CDPEx fills.
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
-> **`click/3`** dispatches a synthetic DOM `.click()` (via `Runtime.evaluate`),
-> not a trusted OS-level input event — it won't satisfy sites that gate on
-> `event.isTrusted` or real hit-testing. Real `Input`-domain dispatch is tracked
-> in [#72](https://github.com/patrols/cdp_ex/issues/72).
->
 > Stealth / anti-fingerprinting presets remain out of scope for now (evidence-gated).
 
 ## Installation
@@ -193,7 +188,9 @@ crashed browser is relaunched on demand.
 | `wait_for_response/3` | Block until a network response URL matches (fn / `Regex` / substring) |
 | `wait_for_network_idle/2` | Block until the network settles (Puppeteer "networkidle") |
 | `evaluate/3` | Run JS and return the value (`returnByValue`) |
-| `click/3` | Synthetic `.click()` on the first match |
+| `click/3` | Real trusted click on the first match (synthetic via `trusted: false`) |
+| `type/4` | Focus an element and enter text (`Input.insertText`) |
+| `press/4` | Press a named key — `Enter`, `Tab`, arrows, … — with real key events |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
 | `screenshot/2` | PNG bytes, or write to `:path` |
 | `pdf/2` | Render the page to PDF bytes, or write to `:path` |

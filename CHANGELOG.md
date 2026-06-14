@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+- `CDPEx.Page.click/3` now dispatches a **trusted** `Input` mouse event by default
+  (real `event.isTrusted`, hit-tested at the element's center after scroll-into-view)
+  instead of a synthetic `el.click()`. Pass `trusted: false` for the old synthetic
+  behavior. A trusted click can newly fail with `{:error, {:not_clickable, css}}`
+  for an element with no usable box (zero-size / off-screen even after scroll) (#72).
+
+### Added
+- `CDPEx.Page.type/4` — focus an element and enter text via `Input.insertText` (#72).
+- `CDPEx.Page.press/4` — press a named key (`Enter`, `Tab`, `Escape`, `Backspace`,
+  `Delete`, the arrows, `Home`, `End`) with real `keyDown`/`keyUp` events; a `nil`
+  selector targets the currently-focused element. An unsupported key returns
+  `{:error, {:unknown_key, key}}` (#72).
+
 ## [0.8.0] - 2026-06-14
 
 ### Breaking

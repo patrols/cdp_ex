@@ -44,6 +44,8 @@ defmodule CDPExTest do
     @terminal [
       {:chrome_not_found, "/usr/bin/google-chrome"},
       {:selector_not_found, ".missing"},
+      {:not_clickable, ".hidden"},
+      {:unknown_key, "F13"},
       {:evaluate_exception, %{"text" => "ReferenceError"}},
       {:unserializable_value, "NaN"},
       {:unexpected_evaluate, %{"unexpected" => true}},
