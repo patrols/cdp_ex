@@ -12,12 +12,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of a synthetic `el.click()`. Pass `trusted: false` for the old synthetic
   behavior. A trusted click can newly fail with `{:error, {:not_clickable, css}}`
   for an element with no usable box (zero-size / off-screen even after scroll) (#72).
-- `CDPEx.Protocol.parse_ws_url/1` now returns a 4-tuple `{scheme, host, port, path}`
+- `CDPEx.Protocol.parse_ws_url/1` now returns a 4-tuple `{scheme, host, port, target}`
   (was `{host, port, path}`) and accepts `wss://` again (reversing the 0.8.0
   rejection), enabling TLS DevTools endpoints / cloud browser providers behind
   `connect/2`. The added leading `scheme` element is a breaking change for any caller
   destructuring the old 3-tuple — update `{host, port, path} = parse_ws_url(url)` to
-  `{_scheme, host, port, path} = parse_ws_url(url)` (#73).
+  `{_scheme, host, port, target} = parse_ws_url(url)`. The fourth element is now the
+  WebSocket request target (path **plus any `?query`**), so a token-bearing cloud
+  endpoint (`wss://host/cdp?token=…`) keeps its query through the upgrade (#73).
 
 ### Added
 - `CDPEx.connect/2` — drive an already-running Chrome instead of launching one.

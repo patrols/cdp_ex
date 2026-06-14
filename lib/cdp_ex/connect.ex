@@ -11,6 +11,7 @@ defmodule CDPEx.Connect do
   # the Mint.HTTP facade) also keeps the conn a single opaque type, sidestepping a
   # `call_with_opaque` dialyzer false positive on the facade's struct union (OTP 26).
   alias CDPEx.Connection
+  alias CDPEx.Protocol
   alias Mint.HTTP1
 
   # Overall ceiling for the whole /json/version exchange (not per-recv) and a hard cap
@@ -23,7 +24,7 @@ defmodule CDPEx.Connect do
           {:ok, String.t()} | {:error, {:connect_discovery_failed, term()}}
   def resolve(endpoint, tls_opts \\ []) when is_binary(endpoint) do
     case URI.parse(endpoint) do
-      %URI{scheme: s} when s in ["ws", "wss"] ->
+      %URI{scheme: s, host: host} when s in ["ws", "wss"] and is_binary(host) and host != "" ->
         {:ok, endpoint}
 
       %URI{scheme: s, host: host, port: port} when s in ["http", "https"] and is_binary(host) ->
@@ -44,7 +45,8 @@ defmodule CDPEx.Connect do
          :ok <- check_status(status),
          {:ok, %{"webSocketDebuggerUrl" => url}} when is_binary(url) <- Jason.decode(body),
          %URI{path: path} = uri when is_binary(path) <- URI.parse(url) do
-      {:ok, "#{ws_scheme}://#{host}:#{port}#{path}#{query_suffix(uri.query)}"}
+      {:ok,
+       "#{ws_scheme}://#{Protocol.bracket_host(host)}:#{port}#{path}#{query_suffix(uri.query)}"}
     else
       {:error, reason} -> {:error, {:connect_discovery_failed, reason}}
       other -> {:error, {:connect_discovery_failed, other}}
@@ -56,9 +58,13 @@ defmodule CDPEx.Connect do
   # would fail discovery even when the caller explicitly opted out of verification.
   # Mint adds SNI + hostname verification itself when verify == :verify_peer.
   defp connect_opts(:https, tls_opts),
-    do: [mode: :passive, transport_opts: Connection.tls_opts(tls_opts)]
+    do: [
+      mode: :passive,
+      transport_opts: [{:timeout, @discovery_timeout} | Connection.tls_opts(tls_opts)]
+    ]
 
-  defp connect_opts(_http, _tls_opts), do: [mode: :passive]
+  defp connect_opts(_http, _tls_opts),
+    do: [mode: :passive, transport_opts: [timeout: @discovery_timeout]]
 
   # Issue the GET; on a request failure (after a successful connect) close the conn so
   # the socket isn't leaked. The happy path closes it in recv_body, and a failed

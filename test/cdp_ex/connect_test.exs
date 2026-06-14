@@ -61,4 +61,9 @@ defmodule CDPEx.ConnectTest do
     assert {:error, {:connect_discovery_failed, {:invalid_endpoint, _}}} =
              Connect.resolve("ftp://nope")
   end
+
+  test "a host-less ws:// endpoint is a structured failure, not a later ArgumentError" do
+    assert {:error, {:connect_discovery_failed, {:invalid_endpoint, _}}} =
+             Connect.resolve("ws:///devtools/browser/x")
+  end
 end

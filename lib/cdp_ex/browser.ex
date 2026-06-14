@@ -84,11 +84,14 @@ defmodule CDPEx.Browser do
   Opens a new page (tab) and returns a `CDPEx.Page` handle.
 
   Options:
-    * `:transport` — `:dedicated` (default, one WebSocket per page, strong crash
-      isolation) or `:session` (multiplexed over the browser socket via a
-      flattened CDP session — fewer sockets, but all session pages share the
-      browser connection's fate: if it drops, they all go). Any other value
-      returns `{:error, {:invalid_transport, value}}`.
+    * `:transport` — `:dedicated` (one WebSocket per page, strong crash isolation)
+      or `:session` (multiplexed over the browser socket via a flattened CDP
+      session — fewer sockets, but all session pages share the browser
+      connection's fate: if it drops, they all go). A **launched** browser
+      defaults to `:dedicated`; a **connected** browser (`CDPEx.connect/2`)
+      defaults to `:session` and rejects `:dedicated` with
+      `{:error, {:unsupported_transport, :dedicated}}`. Any other value returns
+      `{:error, {:invalid_transport, value}}`.
     * `:prevent_alerts` — inject no-op `alert`/`confirm`/`prompt` (default `true`)
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
@@ -741,7 +744,7 @@ defmodule CDPEx.Browser do
   # page connection, if opened) — otherwise we leak a Chrome tab/socket that
   # isn't tracked in state.pages and can't be cleaned up deterministically.
   defp open_target(state, tid, opts) do
-    page_url = "ws://#{bracket_host(state.host)}:#{state.port}/devtools/page/#{tid}"
+    page_url = "ws://#{Protocol.bracket_host(state.host)}:#{state.port}/devtools/page/#{tid}"
 
     case Connection.start_link(page_url) do
       {:ok, conn} ->
@@ -865,12 +868,6 @@ defmodule CDPEx.Browser do
   defp close_target(browser_conn, tid) do
     _ = Connection.call(browser_conn, "Target.closeTarget", %{"targetId" => tid}, @create_timeout)
     :ok
-  end
-
-  # Bracket an IPv6 literal so the page WebSocket URL is well-formed
-  # (`ws://[::1]:9222/…` rather than the malformed `ws://::1:9222/…`).
-  defp bracket_host(host) do
-    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 
   # Stop a page connection, tolerating an already-dead process. `Connection.close/1`

@@ -147,8 +147,30 @@ defmodule CDPEx.ProtocolTest do
                {"wss", "example.com", 443, "/devtools/browser/abc"}
     end
 
+    test "carries the query string into the request target (token-auth cloud endpoints)" do
+      assert Protocol.parse_ws_url("wss://chrome.example.com/cdp?token=abc") ==
+               {"wss", "chrome.example.com", 443, "/cdp?token=abc"}
+    end
+
+    test "a query with no explicit path targets / plus the query" do
+      assert Protocol.parse_ws_url("wss://chrome.browserless.io?token=X") ==
+               {"wss", "chrome.browserless.io", 443, "/?token=X"}
+    end
+
     test "rejects a non-ws(s) scheme" do
       assert_raise ArgumentError, fn -> Protocol.parse_ws_url("http://127.0.0.1:9222/x") end
+    end
+  end
+
+  describe "bracket_host/1" do
+    test "brackets an IPv6 literal" do
+      assert Protocol.bracket_host("::1") == "[::1]"
+      assert Protocol.bracket_host("fe80::1") == "[fe80::1]"
+    end
+
+    test "passes a non-IPv6 host through unchanged" do
+      assert Protocol.bracket_host("127.0.0.1") == "127.0.0.1"
+      assert Protocol.bracket_host("localhost") == "localhost"
     end
   end
 
