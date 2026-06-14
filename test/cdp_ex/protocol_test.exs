@@ -174,6 +174,17 @@ defmodule CDPEx.ProtocolTest do
     end
   end
 
+  describe "sni/1" do
+    test "disables SNI for IP literals (RFC 6066)" do
+      assert Protocol.sni("127.0.0.1") == :disable
+      assert Protocol.sni("::1") == :disable
+    end
+
+    test "keeps a DNS name as a charlist" do
+      assert Protocol.sni("chrome.example.com") == ~c"chrome.example.com"
+    end
+  end
+
   test "prevent_alerts_js/0 overrides the three modal dialog functions" do
     js = Protocol.prevent_alerts_js()
     assert js =~ "window.alert"
