@@ -167,13 +167,14 @@ defmodule CDPEx.Connection do
 
   @impl true
   def init({ws_url, opts}) do
-    {_scheme, host, port, path} = Protocol.parse_ws_url(ws_url)
+    {scheme, host, port, path} = Protocol.parse_ws_url(ws_url)
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)
+    {transport, ws_scheme, conn_opts} = transport_for(scheme, host, opts)
 
     # The handshake runs synchronously in init so its frames can't interleave
     # with post-upgrade CDP frames.
-    with {:ok, conn} <- HTTP.connect(:http, host, port, protocols: [:http1]),
-         {:ok, conn, ref} <- WebSocket.upgrade(:ws, conn, path, []),
+    with {:ok, conn} <- HTTP.connect(transport, host, port, conn_opts),
+         {:ok, conn, ref} <- WebSocket.upgrade(ws_scheme, conn, path, []),
          {:ok, conn, status, headers} <- recv_upgrade(conn, ref, upgrade_timeout),
          {:ok, conn, websocket} <- WebSocket.new(conn, ref, status, headers) do
       # Trap exits only AFTER the handshake. During the upgrade, recv_upgrade's
@@ -187,6 +188,33 @@ defmodule CDPEx.Connection do
     else
       {:error, reason} -> {:stop, {:ws_connect, reason}}
       {:error, _conn, reason} -> {:stop, {:ws_upgrade, reason}}
+    end
+  end
+
+  # `wss://` (a remote/TLS DevTools endpoint, see CDPEx.connect/2) connects over
+  # `:https`; everything else is plaintext `:http` to a local Chrome.
+  defp transport_for("wss", host, opts) do
+    tls = [{:server_name_indication, String.to_charlist(host)} | tls_opts(opts)]
+    {:https, :wss, [protocols: [:http1], transport_opts: tls]}
+  end
+
+  defp transport_for(_ws, _host, _opts), do: {:http, :ws, [protocols: [:http1]]}
+
+  @doc false
+  @spec tls_opts(keyword()) :: keyword()
+  def tls_opts(opts) do
+    cond do
+      Keyword.get(opts, :insecure, false) ->
+        [verify: :verify_none]
+
+      file = Keyword.get(opts, :cacertfile) ->
+        [verify: :verify_peer, cacertfile: file, depth: 99]
+
+      certs = Keyword.get(opts, :cacerts) ->
+        [verify: :verify_peer, cacerts: certs, depth: 99]
+
+      true ->
+        [verify: :verify_peer, cacerts: :public_key.cacerts_get(), depth: 99]
     end
   end
 
