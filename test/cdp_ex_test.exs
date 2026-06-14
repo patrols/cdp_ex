@@ -45,6 +45,7 @@ defmodule CDPExTest do
       {:chrome_not_found, "/usr/bin/google-chrome"},
       {:selector_not_found, ".missing"},
       {:evaluate_exception, %{"text" => "ReferenceError"}},
+      {:unserializable_value, "NaN"},
       {:unexpected_evaluate, %{"unexpected" => true}},
       {:invalid_args, :badarg},
       {:invalid_source, :bogus},

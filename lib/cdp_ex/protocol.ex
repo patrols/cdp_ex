@@ -155,10 +155,12 @@ defmodule CDPEx.Protocol do
   A thrown JS exception becomes `{:error, {:evaluate_exception, details}}`; a
   returned value (with `returnByValue: true`) becomes `{:ok, value}`; `undefined`
   becomes `{:ok, nil}`. A result Chrome can only express as an `unserializableValue`
-  — `NaN`, `Infinity`, `-0`, or a `BigInt` — has no by-value `value` and falls
-  through to `{:error, {:unexpected_evaluate, _}}`. (Inputs Chrome can't serialize
-  at all, like `window` or a circular object, never reach here — the
-  `Runtime.evaluate` call fails first; see `CDPEx.Page.evaluate/3`.)
+  — `NaN`, `Infinity`, `-0`, or a `BigInt` — has no by-value `value` and becomes
+  `{:error, {:unserializable_value, uv}}`, carrying the raw `unserializableValue`
+  string. Anything else (an unrecognized result envelope) falls through to
+  `{:error, {:unexpected_evaluate, _}}`. (Inputs Chrome can't serialize at all,
+  like `window` or a circular object, never reach here — the `Runtime.evaluate`
+  call fails first; see `CDPEx.Page.evaluate/3`.)
 
   ## Examples
 
@@ -174,8 +176,8 @@ defmodule CDPEx.Protocol do
       iex> {:error, {:evaluate_exception, _}} =
       ...>   CDPEx.Protocol.evaluate_result(%{"exceptionDetails" => %{"text" => "Uncaught"}})
 
-      iex> {:error, {:unexpected_evaluate, _}} =
-      ...>   CDPEx.Protocol.evaluate_result(%{"result" => %{"type" => "bigint", "unserializableValue" => "10n"}})
+      iex> CDPEx.Protocol.evaluate_result(%{"result" => %{"type" => "bigint", "unserializableValue" => "10n"}})
+      {:error, {:unserializable_value, "10n"}}
   """
   @spec evaluate_result(map()) :: {:ok, term()} | {:error, term()}
   def evaluate_result(%{"exceptionDetails" => details}),
@@ -183,6 +185,10 @@ defmodule CDPEx.Protocol do
 
   def evaluate_result(%{"result" => %{"value" => value}}), do: {:ok, value}
   def evaluate_result(%{"result" => %{"type" => "undefined"}}), do: {:ok, nil}
+
+  def evaluate_result(%{"result" => %{"unserializableValue" => uv}}),
+    do: {:error, {:unserializable_value, uv}}
+
   def evaluate_result(other), do: {:error, {:unexpected_evaluate, other}}
 
   @doc """

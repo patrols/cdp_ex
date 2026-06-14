@@ -554,7 +554,7 @@ defmodule CDPEx.Page do
       map, not the object and not an error;
     * an unserializable number Chrome reports only as an `unserializableValue`
       (`NaN`, `Infinity`, `-0`, a `BigInt`) has no by-value value and surfaces as
-      `{:error, {:unexpected_evaluate, _}}`;
+      `{:error, {:unserializable_value, uv}}` (the raw string, e.g. `"NaN"`);
     * a value Chrome can't serialize at all — a self-referential object like
       `window`, a circular structure, or a `Symbol` — fails the call as
       `{:error, {:cdp_error, "Runtime.evaluate", _}}`.
