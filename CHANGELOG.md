@@ -20,6 +20,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   selector targets the currently-focused element. An unsupported key returns
   `{:error, {:unknown_key, key}}` (#72).
 
+### Fixed
+- `CDPEx.Page.observe_network/2` (and `wait_for_network_idle/2`) now scope their
+  subscriptions to the page's session, so on a `:session`-transport connection a
+  caller only receives that page's `Network` events instead of every session's.
+  `CDPEx.Connection.subscribe/4` gains a `session_id:` option (default `nil` =
+  all sessions, the prior behaviour) (#27).
+
 ## [0.8.0] - 2026-06-14
 
 ### Breaking

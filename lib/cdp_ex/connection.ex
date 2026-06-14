@@ -35,8 +35,10 @@ defmodule CDPEx.Connection do
     :websocket,
     next_id: 1,
     pending: %{},
+    # %{method => %{pid => session_filter}} and %{pid => session_filter}, where a
+    # nil filter receives every session's events (see subscribe/4).
     subscribers: %{},
-    all_subscribers: MapSet.new(),
+    all_subscribers: %{},
     monitors: %{},
     waiters: [],
     ws_send_error: nil
@@ -106,10 +108,15 @@ defmodule CDPEx.Connection do
 
   `timeout` bounds the registration call so a caller can fold it into an overall
   deadline (defaults to the standard call timeout).
+
+  Pass `opts` with `session_id: sid` to receive only events from that session —
+  the matching that `await_event/4` already does for waiters. The default (`nil`)
+  receives every session's events (current behaviour); on a `:dedicated`
+  connection, where every event is for the one page, the two are equivalent.
   """
-  @spec subscribe(GenServer.server(), String.t() | :all, timeout()) :: :ok
-  def subscribe(conn, method, timeout \\ @default_call_timeout),
-    do: GenServer.call(conn, {:subscribe, method, self()}, timeout)
+  @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) :: :ok
+  def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
+    do: GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
 
   @doc "Removes a subscription created with `subscribe/3`."
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
@@ -203,24 +210,27 @@ defmodule CDPEx.Connection do
     end
   end
 
-  def handle_call({:subscribe, :all, pid}, _from, state) do
+  def handle_call({:subscribe, :all, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
-    {:reply, :ok, %{state | all_subscribers: MapSet.put(state.all_subscribers, pid)}}
+    {:reply, :ok, %{state | all_subscribers: Map.put(state.all_subscribers, pid, session_id)}}
   end
 
-  def handle_call({:subscribe, method, pid}, _from, state) do
+  def handle_call({:subscribe, method, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
-    subs = Map.update(state.subscribers, method, MapSet.new([pid]), &MapSet.put(&1, pid))
+
+    subs =
+      Map.update(state.subscribers, method, %{pid => session_id}, &Map.put(&1, pid, session_id))
+
     {:reply, :ok, %{state | subscribers: subs}}
   end
 
   def handle_call({:unsubscribe, :all, pid}, _from, state) do
-    state = %{state | all_subscribers: MapSet.delete(state.all_subscribers, pid)}
+    state = %{state | all_subscribers: Map.delete(state.all_subscribers, pid)}
     {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
 
   def handle_call({:unsubscribe, method, pid}, _from, state) do
-    subs = Map.update(state.subscribers, method, MapSet.new(), &MapSet.delete(&1, pid))
+    subs = Map.update(state.subscribers, method, %{}, &Map.delete(&1, pid))
     state = %{state | subscribers: subs}
     {:reply, :ok, demonitor_if_orphaned(state, pid)}
   end
@@ -404,11 +414,17 @@ defmodule CDPEx.Connection do
   defp session_match?(_want, _event), do: false
 
   defp notify_subscribers(state, method, session_id, params) do
-    method_subs = Map.get(state.subscribers, method, MapSet.new())
+    method_subs = Map.get(state.subscribers, method, %{})
 
+    # A pid in both the method map and :all is deduped to one send; a per-pid
+    # nil filter (or one matching event_session_id) receives the event.
     method_subs
-    |> MapSet.union(state.all_subscribers)
-    |> Enum.each(fn pid -> send(pid, {:cdp_event, self(), method, params, session_id}) end)
+    |> Map.merge(state.all_subscribers)
+    |> Enum.each(fn {pid, want_session_id} ->
+      if session_match?(want_session_id, session_id) do
+        send(pid, {:cdp_event, self(), method, params, session_id})
+      end
+    end)
 
     state
   end
@@ -456,19 +472,19 @@ defmodule CDPEx.Connection do
   end
 
   defp subscribed_anywhere?(state, pid) do
-    MapSet.member?(state.all_subscribers, pid) or
-      Enum.any?(state.subscribers, fn {_method, set} -> MapSet.member?(set, pid) end)
+    Map.has_key?(state.all_subscribers, pid) or
+      Enum.any?(state.subscribers, fn {_method, subs} -> Map.has_key?(subs, pid) end)
   end
 
   # Remove a (dead) subscriber from every subscription and forget its monitor.
   defp drop_subscriber(state, pid) do
     subscribers =
-      Map.new(state.subscribers, fn {method, set} -> {method, MapSet.delete(set, pid)} end)
+      Map.new(state.subscribers, fn {method, subs} -> {method, Map.delete(subs, pid)} end)
 
     %{
       state
       | subscribers: subscribers,
-        all_subscribers: MapSet.delete(state.all_subscribers, pid),
+        all_subscribers: Map.delete(state.all_subscribers, pid),
         monitors: Map.delete(state.monitors, pid)
     }
   end

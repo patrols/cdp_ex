@@ -124,6 +124,40 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "Hello"} = Page.text(p1, "#greeting")
     end
 
+    test "observe_network only delivers the observed page's own session events", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+
+      # A separate observer enables Network on p2's session so p2 actually emits
+      # events on the shared connection — events that must NOT reach p1's observer.
+      parent = self()
+
+      observer_b =
+        spawn_link(fn ->
+          :ok = Page.observe_network(p2)
+          send(parent, :b_ready)
+          receive do: (:stop -> :ok)
+        end)
+
+      assert_receive :b_ready, 5_000
+      assert :ok = Page.observe_network(p1)
+
+      # p2's navigation fires Network events on p2's session; scoped delivery means
+      # this process (observing p1) must not receive any of them.
+      {:ok, _} = Page.navigate(p2, fixture)
+      refute_receive {:cdp_event, _, "Network.requestWillBeSent", _, _}, 800
+
+      # p1's own navigation IS delivered here, tagged with p1's session id.
+      {:ok, _} = Page.navigate(p1, fixture)
+      assert_receive {:cdp_event, _, "Network.requestWillBeSent", _, sid}, 2_000
+      assert sid == p1.session_id
+
+      send(observer_b, :stop)
+    end
+
     test "closing a session page detaches it without harming siblings", %{fixture: fixture} do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)

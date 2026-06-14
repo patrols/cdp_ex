@@ -164,7 +164,7 @@ defmodule CDPEx.TelemetryTest do
   # helper process whose pid the test can't name).
   defp wait_until_any_subscribed(conn, method, retries \\ 100) do
     cond do
-      MapSet.size(Map.get(:sys.get_state(conn).subscribers, method, MapSet.new())) > 0 ->
+      map_size(Map.get(:sys.get_state(conn).subscribers, method, %{})) > 0 ->
         :ok
 
       retries == 0 ->

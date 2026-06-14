@@ -1002,9 +1002,9 @@ defmodule CDPEx.Page do
   Call `stop_observing_network/2` to unsubscribe.
 
   Start observing **before** navigating: requests already in flight when you call
-  this are not captured. On a session-transport page the caller receives **every**
-  session's events on the shared connection (subscriptions are keyed by method, not
-  session); match on the `session_id` element to filter to this page.
+  this are not captured. Delivery is scoped to this page's session, so on a
+  `:session`-transport connection you receive only this page's `Network` events,
+  not those of other pages sharing the socket.
 
   Options:
     * `:events` — `Network.*` method names (default request + response lifecycle)
@@ -1018,7 +1018,7 @@ defmodule CDPEx.Page do
     # Subscribe BEFORE enabling so an event emitted the instant the domain turns on
     # can't slip through before the caller is registered (mirrors navigate/3's
     # subscribe-before-trigger).
-    with :ok <- subscribe_each(page.conn, methods, timeout),
+    with :ok <- subscribe_each(page.conn, methods, timeout, page.session_id),
          :ok <- ensure_network(page, timeout) do
       :ok
     else
@@ -1195,7 +1195,7 @@ defmodule CDPEx.Page do
   # the helper's subscriptions are pruned by Connection on its :DOWN and its idle-tick timers
   # die with it (an enable failure likewise just exits the helper and is auto-pruned).
   defp run_network_idle(page, idle_time, max_inflight, deadline) do
-    with :ok <- subscribe_each(page.conn, @idle_events, remaining(deadline)),
+    with :ok <- subscribe_each(page.conn, @idle_events, remaining(deadline), page.session_id),
          :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
       ref = Process.monitor(page.conn)
@@ -1609,8 +1609,8 @@ defmodule CDPEx.Page do
   # overall deadline; a snapshot is fine — if one subscribe exhausts it the call exits and
   # the catch below short-circuits the rest. A budget-exhausted call surfaces as :timeout
   # (the conn is alive, the deadline elapsed) vs :noproc for a genuinely dead conn.
-  defp subscribe_each(conn, methods, timeout) do
-    Enum.each(methods, &Connection.subscribe(conn, &1, timeout))
+  defp subscribe_each(conn, methods, timeout, session_id \\ nil) do
+    Enum.each(methods, &Connection.subscribe(conn, &1, timeout, session_id: session_id))
     :ok
   catch
     :exit, {:timeout, _} -> {:error, :timeout}

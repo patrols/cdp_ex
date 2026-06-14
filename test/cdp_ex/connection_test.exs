@@ -179,6 +179,25 @@ defmodule CDPEx.ConnectionTest do
     assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, "A"}, 2_000
   end
 
+  test "a session-scoped subscriber only receives that session's events", %{conn: conn, fake: fake} do
+    :ok = Connection.subscribe(conn, "Network.requestWillBeSent", 5_000, session_id: "S1")
+
+    # Send the other session first: if the S1 event arrives, the S2 one was
+    # already processed (in order) and correctly dropped.
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S2","params":{"n":2}})
+    )
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S1","params":{"n":1}})
+    )
+
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 1}, "S1"}, 2_000
+    refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 2}, "S2"}, 200
+  end
+
   test "await_event with a session gate ignores other sessions", %{conn: conn, fake: fake} do
     # A waiter scoped to session A must NOT resolve on a matching event from B.
     task =
@@ -317,8 +336,8 @@ defmodule CDPEx.ConnectionTest do
     # The connection monitors the subscriber and tracks it in both sets.
     state = :sys.get_state(conn)
     assert Map.has_key?(state.monitors, sub)
-    assert MapSet.member?(state.all_subscribers, sub)
-    assert MapSet.member?(Map.get(state.subscribers, "Page.lifecycleEvent", MapSet.new()), sub)
+    assert Map.has_key?(state.all_subscribers, sub)
+    assert Map.has_key?(Map.get(state.subscribers, "Page.lifecycleEvent", %{}), sub)
 
     # Kill it without unsubscribing; the connection's :DOWN handler must prune it
     # from every subscription set and drop the monitor.
@@ -328,8 +347,8 @@ defmodule CDPEx.ConnectionTest do
       s = :sys.get_state(conn)
 
       not Map.has_key?(s.monitors, sub) and
-        not MapSet.member?(s.all_subscribers, sub) and
-        not MapSet.member?(Map.get(s.subscribers, "Page.lifecycleEvent", MapSet.new()), sub)
+        not Map.has_key?(s.all_subscribers, sub) and
+        not Map.has_key?(Map.get(s.subscribers, "Page.lifecycleEvent", %{}), sub)
     end)
   end
 
