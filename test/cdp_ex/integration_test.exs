@@ -158,6 +158,28 @@ defmodule CDPEx.IntegrationTest do
       send(observer_b, :stop)
     end
 
+    test "one process observing two session pages receives both pages' events", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {:ok, p1} = CDPEx.new_page(browser, transport: :session)
+      {:ok, p2} = CDPEx.new_page(browser, transport: :session)
+
+      # The SAME process observes both pages on the shared connection. Subscriptions
+      # must accumulate per session, not clobber — so this process receives events
+      # tagged with BOTH session ids (the regression the filter-set model fixes).
+      assert :ok = Page.observe_network(p1)
+      assert :ok = Page.observe_network(p2)
+
+      {:ok, _} = Page.navigate(p1, fixture)
+      {:ok, _} = Page.navigate(p2, fixture)
+
+      s1 = p1.session_id
+      s2 = p2.session_id
+      assert_receive {:cdp_event, _, "Network.requestWillBeSent", _, ^s1}, 3_000
+      assert_receive {:cdp_event, _, "Network.requestWillBeSent", _, ^s2}, 3_000
+    end
+
     test "closing a session page detaches it without harming siblings", %{fixture: fixture} do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)

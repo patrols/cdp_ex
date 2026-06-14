@@ -1004,7 +1004,9 @@ defmodule CDPEx.Page do
   Start observing **before** navigating: requests already in flight when you call
   this are not captured. Delivery is scoped to this page's session, so on a
   `:session`-transport connection you receive only this page's `Network` events,
-  not those of other pages sharing the socket.
+  not those of other pages sharing the socket. Observing several pages from one
+  process accumulates — you receive each observed page's events, told apart by the
+  `session_id` element.
 
   Options:
     * `:events` — `Network.*` method names (default request + response lifecycle)

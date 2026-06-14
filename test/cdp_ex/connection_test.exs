@@ -198,13 +198,41 @@ defmodule CDPEx.ConnectionTest do
     refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 2}, "S2"}, 200
   end
 
-  test "an :all subscription broadens delivery over a co-existing method+session subscription",
-       %{conn: conn, fake: fake} do
-    # Same pid: a method scoped to S1 AND :all (unscoped). :all means "every
-    # event", so on the merge collision it must win — the pid still receives this
-    # method's events from OTHER sessions (union semantics), not just S1's.
+  test "a pid observing one method for two sessions receives both", %{conn: conn, fake: fake} do
+    # Models one process observing two :session pages on the shared connection:
+    # re-subscribe accumulates filters ({S1, S2}) rather than clobbering, so both
+    # sessions' events arrive — while an unrelated session stays filtered out.
     :ok = Connection.subscribe(conn, "Network.requestWillBeSent", 5_000, session_id: "S1")
-    :ok = Connection.subscribe(conn, :all)
+    :ok = Connection.subscribe(conn, "Network.requestWillBeSent", 5_000, session_id: "S2")
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S1","params":{"n":1}})
+    )
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S2","params":{"n":2}})
+    )
+
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 1}, "S1"}, 2_000
+    assert_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 2}, "S2"}, 2_000
+
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.requestWillBeSent","sessionId":"S3","params":{"n":3}})
+    )
+
+    refute_receive {:cdp_event, ^conn, "Network.requestWillBeSent", %{"n" => 3}, "S3"}, 200
+  end
+
+  test "union is most-permissive: a nil-filter method sub still gets all sessions despite a narrower :all",
+       %{conn: conn, fake: fake} do
+    # Same pid: method M with a nil filter (wants every session) AND :all scoped to
+    # S1. The union ({nil, S1}) must not be narrowed by the :all filter — an M event
+    # from S2 is still delivered because the method subscription asked for all.
+    :ok = Connection.subscribe(conn, "Network.requestWillBeSent", 5_000)
+    :ok = Connection.subscribe(conn, :all, 5_000, session_id: "S1")
 
     FakeCDP.send_text(
       fake,

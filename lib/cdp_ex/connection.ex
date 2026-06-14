@@ -35,10 +35,11 @@ defmodule CDPEx.Connection do
     :websocket,
     next_id: 1,
     pending: %{},
-    # method => %{pid => session_filter}; a nil filter receives every session's
+    # method => %{pid => MapSet<session_filter>}; a pid can hold several filters
+    # (e.g. observing two sessions), and a nil filter receives every session's
     # events (see subscribe/4).
     subscribers: %{},
-    # pid => session_filter, for subscribers to :all events; nil = all sessions.
+    # pid => MapSet<session_filter> for :all subscribers; nil = all sessions.
     all_subscribers: %{},
     monitors: %{},
     waiters: [],
@@ -213,14 +214,19 @@ defmodule CDPEx.Connection do
 
   def handle_call({:subscribe, :all, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
-    {:reply, :ok, %{state | all_subscribers: Map.put(state.all_subscribers, pid, session_id)}}
+    {:reply, :ok, %{state | all_subscribers: add_filter(state.all_subscribers, pid, session_id)}}
   end
 
   def handle_call({:subscribe, method, session_id, pid}, _from, state) do
     state = monitor_subscriber(state, pid)
 
     subs =
-      Map.update(state.subscribers, method, %{pid => session_id}, &Map.put(&1, pid, session_id))
+      Map.update(
+        state.subscribers,
+        method,
+        %{pid => MapSet.new([session_id])},
+        &add_filter(&1, pid, session_id)
+      )
 
     {:reply, :ok, %{state | subscribers: subs}}
   end
@@ -417,16 +423,14 @@ defmodule CDPEx.Connection do
   defp notify_subscribers(state, method, session_id, params) do
     method_subs = Map.get(state.subscribers, method, %{})
 
-    # A pid in both the method map and :all is deduped to one send. On that
-    # collision Map.merge keeps the :all filter (right-hand wins), which is the
-    # intended union semantics: an :all subscription means "every event", so it
-    # broadens delivery rather than being narrowed by a co-existing method+session
-    # subscription. Each survivor receives the event when its filter is nil or
-    # matches the event's session.
+    # A pid may hold several session filters for one method (e.g. observing two
+    # `:session` pages on the shared connection) and may also be an `:all`
+    # subscriber. Union the filter sets per pid so delivery is most-permissive — a
+    # nil filter or any matching session delivers — and each pid gets one send.
     method_subs
-    |> Map.merge(state.all_subscribers)
-    |> Enum.each(fn {pid, want_session_id} ->
-      if session_match?(want_session_id, session_id) do
+    |> Map.merge(state.all_subscribers, fn _pid, fs1, fs2 -> MapSet.union(fs1, fs2) end)
+    |> Enum.each(fn {pid, filters} ->
+      if Enum.any?(filters, &session_match?(&1, session_id)) do
         send(pid, {:cdp_event, self(), method, params, session_id})
       end
     end)
@@ -447,6 +451,14 @@ defmodule CDPEx.Connection do
   end
 
   # ── subscriber lifecycle ────────────────────────────────────────────────────
+
+  # Add a session filter to a pid's set in a `%{pid => MapSet<filter>}` map,
+  # creating the set on first subscribe. Re-subscribing a pid for another session
+  # accumulates filters rather than overwriting (so one process can scope-observe
+  # several sessions on the shared connection).
+  defp add_filter(map, pid, session_id) do
+    Map.update(map, pid, MapSet.new([session_id]), &MapSet.put(&1, session_id))
+  end
 
   # Monitor a subscriber the first time it subscribes, so we learn if it dies.
   # At most one monitor per pid, however many methods it subscribes to.
