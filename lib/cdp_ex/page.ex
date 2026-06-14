@@ -43,6 +43,24 @@ defmodule CDPEx.Page do
   # the scheduler starvation these deadlines guard against).
   @helper_grace 5_000
 
+  # Named keys supported by press/4, with the CDP fields Input.dispatchKeyEvent
+  # needs for default actions to fire (Enter submits, Tab moves focus, etc.).
+  @keymap %{
+    # `text: "\r"` is required for Enter's default action (implicit form submit) to
+    # fire under Input.dispatchKeyEvent; a bare keyDown is treated as a raw key.
+    "Enter" => %{"key" => "Enter", "code" => "Enter", "windowsVirtualKeyCode" => 13, "text" => "\r"},
+    "Tab" => %{"key" => "Tab", "code" => "Tab", "windowsVirtualKeyCode" => 9},
+    "Escape" => %{"key" => "Escape", "code" => "Escape", "windowsVirtualKeyCode" => 27},
+    "Backspace" => %{"key" => "Backspace", "code" => "Backspace", "windowsVirtualKeyCode" => 8},
+    "Delete" => %{"key" => "Delete", "code" => "Delete", "windowsVirtualKeyCode" => 46},
+    "ArrowUp" => %{"key" => "ArrowUp", "code" => "ArrowUp", "windowsVirtualKeyCode" => 38},
+    "ArrowDown" => %{"key" => "ArrowDown", "code" => "ArrowDown", "windowsVirtualKeyCode" => 40},
+    "ArrowLeft" => %{"key" => "ArrowLeft", "code" => "ArrowLeft", "windowsVirtualKeyCode" => 37},
+    "ArrowRight" => %{"key" => "ArrowRight", "code" => "ArrowRight", "windowsVirtualKeyCode" => 39},
+    "Home" => %{"key" => "Home", "code" => "Home", "windowsVirtualKeyCode" => 36},
+    "End" => %{"key" => "End", "code" => "End", "windowsVirtualKeyCode" => 35}
+  }
+
   @lifecycle_method "Page.lifecycleEvent"
   @request_will_be_sent "Network.requestWillBeSent"
   @response_received "Network.responseReceived"
@@ -737,18 +755,82 @@ defmodule CDPEx.Page do
   end
 
   @doc """
-  Clicks the first element matching `css` (a synthetic JS `.click()`).
+  Clicks the first element matching `css` with a real, trusted mouse event.
 
-  This dispatches a synthetic DOM `.click()` via `Runtime.evaluate`, **not** a
-  trusted OS-level input event: `event.isTrusted` is `false` and there's no real
-  hit-testing, so sites that gate on trusted input won't react. Real
-  `Input`-domain dispatch is tracked in
-  [#72](https://github.com/patrols/cdp_ex/issues/72).
+  Scrolls the element into view, then dispatches `Input.dispatchMouseEvent`
+  `mousePressed`/`mouseReleased` at its center, so `event.isTrusted` is `true` and
+  the click is hit-tested like a user's.
 
-  Returns `:ok`, or `{:error, {:selector_not_found, css}}` when nothing matches.
+  Options:
+    * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
+      hit-testing, `event.isTrusted == false`); the escape hatch for elements not
+      at a clickable point. Default `true`.
+    * `:timeout` — default #{@evaluate_timeout}.
+
+  Returns `:ok`, `{:error, {:selector_not_found, css}}` when nothing matches, or
+  `{:error, {:not_clickable, css}}` when the element has no usable box (zero-size
+  or not visible even after scroll).
   """
   @spec click(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def click(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
+    if Keyword.get(opts, :trusted, true) do
+      trusted_click(page, css, opts)
+    else
+      synthetic_click(page, css, opts)
+    end
+  end
+
+  @doc """
+  Types `text` into the first element matching `css`.
+
+  Focuses the element, then sends the text via `Input.insertText` (fires `input`
+  and `change`; does not emit per-character `keydown`/`keyup`).
+
+  Returns `:ok` or `{:error, {:selector_not_found, css}}`. Option: `:timeout`
+  (default #{@evaluate_timeout}).
+  """
+  @spec type(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def type(%__MODULE__{} = page, css, text, opts \\ [])
+      when is_binary(css) and is_binary(text) do
+    timeout = Keyword.get(opts, :timeout, @evaluate_timeout)
+
+    case focus(page, css, opts) do
+      :ok ->
+        case do_call(page, "Input.insertText", %{"text" => text}, timeout) do
+          {:ok, _} -> :ok
+          {:error, _} = error -> error
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Presses a single named `key`, dispatching real `keyDown`/`keyUp` events.
+
+  When `css` is a selector, the element is focused first; when `css` is `nil`, the
+  key goes to the currently-focused element. Supported keys: `Enter`, `Tab`,
+  `Escape`, `Backspace`, `Delete`, `ArrowUp`/`ArrowDown`/`ArrowLeft`/`ArrowRight`,
+  `Home`, `End`.
+
+  Returns `:ok`, `{:error, {:selector_not_found, css}}`, or
+  `{:error, {:unknown_key, key}}`. Option: `:timeout` (default #{@evaluate_timeout}).
+  """
+  @spec press(t(), String.t() | nil, String.t(), keyword()) :: :ok | {:error, term()}
+  def press(%__MODULE__{} = page, css, key, opts \\ [])
+      when (is_binary(css) or is_nil(css)) and is_binary(key) do
+    timeout = Keyword.get(opts, :timeout, @evaluate_timeout)
+
+    with {:ok, fields} <- keymap(key),
+         :ok <- maybe_focus(page, css, opts),
+         {:ok, _} <- do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyDown"), timeout),
+         {:ok, _} <- do_call(page, "Input.dispatchKeyEvent", Map.put(fields, "type", "keyUp"), timeout) do
+      :ok
+    end
+  end
+
+  defp synthetic_click(page, css, opts) do
     selector = Jason.encode!(css)
 
     js = """
@@ -766,6 +848,79 @@ defmodule CDPEx.Page do
       {:error, _} = error -> error
     end
   end
+
+  defp trusted_click(page, css, opts) do
+    selector = Jason.encode!(css)
+
+    js = """
+    (function () {
+      var el = document.querySelector(#{selector});
+      if (!el) { return {found: false}; }
+      if (el.scrollIntoViewIfNeeded) { el.scrollIntoViewIfNeeded(); }
+      else { el.scrollIntoView({block: "center", inline: "center"}); }
+      var r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) { return {found: true, clickable: false}; }
+      return {found: true, clickable: true, x: r.left + r.width / 2, y: r.top + r.height / 2};
+    })()
+    """
+
+    timeout = Keyword.get(opts, :timeout, @evaluate_timeout)
+
+    case evaluate(page, js, opts) do
+      {:ok, %{"found" => false}} ->
+        {:error, {:selector_not_found, css}}
+
+      {:ok, %{"clickable" => false}} ->
+        {:error, {:not_clickable, css}}
+
+      {:ok, %{"clickable" => true, "x" => x, "y" => y}} ->
+        with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout),
+             :ok <- dispatch_mouse(page, "mouseReleased", x, y, 0, timeout) do
+          :ok
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp dispatch_mouse(page, type, x, y, buttons, timeout) do
+    params = %{
+      "type" => type,
+      "x" => x,
+      "y" => y,
+      "button" => "left",
+      "buttons" => buttons,
+      "clickCount" => 1
+    }
+
+    case do_call(page, "Input.dispatchMouseEvent", params, timeout) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp focus(page, css, opts) do
+    selector = Jason.encode!(css)
+
+    js = """
+    (function () {
+      var el = document.querySelector(#{selector});
+      if (!el) { return false; }
+      el.focus();
+      return true;
+    })()
+    """
+
+    case evaluate(page, js, opts) do
+      {:ok, true} -> :ok
+      {:ok, false} -> {:error, {:selector_not_found, css}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp maybe_focus(_page, nil, _opts), do: :ok
+  defp maybe_focus(page, css, opts), do: focus(page, css, opts)
 
   @doc """
   Captures a PNG screenshot.
@@ -1503,6 +1658,15 @@ defmodule CDPEx.Page do
     case Map.fetch(@error_reasons, reason) do
       {:ok, cdp} -> {:ok, cdp}
       :error -> {:error, {:invalid_error_reason, reason}}
+    end
+  end
+
+  @doc false
+  @spec keymap(String.t()) :: {:ok, map()} | {:error, {:unknown_key, String.t()}}
+  def keymap(key) do
+    case Map.fetch(@keymap, key) do
+      {:ok, fields} -> {:ok, fields}
+      :error -> {:error, {:unknown_key, key}}
     end
   end
 

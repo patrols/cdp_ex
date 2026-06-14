@@ -98,6 +98,12 @@ defmodule CDPEx.FixtureServer do
         <button id="btn" onclick="document.getElementById('greeting').textContent = 'Clicked'">Go</button>
         <button id="fetch-btn" onclick="fetch('/data').then(r => r.text()).then(t => { document.getElementById('greeting').textContent = t; })">Fetch</button>
         <button id="redirect-fetch-btn" onclick="fetch('/redirect')">RedirectFetch</button>
+        <input id="name" />
+        <button id="trusted-btn" onclick="document.getElementById('greeting').textContent = event.isTrusted ? 'trusted' : 'untrusted'">Trusted?</button>
+        <button id="hidden-btn" style="display:none">Hidden</button>
+        <form id="search-form" onsubmit="document.getElementById('greeting').textContent = 'submitted'; return false;">
+          <input id="search" />
+        </form>
         <div id="echo-header">#{echo}</div>
       </body>
     </html>

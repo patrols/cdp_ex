@@ -260,6 +260,51 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Page.evaluate(page, "Symbol(\"x\")")
     end
 
+    test "click/3 dispatches a trusted event by default", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.click(page, "#trusted-btn")
+      assert {:ok, "trusted"} = Page.text(page, "#greeting")
+    end
+
+    test "click/3 trusted: false uses a synthetic event", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.click(page, "#trusted-btn", trusted: false)
+      assert {:ok, "untrusted"} = Page.text(page, "#greeting")
+    end
+
+    test "click/3 returns :not_clickable for a zero-box element", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:error, {:not_clickable, "#hidden-btn"}} = Page.click(page, "#hidden-btn")
+    end
+
+    test "click/3 returns :selector_not_found for no match", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:error, {:selector_not_found, "#nope"}} = Page.click(page, "#nope")
+    end
+
+    test "type/4 enters text into a field", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.type(page, "#name", "Ada")
+      assert {:ok, "Ada"} = Page.evaluate(page, "document.getElementById('name').value")
+    end
+
+    test "type/4 returns :selector_not_found for no match", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:error, {:selector_not_found, "#nope"}} = Page.type(page, "#nope", "x")
+    end
+
+    test "press/4 Enter submits a form from a focused field", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert :ok = Page.type(page, "#search", "hi")
+      assert :ok = Page.press(page, "#search", "Enter")
+      assert {:ok, "submitted"} = Page.text(page, "#greeting")
+    end
+
+    test "press/4 returns :unknown_key for an unsupported key", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:error, {:unknown_key, "F13"}} = Page.press(page, "#search", "F13")
+    end
+
     test "call_function applies JSON args and returns the result", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert {:ok, 5} = Page.call_function(page, "(a, b) => a + b", [2, 3])

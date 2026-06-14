@@ -61,6 +61,17 @@ defmodule CDPEx.PageTest do
     }
   end
 
+  describe "keymap/1" do
+    test "returns CDP key fields for a supported key" do
+      assert {:ok, %{"key" => "Enter", "code" => "Enter", "windowsVirtualKeyCode" => 13}} =
+               Page.keymap("Enter")
+    end
+
+    test "unknown key is an error" do
+      assert {:error, {:unknown_key, "F13"}} = Page.keymap("F13")
+    end
+  end
+
   describe "set_user_agent/3" do
     test "passes userAgentMetadata + acceptLanguage through to setUserAgentOverride", %{
       fake: fake,
