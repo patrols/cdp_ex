@@ -127,6 +127,7 @@ defmodule CDPEx do
           | {:invalid_transport, term()}
           | {:invalid_proxy, term()}
           | {:unsupported_transport, term()}
+          | {:unsupported_with_connect, term()}
           | {:invalid_response_body, String.t()}
           | {:invalid_pdf_data, String.t()}
           | {:invalid_screenshot_data, String.t()}
@@ -178,9 +179,11 @@ defmodule CDPEx do
       crack: an ambiguous navigation `net::ERR_*` (DNS `ERR_NAME_NOT_RESOLVED`,
       `ERR_ABORTED`, `ERR_BLOCKED_BY_*` — unlike the connection-layer codes above), the
       CDP error code (`{:cdp_error, _, _}`), the file-write posix reason
-      (`{:write_failed, _}`), or whether a `{:no_document_response, _}` was a
-      same-document hop or a slow miss. Also covers any term `CDPEx` doesn't produce.
-      Decide the retry policy yourself.
+      (`{:write_failed, _}`), whether a `{:no_document_response, _}` was a
+      same-document hop or a slow miss, or a `connect/2` endpoint-discovery failure
+      (`{:connect_discovery_failed, _}` — a transient network blip and a permanently
+      bad endpoint are indistinguishable here). Also covers any term `CDPEx` doesn't
+      produce. Decide the retry policy yourself.
 
   Retries are the caller's responsibility: bound the attempts and back off. A
   `:transient` result means **re-establish the resource** — open a fresh page/browser
@@ -219,6 +222,7 @@ defmodule CDPEx do
   def classify_error({:invalid_transport, _}), do: :terminal
   def classify_error({:invalid_proxy, _}), do: :terminal
   def classify_error({:unsupported_transport, _}), do: :terminal
+  def classify_error({:unsupported_with_connect, _}), do: :terminal
   def classify_error({:invalid_response_body, _}), do: :terminal
   def classify_error({:invalid_pdf_data, _}), do: :terminal
   def classify_error({:invalid_screenshot_data, _}), do: :terminal
@@ -348,7 +352,7 @@ defmodule CDPEx do
       {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
 
       result =
-        case Connect.resolve(endpoint) do
+        case Connect.resolve(endpoint, tls_opts) do
           {:ok, ws_url} -> Browser.start_link([connect: ws_url, conn_opts: tls_opts] ++ opts)
           {:error, _} = error -> error
         end
@@ -378,8 +382,11 @@ defmodule CDPEx do
   options, the browser) is cleaned up afterwards — even if `fun` raises.
 
   Pass an existing browser pid to reuse it, or a keyword list of launch options
-  to spin up a throwaway browser for the duration of the call. Returns whatever
-  `fun` returns, or `{:error, reason}` if the page/browser could not be created.
+  to spin up a throwaway browser for the duration of the call. A `[connect:
+  endpoint]` list attaches to an already-running Chrome instead of launching one
+  (see `connect/2`); teardown then closes only the pages it opened and never reaps
+  that Chrome. Returns whatever `fun` returns, or `{:error, reason}` if the
+  page/browser could not be created.
 
   With launch options, the throwaway browser is linked but **contained**: if it
   crashes during the call (e.g. its connection drops) `with_page` returns
@@ -399,6 +406,9 @@ defmodule CDPEx do
 
       # throwaway browser + page
       CDPEx.with_page([headless: true], &CDPEx.Page.html/1)
+
+      # against an existing Chrome (discovered via /json/version)
+      CDPEx.with_page([connect: "http://localhost:9222"], &CDPEx.Page.html/1)
   """
   @spec with_page(pid() | keyword(), (Page.t() -> result), keyword()) ::
           result | {:error, term()}

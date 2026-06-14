@@ -8,9 +8,13 @@ defmodule CDPEx.Browser do
     * It **traps exits** and links every connection, so a page connection crash
       is isolated (the page is dropped; the browser and other pages survive),
       while a browser-connection or Chrome death stops the browser cleanly.
-    * `terminate/2` always runs `CDPEx.Chrome.stop/1` — the no-orphan guarantee.
-      Because that relies on `terminate/2`, supervise this with a `:shutdown`
-      timeout, **not** `:brutal_kill`.
+    * For a **launched** browser, `terminate/2` always runs `CDPEx.Chrome.stop/1`
+      — the no-orphan guarantee. Because that relies on `terminate/2`, supervise a
+      launched browser with a `:shutdown` timeout, **not** `:brutal_kill`.
+
+  A browser started via `CDPEx.connect/2` (connect-mode, `chrome: nil`) is the
+  exception: it never launched Chrome, so `terminate/2` only closes the pages it
+  opened and never reaps the remote process — `:brutal_kill` is harmless there.
 
   Most callers use the `CDPEx` facade rather than this module directly.
   """
@@ -137,7 +141,12 @@ defmodule CDPEx.Browser do
     :exit, _ -> :ok
   end
 
-  @doc "Stops the browser, closing all pages and killing Chrome."
+  @doc """
+  Stops the browser, closing all pages.
+
+  A launched browser also kills its Chrome; a connected one (`CDPEx.connect/2`)
+  closes only the pages it opened and leaves the remote Chrome running.
+  """
   @spec stop(GenServer.server()) :: :ok
   def stop(browser), do: GenServer.stop(browser, :normal)
 
@@ -155,26 +164,33 @@ defmodule CDPEx.Browser do
     {connect_ws, launch_opts} = Keyword.pop(launch_opts, :connect)
     {conn_opts, launch_opts} = Keyword.pop(launch_opts, :conn_opts, [])
 
-    if connect_ws do
-      # Connect-mode: attach to an already-running Chrome. No Chrome.launch, and
-      # chrome: nil so terminate/2 never reaps a process we didn't start.
-      connect_browser(nil, connect_ws, launch_opts, owner || parent_pid(), nil, conn_opts)
-    else
-      {proxy, launch_opts} = Keyword.pop(launch_opts, :proxy)
+    cond do
+      connect_ws && Keyword.has_key?(launch_opts, :proxy) ->
+        # :proxy is a Chrome launch flag (--proxy-server); connect-mode launches no
+        # Chrome, so it could never take effect. Reject rather than silently ignore it.
+        {:stop, {:unsupported_with_connect, :proxy}}
 
-      with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
-           {:ok, chrome} <- Chrome.launch(launch_opts) do
-        connect_browser(
-          chrome,
-          chrome.debug_url,
-          launch_opts,
-          owner || parent_pid(),
-          proxy_auth,
-          []
-        )
-      else
-        {:error, reason} -> {:stop, reason}
-      end
+      connect_ws ->
+        # Connect-mode: attach to an already-running Chrome. No Chrome.launch, and
+        # chrome: nil so terminate/2 never reaps a process we didn't start.
+        connect_browser(nil, connect_ws, launch_opts, owner || parent_pid(), nil, conn_opts)
+
+      true ->
+        {proxy, launch_opts} = Keyword.pop(launch_opts, :proxy)
+
+        with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
+             {:ok, chrome} <- Chrome.launch(launch_opts) do
+          connect_browser(
+            chrome,
+            chrome.debug_url,
+            launch_opts,
+            owner || parent_pid(),
+            proxy_auth,
+            []
+          )
+        else
+          {:error, reason} -> {:stop, reason}
+        end
     end
   end
 
