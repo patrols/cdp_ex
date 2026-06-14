@@ -13,12 +13,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connect-to-remote API, so the connect path was always plaintext — accepting
   `wss://` only to fail at connect was a latent contract mismatch. Connecting to
   a remote/TLS DevTools endpoint is tracked in #73.
-
-### Docs
-- `CDPEx.Page.click/3` documents that it dispatches a **synthetic** DOM `.click()`
+- `CDPEx.Page.click/3` doc now states it dispatches a **synthetic** DOM `.click()`
   (not a trusted OS-level input event); real `Input`-domain dispatch is tracked
   in #72.
-- `CDPEx.Page.evaluate/3` documents that non-serializable results (DOM nodes,
+- `CDPEx.Page.evaluate/3` doc now notes non-serializable results (DOM nodes,
   `window`, functions, circular structures) return `{:error, {:unexpected_evaluate, _}}`.
 
 ## [0.7.0] - 2026-06-06
