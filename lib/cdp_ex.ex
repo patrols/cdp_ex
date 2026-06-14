@@ -324,7 +324,39 @@ defmodule CDPEx do
   defp launch_metadata({:error, reason}), do: %{error: reason}
   defp launch_metadata(:ignore), do: %{error: :ignore}
 
-  @doc "Stops a browser started with `launch/1`, closing all pages and killing Chrome."
+  @doc """
+  Connects to an already-running Chrome instead of launching one.
+
+  `endpoint` is either a `ws://`/`wss://` browser WebSocket URL (used directly) or
+  an `http://`/`https://` base URL (the browser socket is discovered via
+  `GET /json/version`, with the host/port taken from `endpoint`). Returns the same
+  handle as `launch/1`, so `new_page/2`, `with_page/3`, `close_page/2`, and
+  `stop/1` all work — but `stop/1` only closes the pages cdp_ex opened and drops
+  the socket; it never kills the remote Chrome or touches pre-existing tabs.
+
+  Pages default to `:session` transport; `transport: :dedicated` returns
+  `{:error, {:unsupported_transport, :dedicated}}` (not yet supported over a
+  connected browser).
+
+  Options: `:insecure` (skip `wss://` cert verification, default `false`),
+  `:cacertfile` / `:cacerts` (custom CA for `wss://`), `:name` (register the process).
+  """
+  @spec connect(String.t(), keyword()) :: GenServer.on_start()
+  def connect(endpoint, opts \\ []) when is_binary(endpoint) do
+    Telemetry.span(:connect, %{}, fn ->
+      {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
+
+      result =
+        case CDPEx.Connect.resolve(endpoint) do
+          {:ok, ws_url} -> Browser.start_link([connect: ws_url, conn_opts: tls_opts] ++ opts)
+          {:error, _} = error -> error
+        end
+
+      {result, launch_metadata(result)}
+    end)
+  end
+
+  @doc "Stops a browser started with `launch/1` (kills Chrome) or `connect/2` (closes the pages it opened, leaves Chrome running)."
   @spec stop(pid()) :: :ok
   def stop(browser), do: Browser.stop(browser)
 
@@ -389,7 +421,16 @@ defmodule CDPEx do
   end
 
   def with_page(launch_opts, fun, opts) when is_list(launch_opts) and is_function(fun, 1) do
-    case launch(launch_opts) do
+    # `[connect: endpoint]` attaches to a running Chrome instead of launching one;
+    # the resource-safe trap/stop/drain machinery below is identical (stop/1 on a
+    # connected browser closes only the pages we opened — it never kills Chrome).
+    start =
+      case Keyword.pop(launch_opts, :connect) do
+        {nil, _} -> fn -> launch(launch_opts) end
+        {endpoint, rest} -> fn -> connect(endpoint, rest) end
+      end
+
+    case start.() do
       {:ok, browser} ->
         # launch/1 links `browser` to us. Trap exits for the duration of this call
         # so a browser crash (e.g. its connection dropping mid-call) arrives as a
