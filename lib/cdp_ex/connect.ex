@@ -47,7 +47,7 @@ defmodule CDPEx.Connect do
         acc = acc ++ for({:data, ^ref, chunk} <- responses, do: chunk)
 
         if Enum.any?(responses, &match?({:done, ^ref}, &1)) do
-          HTTP.close(conn)
+          _ = HTTP.close(conn)
           {:ok, IO.iodata_to_binary(acc)}
         else
           recv_body(conn, ref, acc)

@@ -40,6 +40,10 @@ defmodule CDPEx.Browser do
     :opts,
     :parent,
     :proxy_auth,
+    # connect-mode (attached to a Chrome we didn't launch): drives the :session
+    # default + the :dedicated rejection in new_page. Distinct from `chrome: nil`,
+    # which a launched browser never is in production but a unit fixture can be.
+    connected: false,
     pages: %{},
     sessions: %{},
     auths: %{},
@@ -160,7 +164,14 @@ defmodule CDPEx.Browser do
 
       with {:ok, proxy_auth, launch_opts} <- apply_proxy(proxy, launch_opts),
            {:ok, chrome} <- Chrome.launch(launch_opts) do
-        connect_browser(chrome, chrome.debug_url, launch_opts, owner || parent_pid(), proxy_auth, [])
+        connect_browser(
+          chrome,
+          chrome.debug_url,
+          launch_opts,
+          owner || parent_pid(),
+          proxy_auth,
+          []
+        )
       else
         {:error, reason} -> {:stop, reason}
       end
@@ -214,6 +225,7 @@ defmodule CDPEx.Browser do
           {:ok,
            %__MODULE__{
              chrome: chrome,
+             connected: is_nil(chrome),
              browser_conn: conn,
              host: host,
              port: port,
@@ -247,12 +259,12 @@ defmodule CDPEx.Browser do
 
   @impl true
   def handle_call({:new_page, opts}, _from, state) do
-    # A connected browser (chrome: nil) defaults to :session and can't do
-    # :dedicated yet — a per-page socket would have to target the remote host.
-    default = if state.chrome, do: :dedicated, else: :session
+    # A connected browser defaults to :session and can't do :dedicated yet —
+    # a per-page socket would have to target the remote host.
+    default = if state.connected, do: :session, else: :dedicated
 
     case Keyword.get(opts, :transport, default) do
-      :dedicated when is_nil(state.chrome) ->
+      :dedicated when state.connected ->
         {:reply, {:error, {:unsupported_transport, :dedicated}}, state}
 
       :dedicated ->
@@ -577,13 +589,14 @@ defmodule CDPEx.Browser do
     # dying — its exit must not abort us before Chrome.stop/1, the no-orphan
     # guarantee). Closing browser_conn here makes teardown deterministic instead
     # of leaving it to stop reactively when its socket drops on Chrome exit.
-    if is_nil(state.chrome) and Process.alive?(state.browser_conn) do
-      # Connect-mode: we don't own Chrome, so closing the socket wouldn't reap the
-      # tabs we opened. Close just OUR targets (best-effort; close_target tolerates
-      # a dead conn), leaving Chrome and any pre-existing tabs untouched.
-      for {tid, _sid} <- state.sessions, do: close_target(state.browser_conn, tid)
-      for {tid, _conn} <- state.pages, do: close_target(state.browser_conn, tid)
-    end
+    _ =
+      if state.connected and Process.alive?(state.browser_conn) do
+        # Connect-mode: we don't own Chrome, so closing the socket wouldn't reap the
+        # tabs we opened. Close just OUR targets (best-effort; close_target tolerates
+        # a dead conn), leaving Chrome and any pre-existing tabs untouched.
+        Enum.each(state.sessions, fn {tid, _sid} -> close_target(state.browser_conn, tid) end)
+        Enum.each(state.pages, fn {tid, _conn} -> close_target(state.browser_conn, tid) end)
+      end
 
     Enum.each(state.pages, fn {_tid, conn} -> safe_close(conn) end)
     safe_close(state.browser_conn)

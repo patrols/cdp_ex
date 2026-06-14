@@ -125,7 +125,9 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "Hello"} = Page.text(a_page, "#greeting")
     end
 
-    test "with_page(connect:) runs against a running Chrome and leaves it alive", %{fixture: fixture} do
+    test "with_page(connect:) runs against a running Chrome and leaves it alive", %{
+      fixture: fixture
+    } do
       {:ok, a} = CDPEx.launch()
       on_exit(fn -> stop_quietly(a) end)
       %{host: host, port: port} = :sys.get_state(a)

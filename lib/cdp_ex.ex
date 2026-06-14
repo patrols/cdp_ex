@@ -57,6 +57,7 @@ defmodule CDPEx do
   """
 
   alias CDPEx.Browser
+  alias CDPEx.Connect
   alias CDPEx.Page
   alias CDPEx.Telemetry
 
@@ -347,7 +348,7 @@ defmodule CDPEx do
       {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
 
       result =
-        case CDPEx.Connect.resolve(endpoint) do
+        case Connect.resolve(endpoint) do
           {:ok, ws_url} -> Browser.start_link([connect: ws_url, conn_opts: tls_opts] ++ opts)
           {:error, _} = error -> error
         end
