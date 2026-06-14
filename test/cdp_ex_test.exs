@@ -75,7 +75,8 @@ defmodule CDPExTest do
       {:cdp_error, "Page.navigate", %{"code" => -32_000, "message" => "boom"}},
       {:write_failed, :eacces},
       {:write_failed, :enospc},
-      {:no_document_response, "https://example.com/#hash"}
+      {:no_document_response, "https://example.com/#hash"},
+      {:connect_discovery_failed, :econnrefused}
     ]
 
     # Reasons CDPEx never produces — a future shape or a foreign wrapped term.

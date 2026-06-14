@@ -111,6 +111,7 @@ defmodule CDPEx do
           | {:conflict, :authenticated | :intercepting}
           | {:navigate, String.t()}
           | {:no_document_response, String.t()}
+          | {:connect_discovery_failed, term()}
           | {:capture_failed, term()}
           | {:idle_wait_failed, term()}
           | {:selector_not_found, String.t()}
@@ -240,6 +241,7 @@ defmodule CDPEx do
   def classify_error({:cdp_error, _, _}), do: :unknown
   def classify_error({:write_failed, _}), do: :unknown
   def classify_error({:no_document_response, _}), do: :unknown
+  def classify_error({:connect_discovery_failed, _}), do: :unknown
   # Anything else — a reason CDPEx doesn't produce, or a future shape.
   def classify_error(_other), do: :unknown
 
