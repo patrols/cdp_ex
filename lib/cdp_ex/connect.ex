@@ -20,26 +20,27 @@ defmodule CDPEx.Connect do
   @discovery_timeout 5_000
   @max_body_bytes 1_048_576
 
-  @spec resolve(String.t(), keyword()) ::
+  @spec resolve(String.t(), keyword(), keyword()) ::
           {:ok, String.t()} | {:error, {:connect_discovery_failed, term()}}
-  def resolve(endpoint, tls_opts \\ []) when is_binary(endpoint) do
+  def resolve(endpoint, tls_opts \\ [], opts \\ []) when is_binary(endpoint) do
     case URI.parse(endpoint) do
       %URI{scheme: s, host: host} when s in ["ws", "wss"] and is_binary(host) and host != "" ->
         {:ok, endpoint}
 
       %URI{scheme: s, host: host, port: port} when s in ["http", "https"] and is_binary(host) ->
-        discover(s, host, port, tls_opts)
+        discover(s, host, port, tls_opts, Keyword.get(opts, :timeout, @discovery_timeout))
 
       _ ->
         {:error, {:connect_discovery_failed, {:invalid_endpoint, endpoint}}}
     end
   end
 
-  defp discover(scheme, host, port, tls_opts) do
+  defp discover(scheme, host, port, tls_opts, timeout) do
     {transport, ws_scheme} = if scheme == "https", do: {:https, "wss"}, else: {:http, "ws"}
-    deadline = System.monotonic_time(:millisecond) + @discovery_timeout
+    deadline = System.monotonic_time(:millisecond) + timeout
 
-    with {:ok, conn} <- HTTP1.connect(transport, host, port, connect_opts(transport, tls_opts)),
+    with {:ok, conn} <-
+           HTTP1.connect(transport, host, port, connect_opts(transport, host, tls_opts, timeout)),
          {:ok, conn, ref} <- request(conn),
          {:ok, status, body} <- recv_body(conn, ref, deadline),
          :ok <- check_status(status),
@@ -48,23 +49,37 @@ defmodule CDPEx.Connect do
       {:ok,
        "#{ws_scheme}://#{Protocol.bracket_host(host)}:#{port}#{path}#{query_suffix(uri.query)}"}
     else
-      {:error, reason} -> {:error, {:connect_discovery_failed, reason}}
-      other -> {:error, {:connect_discovery_failed, other}}
+      # Normalize every timeout layer (TCP connect, recv, or the absolute deadline)
+      # to one reason, so callers see a single :discovery_timeout regardless of which
+      # bound tripped first.
+      {:error, %Mint.TransportError{reason: :timeout}} ->
+        {:error, {:connect_discovery_failed, :discovery_timeout}}
+
+      {:error, reason} ->
+        {:error, {:connect_discovery_failed, reason}}
+
+      other ->
+        {:error, {:connect_discovery_failed, other}}
     end
   end
 
   # https discovery honors the same TLS opts (:insecure / :cacertfile / :cacerts) the
   # caller passed to connect/2 — without this, a private-CA /json/version endpoint
   # would fail discovery even when the caller explicitly opted out of verification.
-  # Mint adds SNI + hostname verification itself when verify == :verify_peer.
-  defp connect_opts(:https, tls_opts),
+  # Mint adds hostname verification itself when verify == :verify_peer; SNI is set to
+  # the host (disabled for an IP literal, per Protocol.sni/1). The TCP connect is
+  # bounded by `timeout` too, so a black-hole host can't stall past the deadline.
+  defp connect_opts(:https, host, tls_opts, timeout),
     do: [
       mode: :passive,
-      transport_opts: [{:timeout, @discovery_timeout} | Connection.tls_opts(tls_opts)]
+      transport_opts: [
+        {:timeout, timeout},
+        {:server_name_indication, Protocol.sni(host)} | Connection.tls_opts(tls_opts)
+      ]
     ]
 
-  defp connect_opts(_http, _tls_opts),
-    do: [mode: :passive, transport_opts: [timeout: @discovery_timeout]]
+  defp connect_opts(_http, _host, _tls_opts, timeout),
+    do: [mode: :passive, transport_opts: [timeout: timeout]]
 
   # Issue the GET; on a request failure (after a successful connect) close the conn so
   # the socket isn't leaked. The happy path closes it in recv_body, and a failed

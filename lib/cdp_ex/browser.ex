@@ -15,6 +15,11 @@ defmodule CDPEx.Browser do
   A browser started via `CDPEx.connect/2` (connect-mode, `chrome: nil`) is the
   exception: it never launched Chrome, so `terminate/2` only closes the pages it
   opened and never reaps the remote process — `:brutal_kill` is harmless there.
+  That target cleanup is **best-effort**: each `Target.closeTarget` is bounded by
+  the call timeout, and against a slow-but-alive remote with several open pages the
+  supervised shutdown budget can elapse before every tab is closed, leaving some
+  open on the remote Chrome (it never affects the local process, which holds no
+  Chrome to reap).
 
   Most callers use the `CDPEx` facade rather than this module directly.
   """

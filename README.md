@@ -168,6 +168,11 @@ the OS trust store — pass `:cacertfile` for a private CA, or `insecure: true` 
 skip verification. `with_page([connect: "http://localhost:9222"], fun)` is the
 one-shot form.
 
+> **`http(s)://` discovery is IP/localhost only.** Chrome's DevTools HTTP endpoint
+> returns **403** for a non-IP/non-`localhost` `Host` (DNS-rebinding protection), so
+> for a **named** remote/sidecar/cloud Chrome pass the `ws(s)://` browser URL
+> directly rather than the `http(s)://` discovery form.
+
 ### Under your supervision tree
 
 Because `terminate/2` reaps Chrome, supervise the browser with a `:shutdown`

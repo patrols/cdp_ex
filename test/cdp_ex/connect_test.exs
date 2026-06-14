@@ -53,6 +53,22 @@ defmodule CDPEx.ConnectTest do
     assert {:error, {:connect_discovery_failed, _}} = Connect.resolve("http://#{host}:#{port}")
   end
 
+  test "an oversized /json/version body is rejected by the size cap" do
+    {:ok, %{url: base}} = FixtureServer.start(json_version: :oversized)
+    %URI{host: host, port: port} = URI.parse(base)
+
+    assert {:error, {:connect_discovery_failed, :discovery_body_too_large}} =
+             Connect.resolve("http://#{host}:#{port}")
+  end
+
+  test "a hanging /json/version trips the discovery timeout" do
+    {:ok, %{url: base}} = FixtureServer.start(json_version: :hang)
+    %URI{host: host, port: port} = URI.parse(base)
+
+    assert {:error, {:connect_discovery_failed, :discovery_timeout}} =
+             Connect.resolve("http://#{host}:#{port}", [], timeout: 50)
+  end
+
   test "an unreachable endpoint is a discovery failure" do
     assert {:error, {:connect_discovery_failed, _}} = Connect.resolve("http://127.0.0.1:1")
   end

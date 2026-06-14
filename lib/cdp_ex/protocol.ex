@@ -239,6 +239,19 @@ defmodule CDPEx.Protocol do
   end
 
   @doc """
+  The `:server_name_indication` value for a TLS connection to `host`: the host as a
+  charlist for a DNS name, or `:disable` for an IP literal (RFC 6066 forbids an IP
+  address as an SNI server name, and some TLS peers reject it).
+  """
+  @spec sni(String.t()) :: charlist() | :disable
+  def sni(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, _ip} -> :disable
+      {:error, _} -> String.to_charlist(host)
+    end
+  end
+
+  @doc """
   JavaScript that neutralises `alert`/`confirm`/`prompt` so modal dialogs can't
   block automation. Injected via `Page.addScriptToEvaluateOnNewDocument`.
   """

@@ -194,7 +194,7 @@ defmodule CDPEx.Connection do
   # `wss://` (a remote/TLS DevTools endpoint, see CDPEx.connect/2) connects over
   # `:https`; everything else is plaintext `:http` to a local Chrome.
   defp transport_for("wss", host, opts) do
-    tls = [{:server_name_indication, String.to_charlist(host)} | tls_opts(opts)]
+    tls = [{:server_name_indication, Protocol.sni(host)} | tls_opts(opts)]
     {:https, :wss, [protocols: [:http1], transport_opts: tls]}
   end
 

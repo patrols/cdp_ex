@@ -35,6 +35,14 @@ defmodule CDPEx.FixtureServer do
     end
   end
 
+  # :hang accepts the request then holds the socket without responding, so a client
+  # with a short discovery timeout trips :discovery_timeout deterministically.
+  defp serve(socket, :hang) do
+    _ = HttpFixture.recv_request(socket)
+    Process.sleep(2_000)
+    :gen_tcp.close(socket)
+  end
+
   defp serve(socket, json_version) do
     # Read the full request headers (they may arrive across TCP segments) so the
     # header reflection and auth check are deterministic, then respond.
@@ -102,6 +110,11 @@ defmodule CDPEx.FixtureServer do
 
   defp json_version_response(:server_error),
     do: HttpFixture.http_response("500 Internal Server Error", "boom")
+
+  # > 1 MB body, to trip CDPEx.Connect's @max_body_bytes cap (content is irrelevant —
+  # the cap fires before the body is parsed).
+  defp json_version_response(:oversized),
+    do: HttpFixture.http_response("200 OK", String.duplicate("x", 1_100_000), @json_ct)
 
   defp json_version_response(_ok) do
     body = ~s({"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/browser/FAKE-GUID"})

@@ -148,6 +148,13 @@ defmodule CDPEx.ConnectionTest do
       assert opts[:cacertfile] == "/tmp/ca.pem"
       assert opts[:verify] == :verify_peer
     end
+
+    test "cacerts pins explicit DER-encoded CA certs" do
+      opts = Connection.tls_opts(cacerts: [<<1, 2, 3>>])
+      assert opts[:cacerts] == [<<1, 2, 3>>]
+      assert opts[:verify] == :verify_peer
+      refute Keyword.has_key?(opts, :cacertfile)
+    end
   end
 
   test "subscribe/3 honours an explicit timeout and still registers (#49)", %{

@@ -339,6 +339,15 @@ defmodule CDPEx do
   `stop/1` all work — but `stop/1` only closes the pages cdp_ex opened and drops
   the socket; it never kills the remote Chrome or touches pre-existing tabs.
 
+  > #### http(s) discovery is IP/localhost only {: .warning}
+  >
+  > Chrome's DevTools HTTP endpoint rejects `/json/version` with **403** when the
+  > `Host` header is a non-IP, non-`localhost` name (DNS-rebinding protection), so
+  > the `http(s)://` discovery form works only for IP / `localhost` endpoints (a 403
+  > surfaces as `{:error, {:connect_discovery_failed, {:http_status, 403}}}`). For a
+  > **named** remote/sidecar/cloud host, pass the `ws(s)://` browser URL directly
+  > (or launch that Chrome with a permissive `--remote-allow-origins`/host).
+
   Pages default to `:session` transport; `transport: :dedicated` returns
   `{:error, {:unsupported_transport, :dedicated}}` (not yet supported over a
   connected browser).
