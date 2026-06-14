@@ -245,6 +245,7 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, {:unserializable_value, "10n"}} = Page.evaluate(page, "10n")
       assert {:error, {:unserializable_value, "NaN"}} = Page.evaluate(page, "NaN")
       assert {:error, {:unserializable_value, "Infinity"}} = Page.evaluate(page, "1 / 0")
+      assert {:error, {:unserializable_value, "-0"}} = Page.evaluate(page, "-0")
 
       # call_function/3 delegates to evaluate/3, so it surfaces the same tag.
       assert {:error, {:unserializable_value, "NaN"}} = Page.call_function(page, "() => NaN", [])
