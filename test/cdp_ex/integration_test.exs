@@ -98,6 +98,49 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "connect" do
+    test "connects via http discovery, drives a page, and leaves Chrome alive on stop", %{
+      fixture: fixture
+    } do
+      # A: a normally-launched browser that OWNS the Chrome process.
+      {:ok, a} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(a) end)
+      %{host: host, port: port} = :sys.get_state(a)
+
+      # B: connect to the SAME Chrome via its http endpoint (/json/version discovery).
+      {:ok, b} = CDPEx.connect("http://#{host}:#{port}")
+
+      {:ok, page} = CDPEx.new_page(b, transport: :session)
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+
+      # Dedicated transport is not supported over a connected browser yet.
+      assert {:error, {:unsupported_transport, :dedicated}} =
+               CDPEx.new_page(b, transport: :dedicated)
+
+      # Stopping B must NOT kill the Chrome A owns: A still works afterward.
+      assert :ok = CDPEx.stop(b)
+      assert {:ok, a_page} = CDPEx.new_page(a, transport: :session)
+      {:ok, _} = Page.navigate(a_page, fixture)
+      assert {:ok, "Hello"} = Page.text(a_page, "#greeting")
+    end
+
+    test "with_page(connect:) runs against a running Chrome and leaves it alive", %{fixture: fixture} do
+      {:ok, a} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(a) end)
+      %{host: host, port: port} = :sys.get_state(a)
+
+      result =
+        CDPEx.with_page([connect: "http://#{host}:#{port}"], fn page ->
+          {:ok, _} = Page.navigate(page, fixture)
+          Page.text(page, "#greeting")
+        end)
+
+      assert {:ok, "Hello"} = result
+      assert {:ok, _} = CDPEx.new_page(a, transport: :session)
+    end
+  end
+
   describe "session transport" do
     test "two session pages share one browser connection and stay isolated", %{fixture: fixture} do
       {:ok, browser} = CDPEx.launch()
