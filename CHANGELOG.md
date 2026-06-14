@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-14
+
 ### Breaking
 - `CDPEx.Page.click/3` now dispatches a **trusted** `Input` mouse event by default
   (real `event.isTrusted`, hit-tested at the element's center after scroll-into-view)
@@ -205,7 +207,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/patrols/cdp_ex/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/patrols/cdp_ex/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/patrols/cdp_ex/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/patrols/cdp_ex/compare/v0.5.0...v0.6.0
