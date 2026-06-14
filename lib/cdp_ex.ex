@@ -57,6 +57,7 @@ defmodule CDPEx do
   """
 
   alias CDPEx.Browser
+  alias CDPEx.Connect
   alias CDPEx.Page
   alias CDPEx.Telemetry
 
@@ -111,6 +112,7 @@ defmodule CDPEx do
           | {:conflict, :authenticated | :intercepting}
           | {:navigate, String.t()}
           | {:no_document_response, String.t()}
+          | {:connect_discovery_failed, term()}
           | {:capture_failed, term()}
           | {:idle_wait_failed, term()}
           | {:selector_not_found, String.t()}
@@ -125,6 +127,7 @@ defmodule CDPEx do
           | {:invalid_transport, term()}
           | {:invalid_proxy, term()}
           | {:unsupported_transport, term()}
+          | {:unsupported_with_connect, term()}
           | {:invalid_response_body, String.t()}
           | {:invalid_pdf_data, String.t()}
           | {:invalid_screenshot_data, String.t()}
@@ -176,9 +179,11 @@ defmodule CDPEx do
       crack: an ambiguous navigation `net::ERR_*` (DNS `ERR_NAME_NOT_RESOLVED`,
       `ERR_ABORTED`, `ERR_BLOCKED_BY_*` — unlike the connection-layer codes above), the
       CDP error code (`{:cdp_error, _, _}`), the file-write posix reason
-      (`{:write_failed, _}`), or whether a `{:no_document_response, _}` was a
-      same-document hop or a slow miss. Also covers any term `CDPEx` doesn't produce.
-      Decide the retry policy yourself.
+      (`{:write_failed, _}`), whether a `{:no_document_response, _}` was a
+      same-document hop or a slow miss, or a `connect/2` endpoint-discovery failure
+      (`{:connect_discovery_failed, _}` — a transient network blip and a permanently
+      bad endpoint are indistinguishable here). Also covers any term `CDPEx` doesn't
+      produce. Decide the retry policy yourself.
 
   Retries are the caller's responsibility: bound the attempts and back off. A
   `:transient` result means **re-establish the resource** — open a fresh page/browser
@@ -217,6 +222,7 @@ defmodule CDPEx do
   def classify_error({:invalid_transport, _}), do: :terminal
   def classify_error({:invalid_proxy, _}), do: :terminal
   def classify_error({:unsupported_transport, _}), do: :terminal
+  def classify_error({:unsupported_with_connect, _}), do: :terminal
   def classify_error({:invalid_response_body, _}), do: :terminal
   def classify_error({:invalid_pdf_data, _}), do: :terminal
   def classify_error({:invalid_screenshot_data, _}), do: :terminal
@@ -240,6 +246,7 @@ defmodule CDPEx do
   def classify_error({:cdp_error, _, _}), do: :unknown
   def classify_error({:write_failed, _}), do: :unknown
   def classify_error({:no_document_response, _}), do: :unknown
+  def classify_error({:connect_discovery_failed, _}), do: :unknown
   # Anything else — a reason CDPEx doesn't produce, or a future shape.
   def classify_error(_other), do: :unknown
 
@@ -322,7 +329,53 @@ defmodule CDPEx do
   defp launch_metadata({:error, reason}), do: %{error: reason}
   defp launch_metadata(:ignore), do: %{error: :ignore}
 
-  @doc "Stops a browser started with `launch/1`, closing all pages and killing Chrome."
+  @doc """
+  Connects to an already-running Chrome instead of launching one.
+
+  `endpoint` is either a `ws://`/`wss://` browser WebSocket URL (used directly) or
+  an `http://`/`https://` base URL (the browser socket is discovered via
+  `GET /json/version`, with the host/port taken from `endpoint`). Returns the same
+  handle as `launch/1`, so `new_page/2`, `with_page/3`, `close_page/2`, and
+  `stop/1` all work — but `stop/1` only closes the pages cdp_ex opened and drops
+  the socket; it never kills the remote Chrome or touches pre-existing tabs.
+
+  > #### http(s) discovery is IP/localhost only {: .warning}
+  >
+  > Chrome's DevTools HTTP endpoint rejects `/json/version` with **403** when the
+  > `Host` header is a non-IP, non-`localhost` name (DNS-rebinding protection), so
+  > the `http(s)://` discovery form works only for IP / `localhost` endpoints (a 403
+  > surfaces as `{:error, {:connect_discovery_failed, {:http_status, 403}}}`). For a
+  > **named** remote/sidecar/cloud host, pass the `ws(s)://` browser URL directly
+  > (or launch that Chrome with a permissive `--remote-allow-origins`/host).
+
+  Pages default to `:session` transport; `transport: :dedicated` returns
+  `{:error, {:unsupported_transport, :dedicated}}` (not yet supported over a
+  connected browser).
+
+  Options: `:insecure` (skip `wss://` cert verification, default `false`),
+  `:cacertfile` / `:cacerts` (custom CA for `wss://`), `:discovery_timeout` (ceiling
+  in ms for the whole `http(s)://` `/json/version` exchange — TCP connect, recv, and
+  body — default `5_000`; raise it for a slow remote endpoint), `:name` (register the
+  process).
+  """
+  @spec connect(String.t(), keyword()) :: GenServer.on_start()
+  def connect(endpoint, opts \\ []) when is_binary(endpoint) do
+    Telemetry.span(:connect, %{}, fn ->
+      {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
+      {disc_timeout, opts} = Keyword.pop(opts, :discovery_timeout)
+      disc_opts = if disc_timeout, do: [timeout: disc_timeout], else: []
+
+      result =
+        case Connect.resolve(endpoint, tls_opts, disc_opts) do
+          {:ok, ws_url} -> Browser.start_link([connect: ws_url, conn_opts: tls_opts] ++ opts)
+          {:error, _} = error -> error
+        end
+
+      {result, launch_metadata(result)}
+    end)
+  end
+
+  @doc "Stops a browser started with `launch/1` (kills Chrome) or `connect/2` (closes the pages it opened, leaves Chrome running)."
   @spec stop(pid()) :: :ok
   def stop(browser), do: Browser.stop(browser)
 
@@ -343,8 +396,11 @@ defmodule CDPEx do
   options, the browser) is cleaned up afterwards — even if `fun` raises.
 
   Pass an existing browser pid to reuse it, or a keyword list of launch options
-  to spin up a throwaway browser for the duration of the call. Returns whatever
-  `fun` returns, or `{:error, reason}` if the page/browser could not be created.
+  to spin up a throwaway browser for the duration of the call. A `[connect:
+  endpoint]` list attaches to an already-running Chrome instead of launching one
+  (see `connect/2`); teardown then closes only the pages it opened and never reaps
+  that Chrome. Returns whatever `fun` returns, or `{:error, reason}` if the
+  page/browser could not be created.
 
   With launch options, the throwaway browser is linked but **contained**: if it
   crashes during the call (e.g. its connection drops) `with_page` returns
@@ -364,6 +420,9 @@ defmodule CDPEx do
 
       # throwaway browser + page
       CDPEx.with_page([headless: true], &CDPEx.Page.html/1)
+
+      # against an existing Chrome (discovered via /json/version)
+      CDPEx.with_page([connect: "http://localhost:9222"], &CDPEx.Page.html/1)
   """
   @spec with_page(pid() | keyword(), (Page.t() -> result), keyword()) ::
           result | {:error, term()}
@@ -387,7 +446,16 @@ defmodule CDPEx do
   end
 
   def with_page(launch_opts, fun, opts) when is_list(launch_opts) and is_function(fun, 1) do
-    case launch(launch_opts) do
+    # `[connect: endpoint]` attaches to a running Chrome instead of launching one;
+    # the resource-safe trap/stop/drain machinery below is identical (stop/1 on a
+    # connected browser closes only the pages we opened — it never kills Chrome).
+    start =
+      case Keyword.pop(launch_opts, :connect) do
+        {nil, _} -> fn -> launch(launch_opts) end
+        {endpoint, rest} -> fn -> connect(endpoint, rest) end
+      end
+
+    case start.() do
       {:ok, browser} ->
         # launch/1 links `browser` to us. Trap exits for the duration of this call
         # so a browser crash (e.g. its connection dropping mid-call) arrives as a

@@ -22,6 +22,12 @@ defmodule CDPEx.Telemetry do
   failed. A failed launch still completes through `:stop` (the browser never started);
   only a raised exception emits `:exception`.
 
+  ### `[:cdp_ex, :connect, :start | :stop | :exception]`
+
+  A span around `CDPEx.connect/2` — endpoint discovery plus the WebSocket connect.
+  Same `:stop` metadata shape as `:launch` (`%{}` on success, `%{error: reason}` on
+  failure).
+
   ### `[:cdp_ex, :navigate, :start | :stop | :exception]`
 
   A span around `CDPEx.Page.navigate/3`.
@@ -83,12 +89,12 @@ defmodule CDPEx.Telemetry do
   @moduledoc since: "0.4.0"
 
   @typedoc "The CDPEx operations wrapped in a `:telemetry` span."
-  @type span_name :: :launch | :navigate
+  @type span_name :: :launch | :connect | :navigate
 
   @doc false
   @spec span(span_name(), :telemetry.event_metadata(), (-> {result, map()})) :: result
         when result: var
-  def span(name, start_metadata, fun) when name in [:launch, :navigate] do
+  def span(name, start_metadata, fun) when name in [:launch, :connect, :navigate] do
     :telemetry.span([:cdp_ex, name], start_metadata, fun)
   end
 

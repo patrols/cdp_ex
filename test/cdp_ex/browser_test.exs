@@ -28,6 +28,19 @@ defmodule CDPEx.BrowserTest do
       assert {:reply, {:error, {:unsupported_transport, :session}}, ^state} =
                Browser.handle_call({:new_page, [transport: :session]}, {self(), make_ref()}, state)
     end
+
+    test "a :dedicated page is rejected on a connected (chrome-less) browser" do
+      # Connect-mode can't open a dedicated page yet (its socket would have to target
+      # the remote host); the rejection keys on `connected`, before any I/O.
+      state = %Browser{connected: true}
+
+      assert {:reply, {:error, {:unsupported_transport, :dedicated}}, ^state} =
+               Browser.handle_call(
+                 {:new_page, [transport: :dedicated]},
+                 {self(), make_ref()},
+                 state
+               )
+    end
   end
 
   describe "launch/1 :proxy validation" do
@@ -46,6 +59,18 @@ defmodule CDPEx.BrowserTest do
 
       assert {:error, {:invalid_proxy, :args_override}} =
                Browser.start_link(proxy: "http://host:8080", args: ["--headless=new"])
+    end
+
+    test "combining :proxy with :connect is rejected without launching Chrome" do
+      # --proxy-server is a launch flag; connect-mode launches no Chrome, so it could
+      # never take effect. init/1 rejects the combination before any connect attempt.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {:unsupported_with_connect, :proxy}} =
+               Browser.start_link(
+                 connect: "ws://127.0.0.1:1/devtools/browser/x",
+                 proxy: "http://u:p@host:8080"
+               )
     end
   end
 

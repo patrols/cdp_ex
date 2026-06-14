@@ -132,6 +132,31 @@ defmodule CDPEx.ConnectionTest do
     assert_receive {:cdp_event, ^conn, "Page.lifecycleEvent", %{"name" => "load"}, nil}, 2_000
   end
 
+  describe "tls_opts/1" do
+    test "verifies the peer via the OS trust store by default" do
+      opts = Connection.tls_opts([])
+      assert opts[:verify] == :verify_peer
+      assert is_list(opts[:cacerts]) and opts[:cacerts] != []
+    end
+
+    test "insecure: true disables verification" do
+      assert Connection.tls_opts(insecure: true)[:verify] == :verify_none
+    end
+
+    test "cacertfile overrides the CA source" do
+      opts = Connection.tls_opts(cacertfile: "/tmp/ca.pem")
+      assert opts[:cacertfile] == "/tmp/ca.pem"
+      assert opts[:verify] == :verify_peer
+    end
+
+    test "cacerts pins explicit DER-encoded CA certs" do
+      opts = Connection.tls_opts(cacerts: [<<1, 2, 3>>])
+      assert opts[:cacerts] == [<<1, 2, 3>>]
+      assert opts[:verify] == :verify_peer
+      refute Keyword.has_key?(opts, :cacertfile)
+    end
+  end
+
   test "subscribe/3 honours an explicit timeout and still registers (#49)", %{
     conn: conn,
     fake: fake

@@ -12,31 +12,42 @@ defmodule CDPEx.FixtureServer do
 
   alias CDPEx.HttpFixture
 
-  @spec start() :: {:ok, %{port: non_neg_integer(), url: String.t()}}
-  def start do
+  @spec start(keyword()) :: {:ok, %{port: non_neg_integer(), url: String.t()}}
+  def start(opts \\ []) do
+    # `:json_version` selects the /json/version variant the connect-discovery tests
+    # exercise: :ok (default), :no_key, :non_string, :with_query, :server_error.
+    json_version = Keyword.get(opts, :json_version, :ok)
     {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
-    pid = spawn_link(fn -> accept_loop(listen) end)
+    pid = spawn_link(fn -> accept_loop(listen, json_version) end)
     _ = :gen_tcp.controlling_process(listen, pid)
     {:ok, %{port: port, url: "http://127.0.0.1:#{port}/"}}
   end
 
-  defp accept_loop(listen) do
+  defp accept_loop(listen, json_version) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        spawn(fn -> serve(socket) end)
-        accept_loop(listen)
+        spawn(fn -> serve(socket, json_version) end)
+        accept_loop(listen, json_version)
 
       {:error, :closed} ->
         :ok
     end
   end
 
-  defp serve(socket) do
+  # :hang accepts the request then holds the socket without responding, so a client
+  # with a short discovery timeout trips :discovery_timeout deterministically.
+  defp serve(socket, :hang) do
+    _ = HttpFixture.recv_request(socket)
+    Process.sleep(2_000)
+    :gen_tcp.close(socket)
+  end
+
+  defp serve(socket, json_version) do
     # Read the full request headers (they may arrive across TCP segments) so the
     # header reflection and auth check are deterministic, then respond.
     request = HttpFixture.recv_request(socket)
-    _ = :gen_tcp.send(socket, respond(request))
+    _ = :gen_tcp.send(socket, respond(request, json_version))
     :gen_tcp.close(socket)
   end
 
@@ -52,7 +63,7 @@ defmodule CDPEx.FixtureServer do
   #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
   #     wait_for_response/3 and wait_for_network_idle/2 paths.
   #   anything else serves the page.
-  defp respond(request) do
+  defp respond(request, json_version) do
     path = request_path(request)
 
     cond do
@@ -73,9 +84,41 @@ defmodule CDPEx.FixtureServer do
       String.starts_with?(path, "/data") ->
         HttpFixture.http_response("200 OK", "fetched-data")
 
+      String.starts_with?(path, "/json/version") ->
+        json_version_response(json_version)
+
       true ->
         HttpFixture.http_response("200 OK", render(request))
     end
+  end
+
+  @json_ct ["Content-Type: application/json"]
+
+  # The host/port in the returned ws URL are deliberately bogus (127.0.0.1:1):
+  # CDPEx.Connect must rewrite them to the endpoint's host/port, keeping only the
+  # discovered path (and query).
+  defp json_version_response(:no_key),
+    do: HttpFixture.http_response("200 OK", ~s({"browser":"Chrome/1.0"}), @json_ct)
+
+  defp json_version_response(:non_string),
+    do: HttpFixture.http_response("200 OK", ~s({"webSocketDebuggerUrl":123}), @json_ct)
+
+  defp json_version_response(:with_query) do
+    body = ~s({"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/browser/GUID?token=abc"})
+    HttpFixture.http_response("200 OK", body, @json_ct)
+  end
+
+  defp json_version_response(:server_error),
+    do: HttpFixture.http_response("500 Internal Server Error", "boom")
+
+  # > 1 MB body, to trip CDPEx.Connect's @max_body_bytes cap (content is irrelevant —
+  # the cap fires before the body is parsed).
+  defp json_version_response(:oversized),
+    do: HttpFixture.http_response("200 OK", String.duplicate("x", 1_100_000), @json_ct)
+
+  defp json_version_response(_ok) do
+    body = ~s({"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/browser/FAKE-GUID"})
+    HttpFixture.http_response("200 OK", body, @json_ct)
   end
 
   defp authorized?(request), do: HttpFixture.header_value(request, "authorization") == @basic_auth

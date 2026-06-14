@@ -47,6 +47,10 @@ Playwright or Puppeteer), that's the gap CDPEx fills.
 > with `new_page(browser, transport: :session)`; the trade-off is shared fate (a
 > dropped browser connection drops all of its session pages).
 >
+> **Connect to a running Chrome:** attach to a Chrome you didn't launch — local,
+> a sidecar, or a remote/cloud `wss://` endpoint — with `connect/2` (`:session`
+> transport; it never reaps a process it didn't start). See below.
+>
 > Stealth / anti-fingerprinting presets remain out of scope for now (evidence-gated).
 
 ## Installation
@@ -143,6 +147,36 @@ even if the function raises:
 :ok = CDPEx.close_page(browser, page)
 :ok = CDPEx.stop(browser)
 ```
+
+### Connecting to an existing Chrome
+
+Drive a Chrome that CDPEx didn't launch — one you started yourself, a sidecar
+container, or a cloud browser provider — with `connect/2`:
+
+```elixir
+# An http(s):// base URL is discovered via GET /json/version:
+{:ok, browser} = CDPEx.connect("http://localhost:9222")
+# …or pass the browser WebSocket URL directly (ws:// or, for a TLS endpoint, wss://):
+{:ok, browser} = CDPEx.connect("wss://chrome.example.com/cdp?token=…")
+
+{:ok, page} = CDPEx.new_page(browser, transport: :session)
+{:ok, _}    = CDPEx.Page.navigate(page, "https://example.com")
+
+# stop/1 closes the pages YOU opened and disconnects — it never kills that Chrome.
+:ok = CDPEx.stop(browser)
+```
+
+A connected browser uses `:session` transport (many pages over the one socket);
+`:dedicated` over a connection isn't supported yet. `wss://` is verified against
+the OS trust store — pass `:cacertfile` for a private CA, or `insecure: true` to
+skip verification. Raise `:discovery_timeout` (default `5_000` ms) for a slow
+remote `/json/version`. `with_page([connect: "http://localhost:9222"], fun)` is the
+one-shot form.
+
+> **`http(s)://` discovery is IP/localhost only.** Chrome's DevTools HTTP endpoint
+> returns **403** for a non-IP/non-`localhost` `Host` (DNS-rebinding protection), so
+> for a **named** remote/sidecar/cloud Chrome pass the `ws(s)://` browser URL
+> directly rather than the `http(s)://` discovery form.
 
 ### Under your supervision tree
 
@@ -327,8 +361,9 @@ handle — a dead page keeps returning `:noproc`.
 
 CDPEx emits [`:telemetry`](https://hexdocs.pm/telemetry) events and attaches no
 handlers; attach your own to record them (emitting with nothing attached is a no-op).
-Events: `[:cdp_ex, :launch, …]` and `[:cdp_ex, :navigate, …]` spans,
-`[:cdp_ex, :page, :start | :stop]`, and `[:cdp_ex, :error]`. See
+Events: `[:cdp_ex, :launch, …]`, `[:cdp_ex, :connect, …]`, and
+`[:cdp_ex, :navigate, …]` spans, `[:cdp_ex, :page, :start | :stop]`, and
+`[:cdp_ex, :error]`. See
 [`CDPEx.Telemetry`](https://hexdocs.pm/cdp_ex/CDPEx.Telemetry.html) for the full
 taxonomy (measurements + metadata).
 

@@ -132,24 +132,56 @@ defmodule CDPEx.ProtocolTest do
   end
 
   describe "parse_ws_url/1" do
-    test "splits host, port, and path" do
+    test "splits scheme, host, port, and path" do
       assert Protocol.parse_ws_url("ws://127.0.0.1:9222/devtools/browser/abc-123") ==
-               {"127.0.0.1", 9222, "/devtools/browser/abc-123"}
+               {"ws", "127.0.0.1", 9222, "/devtools/browser/abc-123"}
     end
 
     test "handles a page target path" do
       assert Protocol.parse_ws_url("ws://localhost:5000/devtools/page/DEADBEEF") ==
-               {"localhost", 5000, "/devtools/page/DEADBEEF"}
+               {"ws", "localhost", 5000, "/devtools/page/DEADBEEF"}
     end
 
-    test "rejects wss:// (no remote/TLS endpoint support yet)" do
-      assert_raise ArgumentError, ~r{ws:// URL}, fn ->
-        Protocol.parse_ws_url("wss://127.0.0.1:9222/devtools/browser/abc-123")
-      end
+    test "accepts wss:// and reports the scheme" do
+      assert Protocol.parse_ws_url("wss://example.com:443/devtools/browser/abc") ==
+               {"wss", "example.com", 443, "/devtools/browser/abc"}
     end
 
-    test "rejects a non-ws scheme" do
+    test "carries the query string into the request target (token-auth cloud endpoints)" do
+      assert Protocol.parse_ws_url("wss://chrome.example.com/cdp?token=abc") ==
+               {"wss", "chrome.example.com", 443, "/cdp?token=abc"}
+    end
+
+    test "a query with no explicit path targets / plus the query" do
+      assert Protocol.parse_ws_url("wss://chrome.browserless.io?token=X") ==
+               {"wss", "chrome.browserless.io", 443, "/?token=X"}
+    end
+
+    test "rejects a non-ws(s) scheme" do
       assert_raise ArgumentError, fn -> Protocol.parse_ws_url("http://127.0.0.1:9222/x") end
+    end
+  end
+
+  describe "bracket_host/1" do
+    test "brackets an IPv6 literal" do
+      assert Protocol.bracket_host("::1") == "[::1]"
+      assert Protocol.bracket_host("fe80::1") == "[fe80::1]"
+    end
+
+    test "passes a non-IPv6 host through unchanged" do
+      assert Protocol.bracket_host("127.0.0.1") == "127.0.0.1"
+      assert Protocol.bracket_host("localhost") == "localhost"
+    end
+  end
+
+  describe "sni/1" do
+    test "disables SNI for IP literals (RFC 6066)" do
+      assert Protocol.sni("127.0.0.1") == :disable
+      assert Protocol.sni("::1") == :disable
+    end
+
+    test "keeps a DNS name as a charlist" do
+      assert Protocol.sni("chrome.example.com") == ~c"chrome.example.com"
     end
   end
 

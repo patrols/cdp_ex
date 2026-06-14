@@ -55,6 +55,7 @@ defmodule CDPExTest do
       {:invalid_transport, :bogus},
       {:invalid_proxy, {:malformed_url, "nope"}},
       {:unsupported_transport, :session},
+      {:unsupported_with_connect, :proxy},
       {:invalid_response_body, "not-base64"},
       {:invalid_pdf_data, "not-base64"},
       {:invalid_screenshot_data, "not-base64"},
@@ -75,7 +76,8 @@ defmodule CDPExTest do
       {:cdp_error, "Page.navigate", %{"code" => -32_000, "message" => "boom"}},
       {:write_failed, :eacces},
       {:write_failed, :enospc},
-      {:no_document_response, "https://example.com/#hash"}
+      {:no_document_response, "https://example.com/#hash"},
+      {:connect_discovery_failed, :econnrefused}
     ]
 
     # Reasons CDPEx never produces — a future shape or a foreign wrapped term.

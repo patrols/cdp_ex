@@ -12,8 +12,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of a synthetic `el.click()`. Pass `trusted: false` for the old synthetic
   behavior. A trusted click can newly fail with `{:error, {:not_clickable, css}}`
   for an element with no usable box (zero-size / off-screen even after scroll) (#72).
+- `CDPEx.Protocol.parse_ws_url/1` now returns a 4-tuple `{scheme, host, port, target}`
+  (was `{host, port, path}`) and accepts `wss://` again (reversing the 0.8.0
+  rejection), enabling TLS DevTools endpoints / cloud browser providers behind
+  `connect/2`. The added leading `scheme` element is a breaking change for any caller
+  destructuring the old 3-tuple — update `{host, port, path} = parse_ws_url(url)` to
+  `{_scheme, host, port, target} = parse_ws_url(url)`. The fourth element is now the
+  WebSocket request target (path **plus any `?query`**), so a token-bearing cloud
+  endpoint (`wss://host/cdp?token=…`) keeps its query through the upgrade (#73).
 
 ### Added
+- `CDPEx.connect/2` — drive an already-running Chrome instead of launching one.
+  Accepts a `ws://`/`wss://` browser URL or an `http://`/`https://` base URL
+  (discovered via `GET /json/version`). Returns the same handle as `launch/1`;
+  `stop/1` closes only the pages cdp_ex opened and never reaps the remote Chrome.
+  Pages default to `:session` transport (`:dedicated` over a connected browser is
+  not yet supported — returns `{:error, {:unsupported_transport, :dedicated}}`).
+  `wss://` is verified against the OS trust store (`:public_key.cacerts_get()`),
+  with `:insecure` / `:cacertfile` / `:cacerts` escape hatches; `:discovery_timeout`
+  bounds a slow remote `/json/version`. A failed endpoint
+  discovery returns `{:error, {:connect_discovery_failed, reason}}` (classified
+  `:unknown`). Combining `:proxy` with `:connect` is rejected with
+  `{:error, {:unsupported_with_connect, :proxy}}` (a `--proxy-server` flag can't
+  apply to a Chrome cdp_ex didn't launch). `with_page([connect: endpoint], fun)` is
+  the one-shot form (#73).
 - `CDPEx.Page.type/4` — focus an element and enter text via `Input.insertText` (#72).
 - `CDPEx.Page.press/4` — press a named key (`Enter`, `Tab`, `Escape`, `Backspace`,
   `Delete`, the arrows, `Home`, `End`) with real `keyDown`/`keyUp` events; a `nil`
@@ -21,6 +43,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{:error, {:unknown_key, key}}` (#72).
 
 ### Fixed
+- The page WebSocket URL now brackets an IPv6 host (`ws://[::1]:9222/…`) instead
+  of producing a malformed `ws://::1:9222/…`, so a `:dedicated` page can be opened
+  against a Chrome bound to an IPv6 address (#73).
 - `CDPEx.Page.observe_network/2` now scopes its subscription to the page's
   session, so on a `:session`-transport connection a caller receives only that
   page's `Network` events instead of every session's on the shared socket.

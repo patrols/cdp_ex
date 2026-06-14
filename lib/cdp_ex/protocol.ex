@@ -192,35 +192,62 @@ defmodule CDPEx.Protocol do
   def evaluate_result(other), do: {:error, {:unexpected_evaluate, other}}
 
   @doc """
-  Splits a Chrome DevTools `ws://` URL into `{host, port, path}`.
+  Splits a Chrome DevTools `ws://` or `wss://` URL into `{scheme, host, port, target}`.
 
   Uses `URI.parse/1`, so IPv6 hosts, explicit ports, and paths are handled
-  correctly; a non-`ws://` URL or one missing a host/port raises `ArgumentError`.
+  correctly; a non-`ws(s)://` URL or one missing a host/port raises `ArgumentError`.
+  `wss://` denotes a remote/TLS DevTools endpoint (see `CDPEx.connect/2`).
 
-  Only `ws://` is accepted: CDPEx launches a local Chrome and talks plaintext to
-  its `DevToolsActivePort` (no TLS). `wss://` — a remote/TLS DevTools endpoint —
-  has no entry point yet (tracked in
-  [#73](https://github.com/patrols/cdp_ex/issues/73)).
+  The fourth element is the WebSocket-upgrade **request target** — the path *plus
+  any `?query`* — so a token-bearing cloud endpoint
+  (`wss://host/cdp?token=…`) reaches the provider with its query intact.
 
   ## Examples
 
       iex> CDPEx.Protocol.parse_ws_url("ws://127.0.0.1:9222/devtools/browser/abc-123")
-      {"127.0.0.1", 9222, "/devtools/browser/abc-123"}
+      {"ws", "127.0.0.1", 9222, "/devtools/browser/abc-123"}
 
-      iex> CDPEx.Protocol.parse_ws_url("ws://[::1]:9222/devtools/browser/abc")
-      {"::1", 9222, "/devtools/browser/abc"}
+      iex> CDPEx.Protocol.parse_ws_url("wss://[::1]:9222/devtools/browser/abc")
+      {"wss", "::1", 9222, "/devtools/browser/abc"}
+
+      iex> CDPEx.Protocol.parse_ws_url("wss://chrome.example.com/cdp?token=abc")
+      {"wss", "chrome.example.com", 443, "/cdp?token=abc"}
   """
-  @spec parse_ws_url(String.t()) :: {String.t(), pos_integer(), String.t()}
+  @spec parse_ws_url(String.t()) :: {String.t(), String.t(), pos_integer(), String.t()}
   def parse_ws_url(ws_url) when is_binary(ws_url) do
     case URI.parse(ws_url) do
-      %URI{scheme: "ws", host: host, port: port, path: path}
-      when is_binary(host) and host != "" and is_integer(port) ->
-        {host, port, path || "/"}
+      %URI{scheme: scheme, host: host, port: port, path: path, query: query}
+      when scheme in ["ws", "wss"] and is_binary(host) and host != "" and is_integer(port) ->
+        {scheme, host, port, request_target(path, query)}
 
       _ ->
         raise ArgumentError,
-              "expected a ws:// URL with a host and port (wss:// / remote endpoints " <>
-                "are not supported yet), got: #{inspect(ws_url)}"
+              "expected a ws:// or wss:// URL with a host and port, got: #{inspect(ws_url)}"
+    end
+  end
+
+  defp request_target(path, nil), do: path || "/"
+  defp request_target(path, query), do: "#{path || "/"}?#{query}"
+
+  @doc """
+  Brackets an IPv6 host literal so it can be interpolated into a URL
+  (`::1` -> `[::1]`); other hosts pass through unchanged.
+  """
+  @spec bracket_host(String.t()) :: String.t()
+  def bracket_host(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
+  end
+
+  @doc """
+  The `:server_name_indication` value for a TLS connection to `host`: the host as a
+  charlist for a DNS name, or `:disable` for an IP literal (RFC 6066 forbids an IP
+  address as an SNI server name, and some TLS peers reject it).
+  """
+  @spec sni(String.t()) :: charlist() | :disable
+  def sni(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, _ip} -> :disable
+      {:error, _} -> String.to_charlist(host)
     end
   end
 
