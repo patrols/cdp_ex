@@ -53,7 +53,7 @@ defmodule CDPEx do
   > Pages default to one WebSocket each (strong crash isolation); opt into
   > `sessionId` multiplexing (many pages over the one browser socket) with
   > `new_page(browser, transport: :session)`, trading isolation for fewer sockets.
-  > Connection pooling, network interception, and stealth remain out of scope.
+  > Stealth / anti-fingerprinting presets remain out of scope.
   """
 
   alias CDPEx.Browser

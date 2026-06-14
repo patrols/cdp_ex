@@ -125,6 +125,10 @@ defmodule CDPEx.Connection do
   tell those apart.
 
   Pass `opts` with `session_id: sid` to only match events from that session.
+
+  Keep `matcher` fast and side-effect-free: it runs inside the connection process
+  for each candidate event, so a slow or blocking matcher stalls the socket — and,
+  on a `:session`-transport connection, every page sharing it.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
           {:ok, map()} | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}

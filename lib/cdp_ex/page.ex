@@ -1095,6 +1095,10 @@ defmodule CDPEx.Page do
     * a **`Regex`** (matched against the URL), or
     * a **binary** substring (matched with `String.contains?/2`).
 
+  A function `matcher` runs inside the connection process for each candidate
+  response, so keep it fast and side-effect-free (a slow matcher stalls the
+  socket, and every page on a `:session`-transport connection with it).
+
   Returns `{:ok, params}` — the full `Network.responseReceived` params (HTTP status
   under `params["response"]["status"]`, request id under `params["requestId"]`) — or
   `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
