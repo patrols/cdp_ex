@@ -453,6 +453,48 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, :timeout} = Page.wait_for_selector(page, "#does-not-exist", timeout: 300)
     end
 
+    test "wait_for_selector matches attribute selectors regardless of CSS quote style", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      # Single-quoted attribute value — the selector itself contains characters
+      # ('\'') that must not corrupt the JS expression injected into Runtime.evaluate.
+      assert :ok = Page.wait_for_selector(page, "[id^='ticket-card-']", timeout: 2_000)
+
+      # Double-quoted attribute value — same property, with the inner-quote char
+      # swapped. A single-pattern JS literal can only escape one of the two safely.
+      assert :ok = Page.wait_for_selector(page, ~S([id^="ticket-card-"]), timeout: 2_000)
+
+      # A double-quoted attribute selector whose value contains a space.
+      assert :ok = Page.wait_for_selector(page, ~S([data-name="foo bar"]), timeout: 2_000)
+
+      # The deepest case: a double-quoted attribute selector whose value itself
+      # contains a literal quote character (`a'b`). This is exactly what a naive
+      # string-concat path is most likely to break on.
+      assert :ok = Page.wait_for_selector(page, ~S([data-label="a'b"]), timeout: 2_000)
+    end
+
+    test "wait_for_selector surfaces a JS exception instead of polling forever", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      # A syntactically invalid CSS selector that querySelector throws on.
+      # (Chrome is lenient about some malformed selectors — e.g. an unclosed
+      # `[foo` returns null silently — so pick one that actually throws.) The
+      # fatal arm returns the exception instantly, so a passing run never nears
+      # the timeout; the short 2s ceiling only bounds a regression. Asserting on
+      # the SyntaxError text makes a future Chrome-leniency change fail loudly
+      # here rather than silently degrade into a slow not-found timeout.
+      assert {:error, {:evaluate_exception, details}} =
+               Page.wait_for_selector(page, ":::", timeout: 2_000)
+
+      assert get_in(details, ["exception", "description"]) =~ "not a valid selector"
+    end
+
     test "wait_for_function resolves when truthy and times out otherwise", %{
       page: page,
       fixture: fixture
