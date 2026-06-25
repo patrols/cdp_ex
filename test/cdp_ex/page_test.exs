@@ -211,6 +211,21 @@ defmodule CDPEx.PageTest do
       )
     end
 
+    test "encodes an attribute value that itself contains a quote character", %{
+      page: page,
+      fake: fake
+    } do
+      # The deepest case: a double-quoted attribute selector whose value carries a
+      # literal single quote (`a'b`). JSON escapes only the wrapping double quotes,
+      # leaving the inner single quote untouched — pinned here Chrome-free.
+      assert_wait_for_selector_expression(
+        page,
+        fake,
+        ~S([data-label="a'b"]),
+        ~s{!!(document.querySelector("[data-label=\\"a'b\\"]") !== null)}
+      )
+    end
+
     test "surfaces an exceptionDetails response as :fatal instead of polling on", %{
       page: page,
       fake: fake
@@ -239,6 +254,39 @@ defmodule CDPEx.PageTest do
       )
 
       assert {:error, {:evaluate_exception, ^exception_details}} = Task.await(task, 2_000)
+    end
+
+    test "keeps polling on a transient cdp_error, then resolves when the element appears", %{
+      page: page,
+      fake: fake
+    } do
+      # The mirror of the exceptionDetails case: a CDP-level error (e.g. the
+      # execution context is being rebuilt mid-navigation) is transient, so the
+      # wait must keep polling rather than surface it. Answer the first
+      # Runtime.evaluate with a CDP error, prove a SECOND evaluate is issued
+      # (it polled on), then resolve truthy. A regression that merged the
+      # transient and fatal arms of probe_truthy/2 would terminate on the first
+      # error and never issue the second poll — failing this test.
+      task =
+        Task.async(fn ->
+          Page.wait_for_selector(page, "#late", timeout: 2_000, interval: 10)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id1, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id1},"error":{"code":-32000,"message":"Cannot find context with specified id"}})
+      )
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id2, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id2},"result":{"result":{"type":"boolean","value":true}}})
+      )
+
+      assert :ok = Task.await(task, 2_000)
     end
   end
 

@@ -153,6 +153,7 @@ defmodule CDPEx.FixtureServer do
         <div id="ticket-card-abc">card-abc</div>
         <div id="ticket-card-def">card-def</div>
         <div data-name="foo bar">named</div>
+        <div data-label="a'b">named-quote</div>
       </body>
     </html>
     """

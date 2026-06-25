@@ -467,9 +467,13 @@ defmodule CDPEx.IntegrationTest do
       # swapped. A single-pattern JS literal can only escape one of the two safely.
       assert :ok = Page.wait_for_selector(page, ~S([id^="ticket-card-"]), timeout: 2_000)
 
-      # An attribute value that itself contains a literal embedded quote, which
-      # any naive string-concat path would break on.
+      # A double-quoted attribute selector whose value contains a space.
       assert :ok = Page.wait_for_selector(page, ~S([data-name="foo bar"]), timeout: 2_000)
+
+      # The deepest case: a double-quoted attribute selector whose value itself
+      # contains a literal quote character (`a'b`). This is exactly what a naive
+      # string-concat path is most likely to break on.
+      assert :ok = Page.wait_for_selector(page, ~S([data-label="a'b"]), timeout: 2_000)
     end
 
     test "wait_for_selector surfaces a JS exception instead of polling forever", %{
