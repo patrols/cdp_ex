@@ -632,9 +632,17 @@ defmodule CDPEx.Page do
   @doc """
   Polls until `css` matches an element, or `timeout` elapses.
 
+  The selector is `Jason.encode!`-ed into the injected `document.querySelector(...)`
+  call, so quote characters in attribute selectors (`[id^='ticket-card-']`,
+  `[data-x="foo"]`) reach the page intact — no naive string concatenation.
+
   Returns `:ok`, `{:error, :timeout}`, or `{:error, reason}` if a non-transient
-  evaluate error occurs (e.g. the connection drops). Options: `:timeout`
-  (default 5_000), `:interval` (poll interval ms, default 100).
+  evaluate error occurs — including `{:error, {:evaluate_exception, _}}` when
+  `querySelector` itself throws (e.g. a syntactically invalid CSS selector). A
+  transient CDP error (e.g. the execution context is rebuilding mid-navigation)
+  keeps polling; a thrown JS exception is fatal so a bad selector doesn't hide as
+  a perpetual no-match. Options: `:timeout` (default 5_000), `:interval` (poll
+  interval ms, default 100).
   """
   @spec wait_for_selector(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_selector(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do

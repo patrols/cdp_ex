@@ -182,6 +182,66 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "wait_for_selector/3 encoding" do
+    # These tests pin the wire-level Runtime.evaluate expression so the selector's
+    # quote characters can't be re-introduced into the JS source by a future refactor
+    # that drops the Jason.encode! boundary. They run without Chrome so they always
+    # run in CI's default lane, unlike the integration coverage.
+    test "encodes a single-quoted attribute selector as a double-quoted JS string", %{
+      page: page,
+      fake: fake
+    } do
+      assert_wait_for_selector_expression(
+        page,
+        fake,
+        "[id^='ticket-card-']",
+        ~s{!!(document.querySelector("[id^='ticket-card-']") !== null)}
+      )
+    end
+
+    test "encodes a double-quoted attribute selector by escaping the embedded quotes", %{
+      page: page,
+      fake: fake
+    } do
+      assert_wait_for_selector_expression(
+        page,
+        fake,
+        ~S([id^="ticket-card-"]),
+        ~s{!!(document.querySelector("[id^=\\"ticket-card-\\"]") !== null)}
+      )
+    end
+
+    test "surfaces an exceptionDetails response as :fatal instead of polling on", %{
+      page: page,
+      fake: fake
+    } do
+      # A JS exception (e.g. an invalid CSS selector that querySelector throws on) must
+      # terminate the wait with the exception rather than collapse to "no match" and
+      # poll forever. probe_truthy classifies *cdp_error* responses as transient
+      # (context torn down mid-navigation) but exceptionDetails as fatal — a regression
+      # that merged the two would silently re-introduce the "30s timeout for any bad
+      # selector" bug.
+      task =
+        Task.async(fn ->
+          Page.wait_for_selector(page, ":::", timeout: 2_000, interval: 10)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      exception_details = %{
+        "text" => "Uncaught",
+        "exception" => %{"className" => "DOMException", "description" => "SyntaxError"}
+      }
+
+      FakeCDP.send_text(
+        fake,
+        Jason.encode!(%{"id" => id, "result" => %{"exceptionDetails" => exception_details}})
+      )
+
+      assert {:error, {:evaluate_exception, ^exception_details}} = Task.await(task, 2_000)
+    end
+  end
+
   describe "navigate/3 with response: true" do
     test "reports the main document's status + final URL, correlated by loaderId", %{
       page: page,
@@ -1211,5 +1271,27 @@ defmodule CDPEx.PageTest do
 
   defp send_network_event(fake, method, request_id) do
     FakeCDP.send_text(fake, ~s({"method":"#{method}","params":{"requestId":"#{request_id}"}}))
+  end
+
+  defp assert_wait_for_selector_expression(page, fake, css, expected_js) do
+    task = Task.async(fn -> Page.wait_for_selector(page, css, timeout: 2_000, interval: 10) end)
+
+    assert_receive {:fake_cdp_recv, ^fake,
+                    %{
+                      "id" => id,
+                      "method" => "Runtime.evaluate",
+                      "params" => %{"expression" => expression}
+                    }},
+                   2_000
+
+    assert expression == expected_js
+
+    # Resolve the wait so the task exits cleanly rather than racing teardown.
+    FakeCDP.send_text(
+      fake,
+      ~s({"id":#{id},"result":{"result":{"type":"boolean","value":true}}})
+    )
+
+    assert :ok = Task.await(task, 2_000)
   end
 end

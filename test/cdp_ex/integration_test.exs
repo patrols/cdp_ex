@@ -453,6 +453,41 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, :timeout} = Page.wait_for_selector(page, "#does-not-exist", timeout: 300)
     end
 
+    test "wait_for_selector matches attribute selectors regardless of CSS quote style", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      # Single-quoted attribute value — the selector itself contains characters
+      # ('\'') that must not corrupt the JS expression injected into Runtime.evaluate.
+      assert :ok = Page.wait_for_selector(page, "[id^='ticket-card-']", timeout: 2_000)
+
+      # Double-quoted attribute value — same property, with the inner-quote char
+      # swapped. A single-pattern JS literal can only escape one of the two safely.
+      assert :ok = Page.wait_for_selector(page, ~S([id^="ticket-card-"]), timeout: 2_000)
+
+      # An attribute value that itself contains a literal embedded quote, which
+      # any naive string-concat path would break on.
+      assert :ok = Page.wait_for_selector(page, ~S([data-name="foo bar"]), timeout: 2_000)
+    end
+
+    test "wait_for_selector surfaces a JS exception instead of polling forever", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      # A syntactically invalid CSS selector that querySelector throws on.
+      # (Chrome is lenient about some malformed selectors — e.g. an unclosed
+      # `[foo` returns null silently — so pick one that actually throws.) A
+      # deterministic JS exception must surface immediately rather than collapse
+      # into a perpetual no-match and time out; a long timeout makes a "we waited
+      # it out" regression unmistakable.
+      assert {:error, {:evaluate_exception, _}} =
+               Page.wait_for_selector(page, ":::", timeout: 10_000)
+    end
+
     test "wait_for_function resolves when truthy and times out otherwise", %{
       page: page,
       fixture: fixture

@@ -149,6 +149,10 @@ defmodule CDPEx.FixtureServer do
           <input id="search" />
         </form>
         <div id="echo-header">#{echo}</div>
+        <!-- Elements for the wait_for_selector attribute-prefix / quote-handling tests. -->
+        <div id="ticket-card-abc">card-abc</div>
+        <div id="ticket-card-def">card-def</div>
+        <div data-name="foo bar">named</div>
       </body>
     </html>
     """
