@@ -248,9 +248,17 @@ defmodule CDPEx.PageTest do
         "exception" => %{"className" => "DOMException", "description" => "SyntaxError"}
       }
 
+      # Wire-faithful Runtime.evaluate reply: real Chrome returns `exceptionDetails`
+      # as a sibling of the `result` RemoteObject, not nested under it.
       FakeCDP.send_text(
         fake,
-        Jason.encode!(%{"id" => id, "result" => %{"exceptionDetails" => exception_details}})
+        Jason.encode!(%{
+          "id" => id,
+          "result" => %{
+            "result" => %{"type" => "object", "subtype" => "error", "className" => "DOMException"},
+            "exceptionDetails" => exception_details
+          }
+        })
       )
 
       assert {:error, {:evaluate_exception, ^exception_details}} = Task.await(task, 2_000)

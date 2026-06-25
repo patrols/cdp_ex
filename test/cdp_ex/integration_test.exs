@@ -484,12 +484,15 @@ defmodule CDPEx.IntegrationTest do
 
       # A syntactically invalid CSS selector that querySelector throws on.
       # (Chrome is lenient about some malformed selectors — e.g. an unclosed
-      # `[foo` returns null silently — so pick one that actually throws.) A
-      # deterministic JS exception must surface immediately rather than collapse
-      # into a perpetual no-match and time out; a long timeout makes a "we waited
-      # it out" regression unmistakable.
-      assert {:error, {:evaluate_exception, _}} =
-               Page.wait_for_selector(page, ":::", timeout: 10_000)
+      # `[foo` returns null silently — so pick one that actually throws.) The
+      # fatal arm returns the exception instantly, so a passing run never nears
+      # the timeout; the short 2s ceiling only bounds a regression. Asserting on
+      # the SyntaxError text makes a future Chrome-leniency change fail loudly
+      # here rather than silently degrade into a slow not-found timeout.
+      assert {:error, {:evaluate_exception, details}} =
+               Page.wait_for_selector(page, ":::", timeout: 2_000)
+
+      assert get_in(details, ["exception", "description"]) =~ "not a valid selector"
     end
 
     test "wait_for_function resolves when truthy and times out otherwise", %{
