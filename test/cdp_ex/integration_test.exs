@@ -139,10 +139,16 @@ defmodule CDPEx.IntegrationTest do
         Enum.map(infos, & &1["targetId"])
       end
 
-      assert eventually(fn -> b_target not in live_targets.() end),
-             "B's session tab should have been closed on the remote by stop(b)"
+      # Poll until B's tab disappears, then re-snapshot once and assert against that
+      # snapshot — a genuine stop/1 regression (tab never closes) then reports what
+      # is still live instead of a bare "got false" timeout.
+      eventually(fn -> b_target not in live_targets.() end)
+      final_live = live_targets.()
 
-      assert a_pre_target in live_targets.(),
+      refute b_target in final_live,
+             "B's session tab should have been closed by stop(b); still live: #{inspect(final_live)}"
+
+      assert a_pre_target in final_live,
              "a pre-existing tab on A must survive B's teardown"
 
       # A still works afterward.
