@@ -128,12 +128,28 @@ defmodule CDPEx.IntegrationTest do
       assert :ok = CDPEx.stop(b)
 
       # ...and it must close only the tabs B opened, leaving pre-existing ones alone.
-      # (Query the live targets through A's own browser connection.)
+      # (Query the live targets through A's own browser connection.) stop(b) returns
+      # once B's transport is torn down, but the remote can take a beat to drop the
+      # closed tab from Target.getTargets — poll rather than snapshot once, or this
+      # races on a loaded runner.
       %{browser_conn: a_conn} = :sys.get_state(a)
-      {:ok, %{"targetInfos" => infos}} = Connection.call(a_conn, "Target.getTargets", %{})
-      live = Enum.map(infos, & &1["targetId"])
-      refute b_target in live, "B's session tab should have been closed on the remote by stop(b)"
-      assert a_pre_target in live, "a pre-existing tab on A must survive B's teardown"
+
+      live_targets = fn ->
+        {:ok, %{"targetInfos" => infos}} = Connection.call(a_conn, "Target.getTargets", %{})
+        Enum.map(infos, & &1["targetId"])
+      end
+
+      # Poll until B's tab disappears, then re-snapshot once and assert against that
+      # snapshot — a genuine stop/1 regression (tab never closes) then reports what
+      # is still live instead of a bare "got false" timeout.
+      eventually(fn -> b_target not in live_targets.() end)
+      final_live = live_targets.()
+
+      refute b_target in final_live,
+             "B's session tab should have been closed by stop(b); still live: #{inspect(final_live)}"
+
+      assert a_pre_target in final_live,
+             "a pre-existing tab on A must survive B's teardown"
 
       # A still works afterward.
       assert {:ok, a_page} = CDPEx.new_page(a, transport: :session)
