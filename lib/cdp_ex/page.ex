@@ -654,8 +654,11 @@ defmodule CDPEx.Page do
 
   The expression is coerced with `!!(...)`, so JS truthiness applies. Returns
   `:ok`, `{:error, :timeout}`, or `{:error, reason}` if a non-transient evaluate
-  error occurs (e.g. a thrown exception or a dropped connection). Options:
-  `:timeout` (default 5_000), `:interval` (poll interval ms, default 100).
+  error occurs. A transient CDP error (e.g. the execution context is rebuilding
+  mid-navigation) keeps polling; a non-transient one is fatal — including
+  `{:error, {:evaluate_exception, _}}` when the expression itself throws, and a
+  dropped connection. This is the shared error taxonomy behind `wait_for_selector/3`.
+  Options: `:timeout` (default 5_000), `:interval` (poll interval ms, default 100).
   """
   @spec wait_for_function(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_function(%__MODULE__{} = page, js, opts \\ []) when is_binary(js) do
