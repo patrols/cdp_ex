@@ -46,7 +46,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55 # v1
+      - uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1
         if: steps.gate.outputs.ready == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
