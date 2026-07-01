@@ -27,9 +27,9 @@ jobs:
           - elixir: "1.15.8"
             otp: "26.2"
           - elixir: "1.19.5"
-            otp: "28.0"
+            otp: "28.1"
           - elixir: "1.20.0"
-            otp: "28.0"
+            otp: "28.1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -70,7 +70,7 @@ jobs:
 
       - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
         with:
-          otp-version: "28.0"
+          otp-version: "28.1"
           elixir-version: "1.19.5"
 
       - name: Install Chrome
