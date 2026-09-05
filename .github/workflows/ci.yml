@@ -59,6 +59,9 @@ jobs:
       - run: mix deps.get
       - run: mix ci
 
+      # Different advisory DB from `mix deps.audit`; hex.info records which Hex audited.
+      - run: mix hex.info && mix hex.audit
+
   # Real-Chrome integration tests, on the current Elixir/OTP only.
   integration:
     name: integration (real Chrome)
