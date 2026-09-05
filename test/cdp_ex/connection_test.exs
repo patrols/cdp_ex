@@ -380,8 +380,16 @@ defmodule CDPEx.ConnectionTest do
   } do
     ref = Process.monitor(conn)
 
+    registered = waiter_count(conn)
+
     throwing = Task.async(fn -> Connection.await_event(conn, fn _ -> throw(:boom) end, 300) end)
     exiting = Task.async(fn -> Connection.await_event(conn, fn _ -> exit(:boom) end, 300) end)
+
+    # Both matchers must be registered before the frame lands: this test asserts on
+    # timeouts, so a frame that arrives first would leave the matchers unrun and
+    # every assertion still true — passing green even with safe_match's catch
+    # clauses deleted.
+    await_waiter(conn, registered + 1)
 
     # Delivering an event runs both matchers inside the connection process. Without
     # safe_match catching throw/exit, the first one would take the socket owner down.
