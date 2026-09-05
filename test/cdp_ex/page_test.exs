@@ -1194,7 +1194,7 @@ defmodule CDPEx.PageTest do
           send(
             test,
             {:caller_done, result, subscribed?(conn, self(), "Network.requestWillBeSent"),
-             drain_cdp_events(conn, "Network.requestWillBeSent", [])}
+             await_cdp_events(conn, "Network.requestWillBeSent")}
           )
         end)
 
@@ -1287,6 +1287,22 @@ defmodule CDPEx.PageTest do
   # enqueued (local sends are synchronous) before the helper sends the {:caller_done, ...}
   # that unblocks the caller, so they are already in the mailbox by the time this runs — no
   # flake window.
+  # Wait for the observer's copy of `method`, then take whatever else has queued.
+  #
+  # `drain_cdp_events/3` is a mailbox snapshot (`after 0`), which is only sound once the
+  # event is known to have been delivered. It is not: the idle helper drops events that
+  # arrive before it enters its counting loop (page.ex, pre-loop drain_events), so an
+  # event landing in that window leaves the helper idle immediately — and the caller then
+  # snapshots its mailbox in the same instant the connection is fanning the copy out.
+  # That lost the event roughly one run in sixty on an idle machine.
+  defp await_cdp_events(conn, method, timeout \\ 2_000) do
+    receive do
+      {:cdp_event, ^conn, ^method, params, _sid} -> drain_cdp_events(conn, method, [params])
+    after
+      timeout -> []
+    end
+  end
+
   defp drain_cdp_events(conn, method, acc) do
     receive do
       {:cdp_event, ^conn, ^method, params, _sid} ->
