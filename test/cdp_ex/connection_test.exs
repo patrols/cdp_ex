@@ -269,8 +269,12 @@ defmodule CDPEx.ConnectionTest do
 
   test "await_event with a session gate ignores other sessions", %{conn: conn, fake: fake} do
     # A waiter scoped to session A must NOT resolve on a matching event from B.
+    registered = waiter_count(conn)
+
     task =
       Task.async(fn -> Connection.await_event(conn, &(&1["name"] == "x"), 300, session_id: "A") end)
+
+    await_waiter(conn, registered)
 
     FakeCDP.send_text(
       fake,
@@ -280,10 +284,14 @@ defmodule CDPEx.ConnectionTest do
     assert {:error, {:timeout, :await_event}} = Task.await(task)
 
     # The same matcher resolves when the event is from session A.
+    registered = waiter_count(conn)
+
     task2 =
       Task.async(fn ->
         Connection.await_event(conn, &(&1["name"] == "x"), 2_000, session_id: "A")
       end)
+
+    await_waiter(conn, registered)
 
     FakeCDP.send_text(
       fake,
@@ -294,10 +302,14 @@ defmodule CDPEx.ConnectionTest do
   end
 
   test "await_event resolves when a matching event arrives", %{conn: conn, fake: fake} do
+    registered = waiter_count(conn)
+
     task =
       Task.async(fn ->
         Connection.await_event(conn, &(&1["name"] == "networkAlmostIdle"), 2_000)
       end)
+
+    await_waiter(conn, registered)
 
     # A non-matching event first, then the match.
     FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"load"}}))
@@ -368,8 +380,16 @@ defmodule CDPEx.ConnectionTest do
   } do
     ref = Process.monitor(conn)
 
+    registered = waiter_count(conn)
+
     throwing = Task.async(fn -> Connection.await_event(conn, fn _ -> throw(:boom) end, 300) end)
     exiting = Task.async(fn -> Connection.await_event(conn, fn _ -> exit(:boom) end, 300) end)
+
+    # Both matchers must be registered before the frame lands: this test asserts on
+    # timeouts, so a frame that arrives first would leave the matchers unrun and
+    # every assertion still true — passing green even with safe_match's catch
+    # clauses deleted.
+    await_waiter(conn, registered + 1)
 
     # Delivering an event runs both matchers inside the connection process. Without
     # safe_match catching throw/exit, the first one would take the socket owner down.
@@ -470,6 +490,17 @@ defmodule CDPEx.ConnectionTest do
 
   # Poll until `fun` returns true, or fail — for asserting an async state change
   # (here: the connection processing a subscriber's :DOWN) without a fixed sleep.
+  # `await_event/4` registers its matcher inside a GenServer.call, so spawning the
+  # task does not mean the waiter exists yet. An event the connection processes
+  # before that registration lands is delivered to nobody and the awaiter blocks
+  # until its own timeout — which is how these tests failed on a loaded CI runner
+  # while passing everywhere else. Push frames only once the waiter count grew.
+  defp await_waiter(conn, previous_count) do
+    eventually(fn -> waiter_count(conn) > previous_count end)
+  end
+
+  defp waiter_count(conn), do: length(:sys.get_state(conn).waiters)
+
   defp eventually(fun, retries \\ 100) do
     cond do
       fun.() ->
