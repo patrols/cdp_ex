@@ -54,6 +54,16 @@ defmodule CDPEx.Telemetry do
   of `:stop` — so a gauge built by pairing `:start`/`:stop` should also decrement on
   those errors, or use a counter.
 
+  ### `[:cdp_ex, :network_idle, :watching]`
+
+  `CDPEx.Page.wait_for_network_idle/2`'s helper has subscribed, enabled the Network
+  domain, discarded the events that arrived while enabling, and is now counting
+  in-flight requests. Everything before this point is setup; a request that starts
+  earlier is not counted, so this marks where the wait actually begins.
+
+    * measurements — `%{system_time: System.system_time()}`
+    * metadata — `%{session_id}` (`nil` for a dedicated page connection)
+
   ### `[:cdp_ex, :error]`
 
   A genuine fault — a page's WebSocket closed unexpectedly, the browser connection went
@@ -102,6 +112,16 @@ defmodule CDPEx.Telemetry do
   @spec page(:start | :stop, :telemetry.event_metadata()) :: :ok
   def page(stage, metadata) when stage in [:start, :stop] do
     :telemetry.execute([:cdp_ex, :page, stage], %{system_time: System.system_time()}, metadata)
+  end
+
+  @doc false
+  @spec network_idle_watching(term()) :: :ok
+  def network_idle_watching(session_id) do
+    :telemetry.execute(
+      [:cdp_ex, :network_idle, :watching],
+      %{system_time: System.system_time()},
+      %{session_id: session_id}
+    )
   end
 
   @doc false
