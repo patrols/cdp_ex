@@ -1211,6 +1211,13 @@ defmodule CDPEx.Page do
     with :ok <- subscribe_each(page.conn, @idle_events, remaining(deadline), page.session_id),
          :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
+
+      # Subscribed is not yet counting: the drain above discards whatever arrived
+      # while enabling, so a request that started before this point is invisible
+      # to the wait. Announce the boundary — it is the only way a caller (or a
+      # test) can know the helper is watching rather than still setting up.
+      Telemetry.network_idle_watching(page.session_id)
+
       ref = Process.monitor(page.conn)
 
       ctx = %{

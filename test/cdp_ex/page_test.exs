@@ -1005,6 +1005,22 @@ defmodule CDPEx.PageTest do
   end
 
   describe "wait_for_network_idle/2" do
+    # The idle helper announces the moment it stops setting up and starts
+    # counting; `enable_network_idle/2` waits for that instead of guessing at it
+    # with a sleep, so a slow machine cannot land an event in the setup window.
+    setup do
+      handler = "idle-watching-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:cdp_ex, :network_idle, :watching],
+        &__MODULE__.forward_idle_watching/4,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
     test "resolves when nothing is in flight from the call onward", %{page: page, fake: fake} do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
       enable_network_idle(fake)
@@ -1298,6 +1314,11 @@ defmodule CDPEx.PageTest do
   # `after 0` is sound only where delivery is causally ordered before the caller unblocks —
   # the navigate/#42 call site, where the helper captures the same fan-out that enqueued the
   # observer's copy. Where that ordering is not guaranteed, use `await_cdp_events/3`.
+  @doc false
+  def forward_idle_watching(_event, _measurements, metadata, test_pid) do
+    send(test_pid, {:idle_watching, metadata})
+  end
+
   defp drain_cdp_events(conn, method, acc) do
     receive do
       {:cdp_event, ^conn, ^method, params, _sid} ->
@@ -1331,9 +1352,9 @@ defmodule CDPEx.PageTest do
     if conn, do: for(m <- @idle_methods, do: wait_until_any_subscribed(conn, m))
     assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
     FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
-    # Let the helper drain stale events and enter the receive loop before the caller sends
-    # events, so they land in the loop rather than being swallowed by the pre-loop drain.
-    if conn, do: Process.sleep(50)
+    # Wait for the helper to finish its pre-loop drain and start counting, or an
+    # event sent next would be discarded as setup noise rather than tracked.
+    if conn, do: assert_receive({:idle_watching, _meta}, 2_000)
   end
 
   defp send_network_event(fake, method, request_id) do
