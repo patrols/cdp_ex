@@ -1194,7 +1194,7 @@ defmodule CDPEx.PageTest do
           send(
             test,
             {:caller_done, result, subscribed?(conn, self(), "Network.requestWillBeSent"),
-             drain_cdp_events(conn, "Network.requestWillBeSent", [])}
+             await_cdp_events(conn, "Network.requestWillBeSent")}
           )
         end)
 
@@ -1282,11 +1282,22 @@ defmodule CDPEx.PageTest do
     end
   end
 
-  # Collect every buffered `method` cdp_event currently in this process's mailbox (the
-  # observer's copies), returning their params maps. `after 0` is safe here: the copies are
-  # enqueued (local sends are synchronous) before the helper sends the {:caller_done, ...}
-  # that unblocks the caller, so they are already in the mailbox by the time this runs — no
-  # flake window.
+  # Wait for the observer's copy of `method`, then take whatever else has queued. A
+  # snapshot races here: the idle helper drops events arriving before it enters its
+  # counting loop (page.ex pre-loop drain), so it can resolve in the same instant the
+  # connection is fanning the copy out. That lost the event one run in sixty.
+  defp await_cdp_events(conn, method, timeout \\ 2_000) do
+    receive do
+      {:cdp_event, ^conn, ^method, params, _sid} -> drain_cdp_events(conn, method, [params])
+    after
+      timeout -> []
+    end
+  end
+
+  # Every buffered `method` cdp_event already in this process's mailbox, as params maps.
+  # `after 0` is sound only where delivery is causally ordered before the caller unblocks —
+  # the navigate/#42 call site, where the helper captures the same fan-out that enqueued the
+  # observer's copy. Where that ordering is not guaranteed, use `await_cdp_events/3`.
   defp drain_cdp_events(conn, method, acc) do
     receive do
       {:cdp_event, ^conn, ^method, params, _sid} ->
