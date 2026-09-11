@@ -382,6 +382,26 @@ taxonomy (measurements + metadata).
 `status` (and the post-redirect `final_url`) are `nil` unless the navigation used
 `response: true` — see `CDPEx.Page.navigate/3`.
 
+## Process labels
+
+Every process CDPEx starts sets a [process
+label](https://hexdocs.pm/elixir/Process.html#set_label/1), so crash reports,
+`:observer`, and Phoenix LiveDashboard name it instead of showing a bare pid.
+Nothing to configure; labels are set on Elixir 1.17+ and read by OTP 27+.
+
+| Label | Process |
+|-------|---------|
+| `{:cdp_browser, os_pid}` | `CDPEx.Browser` — `os_pid` is the Chrome process it launched (`:connected` in connect-mode, `:starting` until Chrome is up) |
+| `{:cdp_connection, "/devtools/browser/…"}` | the browser WebSocket |
+| `{:cdp_connection, "/devtools/page/<targetId>"}` | a `:dedicated` page WebSocket |
+| `{:cdp_page_helper, :idle_wait \| :capture, target_id}` | the short-lived process behind `wait_for_network_idle/2` and `navigate/3` with `response: true` |
+| `{:cdp_fetch_auth, source}` | the `Fetch` auth handler (`:proxy`, `:server`, or `:any`) |
+| `{:cdp_pool, size}` / `{:cdp_pool_launch, pool}` | `CDPEx.Pool` and its browser-launch tasks |
+
+The page-helper label is the one to reach for when a scrape appears hung: it
+names the target that is still waiting, and the browser label's `os_pid` ties a
+suspect BEAM process to a row in `ps`.
+
 ## Development
 
 ```bash

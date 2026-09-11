@@ -30,6 +30,7 @@ defmodule CDPEx.Browser do
   alias CDPEx.Connection
   alias CDPEx.Fetch
   alias CDPEx.Page
+  alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Proxy
   alias CDPEx.Telemetry
@@ -164,6 +165,12 @@ defmodule CDPEx.Browser do
   def init(launch_opts) do
     Process.flag(:trap_exit, true)
 
+    # A provisional label, replaced in connect_browser/6 once Chrome is up. Set
+    # here because `Chrome.launch` is the slowest thing this GenServer ever does
+    # — an observer looking at a boot wedged for the whole :launch_timeout should
+    # not be staring at an unlabelled pid.
+    ProcessLabel.set({:cdp_browser, :starting})
+
     # An explicit `:owner` overrides the :$ancestors-derived parent. CDPEx.Pool passes it
     # when adopting a browser launched in a throwaway task, so the owner-death self-reap
     # (the {:EXIT, parent, _} clause) still targets the real owner (the pool) rather than
@@ -234,6 +241,11 @@ defmodule CDPEx.Browser do
   defp connect_browser(chrome, ws_url, launch_opts, parent, proxy_auth, conn_opts) do
     {_scheme, host, port, _path} = Protocol.parse_ws_url(ws_url)
 
+    # The OS pid is the one identifier that ties this GenServer to something
+    # visible outside the BEAM (`ps`, a container's process list), which is what
+    # you reach for when a browser is suspected of hanging.
+    ProcessLabel.set({:cdp_browser, browser_label_id(chrome)})
+
     case Connection.start_link(ws_url, conn_opts) do
       {:ok, conn} ->
         # Prune session entries when their target ends (tab closed/crashed, or our
@@ -269,6 +281,13 @@ defmodule CDPEx.Browser do
         {:stop, reason}
     end
   end
+
+  # Connect-mode (`chrome` is nil) drives someone else's Chrome, so there is no
+  # OS pid to name; a launched Chrome whose os_pid could not be read falls back
+  # to the role rather than labelling the browser `nil`.
+  defp browser_label_id(nil), do: :connected
+  defp browser_label_id(%{os_pid: os_pid}) when is_integer(os_pid), do: os_pid
+  defp browser_label_id(_chrome), do: :launched
 
   # The process that called start_link — our linked "owner" (a supervisor, or the
   # caller of CDPEx.launch). We trap exits, so when it dies we must shut down and

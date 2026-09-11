@@ -27,6 +27,7 @@ defmodule CDPEx.Page do
 
   alias CDPEx.Browser
   alias CDPEx.Connection
+  alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
 
@@ -211,13 +212,15 @@ defmodule CDPEx.Page do
       run_in_helper(
         fn -> run_capture(page, url, milestone, deadline) end,
         :capture_failed,
-        deadline
+        deadline,
+        {:cdp_page_helper, :capture, page.target_id}
       )
     end
   end
 
-  # Run a capture/wait body (`fun`) in its own short-lived, monitored process and return
-  # its result. The body subscribes to its CDP events on *the helper's* pid and drains
+  # Run a capture/wait body (`fun`) in its own short-lived, monitored process (labelled
+  # `label`, since a helper blocked on a slow page is a pid someone will go looking for)
+  # and return its result. The body subscribes to its CDP events on *the helper's* pid and drains
   # *the helper's* mailbox, so a caller that is also running observe_network/2 on this page
   # keeps its subscription and its buffered events intact (#42, #48). Connection monitors
   # every subscriber and drops it on :DOWN, so the helper's subscriptions are released when
@@ -227,11 +230,15 @@ defmodule CDPEx.Page do
   # `after remaining(deadline) + @helper_grace` is a last-resort net that force-kills a body
   # that ignores the deadline, so the caller never blocks past the ceiling. A helper that
   # crashes before replying (a should-never-happen bug) surfaces as {:error, {on_crash, reason}}.
-  defp run_in_helper(fun, on_crash, deadline) when is_function(fun, 0) do
+  defp run_in_helper(fun, on_crash, deadline, label) when is_function(fun, 0) do
     parent = self()
     tag = make_ref()
 
-    {helper, mon} = spawn_monitor(fn -> send(parent, {tag, fun.()}) end)
+    {helper, mon} =
+      spawn_monitor(fn ->
+        ProcessLabel.set(label)
+        send(parent, {tag, fun.()})
+      end)
 
     receive do
       {^tag, result} ->
@@ -1196,7 +1203,8 @@ defmodule CDPEx.Page do
     run_in_helper(
       fn -> run_network_idle(page, idle_time, max_inflight, deadline) end,
       :idle_wait_failed,
-      deadline
+      deadline,
+      {:cdp_page_helper, :idle_wait, page.target_id}
     )
   end
 

@@ -19,6 +19,7 @@ defmodule CDPEx.Fetch do
   use GenServer
 
   alias CDPEx.Connection
+  alias CDPEx.ProcessLabel
 
   require Logger
 
@@ -44,6 +45,7 @@ defmodule CDPEx.Fetch do
   @impl true
   def init(opts) do
     conn = Keyword.fetch!(opts, :conn)
+    ProcessLabel.set({:cdp_fetch_auth, Keyword.get(opts, :source, :any)})
     # Monitor the page connection so we stop when it goes down. The blocking arm
     # work (subscribe ×2 + Fetch.enable, up to @call_timeout) is deferred to
     # handle_continue/2 so that init/1 — and therefore the Browser GenServer that

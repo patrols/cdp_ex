@@ -55,6 +55,25 @@ defmodule CDPEx.IntegrationTest do
       assert elapsed_us < 10_000_000
     end
 
+    # Reading a label back needs :proc_lib.get_label/1 (OTP 27). The integration
+    # lane pins a newer OTP, but a contributor on 26 should skip rather than fail.
+    if Code.ensure_loaded?(:proc_lib) and function_exported?(:proc_lib, :get_label, 1) do
+      test "the browser is labelled with Chrome's OS pid and its page conn with the target" do
+        {:ok, browser} = CDPEx.launch()
+        on_exit(fn -> stop_quietly(browser) end)
+
+        assert {:cdp_browser, os_pid} = :proc_lib.get_label(browser)
+        assert is_integer(os_pid)
+        # The label names a process the OS agrees exists — that is the whole point
+        # of labelling the browser by OS pid rather than by an internal counter.
+        assert {_out, 0} = System.cmd("ps", ["-p", Integer.to_string(os_pid)])
+
+        assert {:ok, %Page{} = page} = CDPEx.new_page(browser)
+        assert {:cdp_connection, "/devtools/page/" <> target} = :proc_lib.get_label(page.conn)
+        assert target == page.target_id
+      end
+    end
+
     test "new_page/2 then close_page/2" do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)
