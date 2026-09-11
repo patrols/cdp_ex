@@ -1,21 +1,22 @@
 defmodule CDPEx.ProcessLabelTest do
   use ExUnit.Case, async: true
 
-  alias CDPEx.Connection
-  alias CDPEx.FakeCDP
-  alias CDPEx.Page
-  alias CDPEx.Pool
-  alias CDPEx.ProcessLabel
-
   # Reading a label back needs `:proc_lib.get_label/1` (OTP 27); setting one needs
   # `Process.set_label/1` (Elixir 1.17). cdp_ex supports 1.15/OTP 26, where
   # ProcessLabel.set/1 compiles to a no-op and there is nothing to assert — so the
-  # whole module compiles away rather than asserting the no-op's emptiness.
+  # whole module compiles away rather than asserting the no-op's emptiness. The
+  # aliases live inside the guard too, or they are unused on those versions.
   supported? =
     Code.ensure_loaded?(:proc_lib) and function_exported?(:proc_lib, :get_label, 1) and
       function_exported?(Process, :set_label, 1)
 
   if supported? do
+    alias CDPEx.Connection
+    alias CDPEx.FakeCDP
+    alias CDPEx.Page
+    alias CDPEx.Pool
+    alias CDPEx.ProcessLabel
+
     defp label_of(pid), do: :proc_lib.get_label(pid)
 
     describe "set/1" do
@@ -45,9 +46,6 @@ defmodule CDPEx.ProcessLabelTest do
       end
 
       test "is labelled before the WebSocket handshake completes" do
-        # The reason the label is set at the top of init/1: a connection wedged in
-        # recv_upgrade is precisely when an observer needs to know what the pid is,
-        # and it has no state yet to identify itself by.
         Process.flag(:trap_exit, true)
         {:ok, server} = FakeCDP.start_stalling()
 

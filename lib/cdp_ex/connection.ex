@@ -170,11 +170,8 @@ defmodule CDPEx.Connection do
   def init({ws_url, opts}) do
     {scheme, host, port, path} = Protocol.parse_ws_url(ws_url)
 
-    # Labelled before the handshake, not after: a connect that blocks in
-    # `recv_upgrade` is exactly the case where an observer needs to know which
-    # target this pid belongs to. `path` names the role for free — DevTools uses
-    # `/devtools/browser/<id>` for the browser socket and `/devtools/page/<id>`
-    # for a dedicated page socket.
+    # Before the handshake, not after: a connect that blocks in `recv_upgrade` is
+    # exactly when the pid needs to name its target.
     ProcessLabel.set({:cdp_connection, path})
 
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)

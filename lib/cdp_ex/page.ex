@@ -218,9 +218,8 @@ defmodule CDPEx.Page do
     end
   end
 
-  # Run a capture/wait body (`fun`) in its own short-lived, monitored process (labelled
-  # `label`, since a helper blocked on a slow page is a pid someone will go looking for)
-  # and return its result. The body subscribes to its CDP events on *the helper's* pid and drains
+  # Run a capture/wait body (`fun`) in its own short-lived, monitored process and return
+  # its result. The body subscribes to its CDP events on *the helper's* pid and drains
   # *the helper's* mailbox, so a caller that is also running observe_network/2 on this page
   # keeps its subscription and its buffered events intact (#42, #48). Connection monitors
   # every subscriber and drops it on :DOWN, so the helper's subscriptions are released when
