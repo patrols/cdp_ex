@@ -72,6 +72,11 @@ defmodule CDPEx.MixProject do
       # Mirrors the parent project's `mix ci`. `test --exclude integration` keeps
       # the default CI lane Chrome-free; the real-browser tests are tagged
       # `:integration` and run in a separate job that installs Chrome.
+      #
+      # `test --warnings-as-errors` because `compile --warnings-as-errors` covers
+      # only lib and test/support — `.exs` test files are loaded by `mix test`, so
+      # without this a warning in one is a GitHub annotation on a green build.
+      # That is how an unused alias survived two rounds of review on #103.
       ci: [
         "format --check-formatted",
         "deps.unlock --check-unused",
@@ -83,7 +88,7 @@ defmodule CDPEx.MixProject do
         "docs --warnings-as-errors",
         "credo",
         "dialyzer",
-        "test --exclude integration"
+        "test --exclude integration --warnings-as-errors"
       ]
     ]
   end
