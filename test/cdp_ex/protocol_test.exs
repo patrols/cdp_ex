@@ -9,6 +9,7 @@ defmodule CDPEx.ProtocolTest do
 
   describe "encode/4" do
     test "builds a command without a session id" do
+      deliberate_unused_variable = :tripwire
       decoded = "Page.navigate" |> Protocol.encode(%{"url" => "u"}, 1) |> decode()
       assert decoded == %{"id" => 1, "method" => "Page.navigate", "params" => %{"url" => "u"}}
       refute Map.has_key?(decoded, "sessionId")
