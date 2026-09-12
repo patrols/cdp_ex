@@ -599,6 +599,8 @@ defmodule CDPEx.Browser do
   defp disable_fetch_async(conn) do
     _ =
       Task.start(fn ->
+        ProcessLabel.set({:cdp_fetch_disable, conn})
+
         case Connection.call(conn, "Fetch.disable", %{}, @create_timeout) do
           {:ok, _} ->
             :ok

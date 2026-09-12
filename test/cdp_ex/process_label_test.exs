@@ -3,6 +3,7 @@ defmodule CDPEx.ProcessLabelTest do
 
   alias CDPEx.Connection
   alias CDPEx.FakeCDP
+  alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.Pool
   alias CDPEx.ProcessLabel
@@ -50,6 +51,18 @@ defmodule CDPEx.ProcessLabelTest do
       assert_receive {:fake_cdp_connected, _fake}, 2_000
 
       assert label_of(conn) == {:cdp_connection, "/devtools/browser/fake"}
+
+      Connection.close(conn)
+    end
+
+    test "drops the query string, which can carry a remote endpoint's auth token" do
+      Process.flag(:trap_exit, true)
+      {:ok, server} = FakeCDP.start()
+      {:ok, conn} = Connection.start_link(server.url <> "?token=SUPERSECRET")
+      assert_receive {:fake_cdp_connected, _fake}, 2_000
+
+      assert label_of(conn) == {:cdp_connection, "/devtools/browser/fake"}
+      refute inspect(label_of(conn)) =~ "SUPERSECRET"
 
       Connection.close(conn)
     end
@@ -145,11 +158,68 @@ defmodule CDPEx.ProcessLabelTest do
 
       Task.await(task, 3_000)
     end
+
+    test "labels the capture helper with its role and target" do
+      Process.flag(:trap_exit, true)
+      {:ok, server} = FakeCDP.start()
+      {:ok, conn} = Connection.start_link(server.url)
+      assert_receive {:fake_cdp_connected, fake}, 2_000
+      on_exit(fn -> close_quietly(conn) end)
+
+      page = %Page{browser: self(), conn: conn, target_id: "TARGET-2", session_id: nil}
+
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, timeout: 2_000)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+
+      # The capture helper has no telemetry hook, so reach it through the
+      # subscription it registers on the connection.
+      helper = await_subscriber(conn, "Network.responseReceived")
+      assert label_of(helper) == {:cdp_page_helper, :capture, "TARGET-2"}
+
+      Task.shutdown(task, :brutal_kill)
+    end
+  end
+
+  describe "CDPEx.Fetch" do
+    test "labels the auth handler with the challenge source it answers" do
+      Process.flag(:trap_exit, true)
+      {:ok, server} = FakeCDP.start()
+      {:ok, conn} = Connection.start_link(server.url)
+      assert_receive {:fake_cdp_connected, _fake}, 2_000
+      on_exit(fn -> close_quietly(conn) end)
+
+      {:ok, pid} =
+        Fetch.start_link(conn: conn, browser: self(), username: "u", password: "p", source: :proxy)
+
+      assert label_of(pid) == {:cdp_fetch_auth, :proxy}
+    end
   end
 
   @doc false
   def forward_helper_label(_event, _measurements, _metadata, test_pid),
     do: send(test_pid, {:helper_label, apply(:proc_lib, :get_label, [self()])})
+
+  # The one subscriber to `method` that is not this test process.
+  defp await_subscriber(conn, method, remaining \\ 1_000) do
+    subscribers = conn |> :sys.get_state() |> Map.fetch!(:subscribers) |> Map.get(method, %{})
+
+    case subscribers |> Map.keys() |> Enum.reject(&(&1 == self())) do
+      [pid] ->
+        pid
+
+      [] when remaining > 0 ->
+        Process.sleep(10)
+        await_subscriber(conn, method, remaining - 10)
+
+      other ->
+        flunk("expected exactly one foreign subscriber to #{method}, got: #{inspect(other)}")
+    end
+  end
 
   # The connection a `Task.async(&Connection.start_link/2)` has linked to itself —
   # every other link on the task is the caller.
