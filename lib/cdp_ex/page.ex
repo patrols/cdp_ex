@@ -27,6 +27,7 @@ defmodule CDPEx.Page do
 
   alias CDPEx.Browser
   alias CDPEx.Connection
+  alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
 
@@ -37,7 +38,7 @@ defmodule CDPEx.Page do
   @selector_timeout 5_000
   @screenshot_timeout 30_000
   @command_timeout 10_000
-  # Slack past a capture/wait helper's own deadline before run_in_helper/3 force-kills it.
+  # Slack past a capture/wait helper's own deadline before run_in_helper/4 force-kills it.
   # The helper bounds every op by the deadline, so it returns on its own well within this;
   # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
   # the scheduler starvation these deadlines guard against).
@@ -196,7 +197,7 @@ defmodule CDPEx.Page do
   # Like navigate_with_wait/4 but also captures the main-document Network.responseReceived
   # (HTTP status + final URL) for THIS navigation. Kept separate so the default path
   # stays untouched. Requires the Network domain; enables it lazily. The capture itself
-  # runs in an isolated helper process (run_in_helper/2) so it never disturbs a
+  # runs in an isolated helper process (run_in_helper/4) so it never disturbs a
   # same-process observe_network/2 subscription (#42).
   defp navigate_capturing_response(page, url, wait_until, timeout) do
     # Validate :wait_until up front (lifecycle_name/1 raises on a bad value) so an
@@ -211,7 +212,8 @@ defmodule CDPEx.Page do
       run_in_helper(
         fn -> run_capture(page, url, milestone, deadline) end,
         :capture_failed,
-        deadline
+        deadline,
+        {:cdp_page_helper, :capture, page.target_id}
       )
     end
   end
@@ -227,11 +229,15 @@ defmodule CDPEx.Page do
   # `after remaining(deadline) + @helper_grace` is a last-resort net that force-kills a body
   # that ignores the deadline, so the caller never blocks past the ceiling. A helper that
   # crashes before replying (a should-never-happen bug) surfaces as {:error, {on_crash, reason}}.
-  defp run_in_helper(fun, on_crash, deadline) when is_function(fun, 0) do
+  defp run_in_helper(fun, on_crash, deadline, label) when is_function(fun, 0) do
     parent = self()
     tag = make_ref()
 
-    {helper, mon} = spawn_monitor(fn -> send(parent, {tag, fun.()}) end)
+    {helper, mon} =
+      spawn_monitor(fn ->
+        ProcessLabel.set(label)
+        send(parent, {tag, fun.()})
+      end)
 
     receive do
       {^tag, result} ->
@@ -1196,7 +1202,8 @@ defmodule CDPEx.Page do
     run_in_helper(
       fn -> run_network_idle(page, idle_time, max_inflight, deadline) end,
       :idle_wait_failed,
-      deadline
+      deadline,
+      {:cdp_page_helper, :idle_wait, page.target_id}
     )
   end
 

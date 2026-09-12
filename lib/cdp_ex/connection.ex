@@ -21,6 +21,7 @@ defmodule CDPEx.Connection do
 
   use GenServer, restart: :temporary
 
+  alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
   alias Mint.HTTP
@@ -168,6 +169,11 @@ defmodule CDPEx.Connection do
   @impl true
   def init({ws_url, opts}) do
     {scheme, host, port, path} = Protocol.parse_ws_url(ws_url)
+
+    # Before the handshake, not after: a connect that blocks in `recv_upgrade` is
+    # exactly when the pid needs to name its target.
+    ProcessLabel.set({:cdp_connection, label_target(path)})
+
     upgrade_timeout = Keyword.get(opts, :upgrade_timeout, @upgrade_timeout)
     {transport, ws_scheme, conn_opts} = transport_for(scheme, host, opts)
 
@@ -190,6 +196,12 @@ defmodule CDPEx.Connection do
       {:error, _conn, reason} -> {:stop, {:ws_upgrade, reason}}
     end
   end
+
+  # The request target keeps any `?query` (Protocol.request_target/2), and a remote
+  # CDP endpoint may authenticate with a token there. Labels are read by :observer,
+  # LiveDashboard and crash reports — wider exposure than GenServer state — so the
+  # label carries the path only.
+  defp label_target(target), do: target |> String.split("?", parts: 2) |> hd()
 
   # `wss://` (a remote/TLS DevTools endpoint, see CDPEx.connect/2) connects over
   # `:https`; everything else is plaintext `:http` to a local Chrome.

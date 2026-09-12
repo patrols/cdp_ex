@@ -38,6 +38,7 @@ defmodule CDPEx.Pool do
   use GenServer
 
   alias CDPEx.Browser
+  alias CDPEx.ProcessLabel
 
   require Logger
 
@@ -159,13 +160,16 @@ defmodule CDPEx.Pool do
     # pool down, and terminate/2 runs to reap Chrome.
     Process.flag(:trap_exit, true)
 
+    size = Keyword.get(opts, :size, @default_size)
+    ProcessLabel.set({:cdp_pool, size})
+
     # Owns the async browser-launch tasks (see start_one_launch/1). Linked to the pool, so
     # it — and any in-flight launches — go down with us.
     {:ok, task_sup} = Task.Supervisor.start_link()
 
     {:ok,
      %__MODULE__{
-       size: Keyword.get(opts, :size, @default_size),
+       size: size,
        launch_opts: Keyword.get(opts, :launch_opts, []),
        start_fun: Keyword.get(opts, :start_fun, &Browser.start_link/1),
        task_sup: task_sup
@@ -332,6 +336,7 @@ defmodule CDPEx.Pool do
 
     task =
       Task.Supervisor.async_nolink(state.task_sup, fn ->
+        ProcessLabel.set({:cdp_pool_launch, pool})
         launch(state.start_fun, state.launch_opts, pool)
       end)
 
