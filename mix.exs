@@ -83,7 +83,7 @@ defmodule CDPEx.MixProject do
         "docs --warnings-as-errors",
         "credo",
         "dialyzer",
-        "test --exclude integration"
+        "test --exclude integration --warnings-as-errors"
       ]
     ]
   end
