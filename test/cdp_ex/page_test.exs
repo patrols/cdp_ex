@@ -298,6 +298,35 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "navigate/3 readiness wait" do
+    test "ignores a stale milestone from a previous loader", %{page: page, conn: conn, fake: fake} do
+      # Same hazard as the response: true capture, one notch quieter: a late
+      # about:blank networkAlmostIdle (old loaderId) would end the readiness wait
+      # before the real document loads, so the caller reads a half-built page.
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/") end)
+      wait_until_subscribed(conn, task.pid)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"NEW"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"OLD","frameId":"F"}})
+      )
+
+      refute Task.yield(task, 200), "navigate resolved on another loader's milestone"
+
+      # This navigation's own milestone ends the wait (on the default 30s timeout, so
+      # only a real match keeps Task.await/2 inside its 2s budget).
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"NEW","frameId":"F"}})
+      )
+
+      assert {:ok, %Page{}} = Task.await(task, 2_000)
+    end
+  end
+
   describe "navigate/3 with response: true" do
     test "reports the main document's status + final URL, correlated by loaderId", %{
       page: page,
@@ -365,6 +394,81 @@ defmodule CDPEx.PageTest do
       )
 
       assert {:error, {:no_document_response, "http://example.test/"}} = Task.await(task)
+    end
+
+    test "ignores a stale milestone from a previous loader (late about:blank idle)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # Chrome emits networkAlmostIdle for the pre-navigation about:blank document ~500ms
+      # after the target is created (and replays it on Page.setLifecycleEventsEnabled) —
+      # carrying the OLD loaderId, often ahead of our document response in the mailbox.
+      # Closing the capture window on it loses the real status.
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/missing", response: true, timeout: 1_000)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+
+      # Queued before the navigate reply, so the stale milestone sits at the head of the
+      # helper's mailbox — ahead of this navigation's document response.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"OLD","frameId":"F"}})
+      )
+
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"NEW"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"NEW","frameId":"F","response":{"status":404,"url":"http://example.test/missing"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"NEW","frameId":"F"}})
+      )
+
+      assert {:ok, %Page{}, %{status: 404, url: "http://example.test/missing"}} =
+               Task.await(task, 2_000)
+    end
+
+    test "a navigation with no loaderId still ends on the milestone (no hang)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # Page.navigate's loaderId is optional per the CDP spec. Correlation only *rejects*
+      # a milestone when both sides carry a loaderId and they differ — an absent id must
+      # never make the milestone unmatchable, which would turn this prompt miss into a
+      # 30s timeout. The document response stays strictly correlated, so nothing is
+      # captured here and the call reports the miss (on the default 30s timeout, so only
+      # a prompt return keeps Task.await/2 inside its 2s budget).
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"NEW","frameId":"F"}})
+      )
+
+      assert {:error, {:no_document_response, "http://example.test/"}} = Task.await(task, 2_000)
     end
 
     test "the default navigate/3 still returns a bare {:ok, page} (no response capture)", %{

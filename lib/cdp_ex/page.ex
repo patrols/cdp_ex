@@ -88,7 +88,10 @@ defmodule CDPEx.Page do
 
   Returns `{:ok, page}` so it pipelines with `with`. The readiness wait is
   best-effort: if it times out, navigation still returns `{:ok, page}` (the page
-  may simply be slow); a hard navigation error returns `{:error, _}`.
+  may simply be slow); a hard navigation error returns `{:error, _}`. The milestone
+  is matched to *this* navigation's document (by `loaderId`), so a late lifecycle
+  event from the page's previous document — e.g. the `about:blank` a fresh page
+  starts on — can't end the wait early.
 
   ## Capturing the document response
 
@@ -173,7 +176,7 @@ defmodule CDPEx.Page do
     trigger = fn ->
       case do_call(page, "Page.navigate", %{"url" => url}, remaining(deadline)) do
         {:ok, %{"errorText" => error}} -> {:error, {:navigate, error}}
-        {:ok, _result} -> :ok
+        {:ok, result} -> {:ok, result["loaderId"], result["frameId"]}
         {:error, _} = error -> error
       end
     end
@@ -340,9 +343,14 @@ defmodule CDPEx.Page do
           await_capture(page, milestone, ref, deadline, lid, fid, captured)
         end
 
-      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^milestone}, ^sid}
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^milestone} = params, ^sid}
       when not is_nil(milestone) ->
-        {:ok, captured}
+        if own_loader?(params, lid, fid) do
+          {:ok, captured}
+        else
+          # Another document's milestone (see own_loader?/3) — keep waiting for ours.
+          await_capture(page, milestone, ref, deadline, lid, fid, captured)
+        end
 
       {:cdp_event, ^conn, _method, _params, _other_sid} ->
         # Another session's event, or this session's non-milestone lifecycle — ignore.
@@ -383,6 +391,26 @@ defmodule CDPEx.Page do
 
   defp document_response?(_params, _lid, _fid), do: false
 
+  # Does this lifecycle event belong to the navigation we are waiting on? A fresh page's
+  # about:blank document emits networkAlmostIdle ~500ms after the target is created (its
+  # network-quiet timer, counted from target creation), and Chrome *replays* lifecycle
+  # events for the current document whenever Page.setLifecycleEventsEnabled(true) is
+  # called — both carry the PREVIOUS loaderId and can land mid-navigation, closing the
+  # wait on a document that is not the one being navigated to. Pinning the milestone to
+  # the navigation's loaderId is what Puppeteer's LifecycleWatcher does.
+  #
+  # Correlation only *rejects* when both sides carry the id and they differ: `loaderId`
+  # is optional on the Page.navigate result (and, in principle, on the event), and
+  # treating an absent id as a mismatch would make the milestone unmatchable — turning a
+  # prompt return into a full-timeout hang. Same rule for frameId, which also guards
+  # against a sub-frame's milestone.
+  defp own_loader?(params, lid, fid),
+    do: correlates?(params["loaderId"], lid) and correlates?(params["frameId"], fid)
+
+  defp correlates?(nil, _expected), do: true
+  defp correlates?(_actual, nil), do: true
+  defp correlates?(actual, expected), do: actual == expected
+
   defp response_summary(%{"response" => response}) do
     %{status: response["status"], url: response["url"]}
   end
@@ -399,9 +427,14 @@ defmodule CDPEx.Page do
   # Subscribe to lifecycle events, run `trigger` (issue the navigation, or a no-op),
   # then await the `name` milestone — always unsubscribing + draining on the way out.
   # Subscribing BEFORE `trigger` closes the race where a fast event (e.g. `load` on
-  # a cached page) fires before the listener is in place. Returns await_lifecycle/4's
+  # a cached page) fires before the listener is in place. Returns await_lifecycle/6's
   # outcome (`:reached` | `{:down, reason}` | `:timeout`), or `{:error, reason}` when
   # subscription fails or `trigger` returns one.
+  #
+  # `trigger` returns `{:ok, loader_id, frame_id}` to pin the wait to that navigation's
+  # document (navigate/3) or a bare `:ok` when there is nothing to pin it to
+  # (wait_for_navigation/2, where the caller — a click, say — triggered the navigation
+  # out of band and no loaderId is available; it keeps the pre-existing name-only match).
   defp subscribe_then_await(page, name, deadline, trigger) do
     case safe_subscribe(page.conn, remaining(deadline)) do
       {:error, reason} ->
@@ -413,7 +446,8 @@ defmodule CDPEx.Page do
 
         try do
           case trigger.() do
-            :ok -> await_lifecycle(page, name, ref, deadline)
+            :ok -> await_lifecycle(page, name, ref, deadline, nil, nil)
+            {:ok, lid, fid} -> await_lifecycle(page, name, ref, deadline, lid, fid)
             {:error, _} = error -> error
           end
         after
@@ -426,17 +460,29 @@ defmodule CDPEx.Page do
 
   # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
   # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
-  # methods never arrive here) — the connection dying, or the deadline. Returns
-  # `:reached` | `{:down, reason}` | `:timeout`; callers map it to their own contract.
-  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline) do
+  # methods never arrive here) — the connection dying, or the deadline. When `lid`/`fid`
+  # are known the milestone is also pinned to that document (own_loader?/3), so a stale
+  # about:blank milestone can't end the wait early; with both nil it matches on name
+  # alone. Returns `:reached` | `{:down, reason}` | `:timeout`; callers map it to their
+  # own contract.
+  defp await_lifecycle(
+         %__MODULE__{conn: conn, session_id: sid} = page,
+         name,
+         ref,
+         deadline,
+         lid,
+         fid
+       ) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^name}, ^sid} ->
-        :reached
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^name} = params, ^sid} ->
+        if own_loader?(params, lid, fid),
+          do: :reached,
+          else: await_lifecycle(page, name, ref, deadline, lid, fid)
 
       {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
-        await_lifecycle(page, name, ref, deadline)
+        await_lifecycle(page, name, ref, deadline, lid, fid)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
         {:down, reason}
