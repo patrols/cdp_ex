@@ -59,6 +59,8 @@ defmodule CDPEx.FixtureServer do
   #     CDPEx.Page.authenticate — receives an auth challenge.
   #   /redirect   — 302 to "/", so navigate(response: true) can prove it reports the
   #     FINAL (post-redirect) 200, not the redirect hop.
+  #   /meta-refresh — a 200 page that client-redirects to "/" via <meta refresh>, so a
+  #     navigate wait can prove it ends on the successor document, not the deadline.
   #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
   #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
   #     wait_for_response/3 and wait_for_network_idle/2 paths.
@@ -76,6 +78,12 @@ defmodule CDPEx.FixtureServer do
 
       String.starts_with?(path, "/redirect") ->
         HttpFixture.http_response("302 Found", "", ["Location: /"])
+
+      String.starts_with?(path, "/meta-refresh") ->
+        body =
+          ~s(<!doctype html><html><head><meta http-equiv="refresh" content="0;url=/"></head><body><p id="status">refreshing</p></body></html>)
+
+        HttpFixture.http_response("200 OK", body)
 
       String.starts_with?(path, "/missing") ->
         body = ~s(<!doctype html><html><body><p id="status">404</p></body></html>)

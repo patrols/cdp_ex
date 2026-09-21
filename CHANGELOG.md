@@ -13,6 +13,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - Bumped `mint` to 1.10.1 for EEF-CVE-2026-82672 (HTTP/1 chunk-size tail response smuggling), which `mix hex.audit` had started failing CI on (#107).
 
+### Fixed
+- `CDPEx.Page.navigate/3` no longer ends its readiness wait on a lifecycle milestone that belongs to a *previous* document. A fresh page's `about:blank` emits `networkAlmostIdle` ~500ms after the target is created (with the old `loaderId`), and Chrome replays lifecycle events on `Page.setLifecycleEventsEnabled`; either could land mid-navigation and be matched on name alone. With `response: true` (#31) that closed the capture window before the main-document response and surfaced as an intermittent `{:error, {:no_document_response, url}}` instead of the real status (seen in CI on a loaded runner); on the default path it could return `{:ok, page}` before the real document had loaded. The milestone is now pinned to the navigation's `loaderId` (+ `frameId`) on both paths, and re-pinned to a successor document when one replaces ours after it commits (a `<meta http-equiv="refresh">`, a JS `location` change, a waiting-room bounce — the original document never reaches network-quiet, so without the re-pin such pages would only return at the deadline; Puppeteer's `LifecycleWatcher` reaches the same outcome by accepting any loader other than the pre-navigation one). With `response: true` the reported `%{status, url}` stays that of the document you navigated to, as before. Correlation only rejects when both sides carry an id and they differ, so an absent `loaderId` (optional on the `Page.navigate` result) never makes the milestone unmatchable. `wait_for_navigation/2` has no `loaderId` to pin to (the caller triggered the navigation) and keeps its name-only match (#106).
+
 ## [0.9.0] - 2026-06-14
 
 ### Breaking
