@@ -325,6 +325,31 @@ defmodule CDPEx.PageTest do
 
       assert {:ok, %Page{}} = Task.await(task, 2_000)
     end
+
+    test "ignores a sub-frame's milestone (frameId mismatch)", %{page: page, conn: conn, fake: fake} do
+      # frameId is the correlation guard that stays active when an event carries no
+      # loaderId (Page.navigate always returns frameId; only loaderId is optional), so a
+      # child frame's networkAlmostIdle must not end the main-frame wait.
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/") end)
+      wait_until_subscribed(conn, task.pid)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"NEW"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","frameId":"SUB"}})
+      )
+
+      refute Task.yield(task, 200), "navigate resolved on a sub-frame's milestone"
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle","loaderId":"NEW","frameId":"F"}})
+      )
+
+      assert {:ok, %Page{}} = Task.await(task, 2_000)
+    end
   end
 
   describe "navigate/3 with response: true" do
