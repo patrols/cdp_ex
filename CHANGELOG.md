@@ -11,7 +11,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `[:cdp_ex, :network_idle, :watching]` telemetry event — fires when `CDPEx.Page.wait_for_network_idle/2`'s helper has finished setting up (subscribed, `Network` enabled, events that arrived during enable discarded) and starts counting in-flight requests. Everything before it is setup, so a request that starts earlier is deliberately not counted. Measurements `%{system_time}`, metadata `%{session_id}` (`nil` for a dedicated page connection). Silent by default like every other CDPEx event; see `CDPEx.Telemetry` (#101).
 
 ### Changed
-- Bumped `mint` to 1.10.1 for EEF-CVE-2026-82672 (HTTP/1 chunk-size tail response smuggling), which `mix hex.audit` had started failing CI on.
+- Bumped `mint` to 1.10.1 for EEF-CVE-2026-82672 (HTTP/1 chunk-size tail response smuggling), which `mix hex.audit` had started failing CI on (#107).
 
 ## [0.9.0] - 2026-06-14
 
