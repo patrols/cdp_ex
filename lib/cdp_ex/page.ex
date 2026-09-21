@@ -373,6 +373,9 @@ defmodule CDPEx.Page do
   # contract honest — a degenerate response missing them is not reported as the landing,
   # so the call falls through to {:error, {:no_document_response, _}} rather than
   # returning nils. (Real Chrome always populates both on a Document response.)
+  # Deliberately stricter than own_loader?/3: with no loaderId on the navigate result the
+  # milestone still ends the wait promptly, but nothing is captured, so the call reports
+  # {:error, {:no_document_response, _}} instead of guessing which response was ours.
   defp document_response?(
          %{
            "type" => "Document",
