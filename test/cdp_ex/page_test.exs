@@ -350,6 +350,72 @@ defmodule CDPEx.PageTest do
 
       assert {:ok, %Page{}} = Task.await(task, 2_000)
     end
+
+    test "resolves on a successor document's milestone (client-side redirect)", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # A meta refresh / JS location change replaces the navigated document with a NEW
+      # loader before it goes network-quiet; the original loader's networkAlmostIdle
+      # never fires (its document is gone). Once our document has committed (its `init`
+      # arrived), an `init` on the same frame with another loaderId is that successor —
+      # its milestone must end the wait, not the 30s ceiling.
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/") end)
+      wait_until_subscribed(conn, task.pid)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L1"}}))
+
+      for name <- ["init", "load"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","params":{"name":"#{name}","loaderId":"L1","frameId":"F"}})
+        )
+      end
+
+      for name <- ["init", "load", "networkAlmostIdle"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","params":{"name":"#{name}","loaderId":"L2","frameId":"F"}})
+        )
+      end
+
+      assert {:ok, %Page{}} = Task.await(task, 2_000)
+    end
+
+    test "a predecessor's init + milestone before our document commits is still stale", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # Successor detection must be gated on OUR document having committed: a
+      # replayed/late `init` for the previous loader arriving before our `init` is a
+      # predecessor, not a successor, and its milestone must not end the wait.
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/") end)
+      wait_until_subscribed(conn, task.pid)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"NEW"}}))
+
+      for name <- ["init", "networkAlmostIdle"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","params":{"name":"#{name}","loaderId":"OLD","frameId":"F"}})
+        )
+      end
+
+      refute Task.yield(task, 200), "navigate resolved on a predecessor's milestone"
+
+      for name <- ["init", "networkAlmostIdle"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","params":{"name":"#{name}","loaderId":"NEW","frameId":"F"}})
+        )
+      end
+
+      assert {:ok, %Page{}} = Task.await(task, 2_000)
+    end
   end
 
   describe "navigate/3 with response: true" do
@@ -494,6 +560,50 @@ defmodule CDPEx.PageTest do
       )
 
       assert {:error, {:no_document_response, "http://example.test/"}} = Task.await(task, 2_000)
+    end
+
+    test "a successor document's milestone ends the capture; the response stays this navigation's",
+         %{page: page, conn: conn, fake: fake} do
+      # Client-side redirect with response: true — the successor's networkAlmostIdle ends
+      # the wait promptly (not at the deadline), while %{status, url} keeps reporting
+      # THIS navigation's document (L1), the pre-#106 behaviour: the successor is a new
+      # navigation, not a redirect hop of this one.
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/start", response: true) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L1"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L1","frameId":"F","response":{"status":200,"url":"http://example.test/start"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"init","loaderId":"L1","frameId":"F"}})
+      )
+
+      # The successor's document response precedes its init (headers, then commit).
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L2","frameId":"F","response":{"status":200,"url":"http://example.test/final"}}})
+      )
+
+      for name <- ["init", "networkAlmostIdle"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","params":{"name":"#{name}","loaderId":"L2","frameId":"F"}})
+        )
+      end
+
+      assert {:ok, %Page{}, %{status: 200, url: "http://example.test/start"}} =
+               Task.await(task, 2_000)
     end
 
     test "the default navigate/3 still returns a bare {:ok, page} (no response capture)", %{

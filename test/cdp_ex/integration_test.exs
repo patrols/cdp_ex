@@ -355,6 +355,23 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "Hello"} = Page.text(page, "#greeting")
     end
 
+    test "navigate/3 ends on a client-side redirect's successor document, not the deadline", %{
+      page: page,
+      fixture: fixture
+    } do
+      # /meta-refresh commits, then replaces itself with "/" under a NEW loaderId before
+      # it ever goes network-quiet. The wait must end on the successor's milestone; the
+      # reported response stays this navigation's own document (the 200 at /meta-refresh).
+      start = fixture <> "meta-refresh"
+
+      {elapsed_us, result} =
+        :timer.tc(fn -> Page.navigate(page, start, response: true, timeout: 10_000) end)
+
+      assert {:ok, ^page, %{status: 200, url: ^start}} = result
+      assert elapsed_us < 5_000_000, "navigate stalled #{div(elapsed_us, 1000)}ms (deadline-bound)"
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
     test "navigate/3 response: true surfaces a 404 (a clean signal vs a bare {:ok, page})", %{
       page: page,
       fixture: fixture

@@ -89,9 +89,11 @@ defmodule CDPEx.Page do
   Returns `{:ok, page}` so it pipelines with `with`. The readiness wait is
   best-effort: if it times out, navigation still returns `{:ok, page}` (the page
   may simply be slow); a hard navigation error returns `{:error, _}`. The milestone
-  is matched to *this* navigation's document (by `loaderId`), so a late lifecycle
-  event from the page's previous document — e.g. the `about:blank` a fresh page
-  starts on — can't end the wait early.
+  is matched to *this* navigation's document (by `loaderId`) — or to a document that
+  replaces it before it settles, such as a `<meta http-equiv="refresh">` target — so a
+  late lifecycle event from the page's previous document (e.g. the `about:blank` a
+  fresh page starts on) can't end the wait early, and a client-side redirect doesn't
+  stall it until the deadline.
 
   ## Capturing the document response
 
@@ -299,15 +301,9 @@ defmodule CDPEx.Page do
         {:error, {:navigate, error}}
 
       {:ok, result} ->
-        case await_capture(
-               page,
-               milestone,
-               ref,
-               deadline,
-               result["loaderId"],
-               result["frameId"],
-               nil
-             ) do
+        nav = navigation(result["loaderId"], result["frameId"])
+
+        case await_capture(page, milestone, ref, deadline, nav, nil) do
           {:ok, nil} -> {:error, {:no_document_response, url}}
           {:ok, resp} -> {:ok, page, resp}
           {:down, reason} -> {:error, down_reason(reason)}
@@ -319,15 +315,16 @@ defmodule CDPEx.Page do
   end
 
   # Await the readiness milestone (or, with :none, the document response itself) while
-  # accumulating the main-document response — scoped to this page's session (`^sid`),
-  # correlated by loaderId (+ frameId when present) and type "Document".
+  # accumulating the main-document response — scoped to this page's session (`^sid`).
+  # The response is correlated to THIS navigation's document (`nav.loader`, type
+  # "Document"); the milestone follows track_lifecycle/2, so a successor document can
+  # end the wait while %{status, url} still describes the document we navigated to.
   defp await_capture(
          %__MODULE__{conn: conn, session_id: sid} = page,
          milestone,
          ref,
          deadline,
-         lid,
-         fid,
+         nav,
          captured
        ) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
@@ -335,26 +332,26 @@ defmodule CDPEx.Page do
     receive do
       {:cdp_event, ^conn, @response_received, params, ^sid} ->
         captured =
-          if document_response?(params, lid, fid), do: response_summary(params), else: captured
+          if document_response?(params, nav.loader, nav.frame),
+            do: response_summary(params),
+            else: captured
 
         if is_nil(milestone) and not is_nil(captured) do
           {:ok, captured}
         else
-          await_capture(page, milestone, ref, deadline, lid, fid, captured)
+          await_capture(page, milestone, ref, deadline, nav, captured)
         end
 
-      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^milestone} = params, ^sid}
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => name} = params, ^sid}
       when not is_nil(milestone) ->
-        if own_loader?(params, lid, fid) do
-          {:ok, captured}
-        else
-          # Another document's milestone (see own_loader?/3) — keep waiting for ours.
-          await_capture(page, milestone, ref, deadline, lid, fid, captured)
+        case track_lifecycle(params, nav) do
+          {:ours, _nav} when name == milestone -> {:ok, captured}
+          {_, nav} -> await_capture(page, milestone, ref, deadline, nav, captured)
         end
 
       {:cdp_event, ^conn, _method, _params, _other_sid} ->
-        # Another session's event, or this session's non-milestone lifecycle — ignore.
-        await_capture(page, milestone, ref, deadline, lid, fid, captured)
+        # Another session's event, or (with milestone nil) a lifecycle we don't wait on.
+        await_capture(page, milestone, ref, deadline, nav, captured)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
         {:down, reason}
@@ -391,13 +388,42 @@ defmodule CDPEx.Page do
 
   defp document_response?(_params, _lid, _fid), do: false
 
-  # Does this lifecycle event belong to the navigation we are waiting on? A fresh page's
+  # The document a navigation wait is pinned to. `loader`/`frame` are the Page.navigate
+  # result's (nil when absent — see own_loader?/3): the response capture correlates on
+  # `loader` for the whole wait. `wait_loader` is the loader whose milestone ends the
+  # wait; it starts as `loader` and track_lifecycle/2 re-pins it to a successor document.
+  # `committed` records that our own document has emitted a lifecycle event.
+  defp navigation(lid, fid), do: %{loader: lid, frame: fid, wait_loader: lid, committed: false}
+
+  # Classify a lifecycle event against the pinned navigation. Chrome emits `init` for
+  # every new document on a frame, and a document can only be replaced after it has
+  # committed, so an `init` on our frame with another loaderId AFTER our own document's
+  # first lifecycle event is a successor — a meta refresh, a JS location change, a
+  # waiting-room bounce. Its milestone must end the wait: the original document is gone
+  # and never reaches network-quiet, so without the re-pin the wait would only end at
+  # the deadline. Before our document commits, the same shape is a predecessor (see
+  # own_loader?/3) and stays stale. Puppeteer's LifecycleWatcher gets the same result
+  # by accepting any loader other than the pre-navigation one; we don't track the
+  # frame's loader before navigating, so we pin to the navigate result and re-pin.
+  defp track_lifecycle(params, nav) do
+    cond do
+      own_loader?(params, nav.wait_loader, nav.frame) ->
+        {:ours, %{nav | committed: true}}
+
+      nav.committed and params["name"] == "init" and correlates?(params["frameId"], nav.frame) ->
+        {:successor, %{nav | wait_loader: params["loaderId"]}}
+
+      true ->
+        {:stale, nav}
+    end
+  end
+
+  # Does this lifecycle event belong to the document we are waiting on? A fresh page's
   # about:blank document emits networkAlmostIdle ~500ms after the target is created (its
   # network-quiet timer, counted from target creation), and Chrome *replays* lifecycle
   # events for the current document whenever Page.setLifecycleEventsEnabled(true) is
   # called — both carry the PREVIOUS loaderId and can land mid-navigation, closing the
-  # wait on a document that is not the one being navigated to. Pinning the milestone to
-  # the navigation's loaderId is what Puppeteer's LifecycleWatcher does.
+  # wait on a document that is not the one being navigated to.
   #
   # Correlation only *rejects* when both sides carry the id and they differ: `loaderId`
   # is optional on the Page.navigate result (and, in principle, on the event), and
@@ -427,7 +453,7 @@ defmodule CDPEx.Page do
   # Subscribe to lifecycle events, run `trigger` (issue the navigation, or a no-op),
   # then await the `name` milestone — always unsubscribing + draining on the way out.
   # Subscribing BEFORE `trigger` closes the race where a fast event (e.g. `load` on
-  # a cached page) fires before the listener is in place. Returns await_lifecycle/6's
+  # a cached page) fires before the listener is in place. Returns await_lifecycle/5's
   # outcome (`:reached` | `{:down, reason}` | `:timeout`), or `{:error, reason}` when
   # subscription fails or `trigger` returns one.
   #
@@ -446,8 +472,8 @@ defmodule CDPEx.Page do
 
         try do
           case trigger.() do
-            :ok -> await_lifecycle(page, name, ref, deadline, nil, nil)
-            {:ok, lid, fid} -> await_lifecycle(page, name, ref, deadline, lid, fid)
+            :ok -> await_lifecycle(page, name, ref, deadline, navigation(nil, nil))
+            {:ok, lid, fid} -> await_lifecycle(page, name, ref, deadline, navigation(lid, fid))
             {:error, _} = error -> error
           end
         after
@@ -460,29 +486,23 @@ defmodule CDPEx.Page do
 
   # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
   # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
-  # methods never arrive here) — the connection dying, or the deadline. When `lid`/`fid`
-  # are known the milestone is also pinned to that document (own_loader?/3), so a stale
-  # about:blank milestone can't end the wait early; with both nil it matches on name
-  # alone. Returns `:reached` | `{:down, reason}` | `:timeout`; callers map it to their
-  # own contract.
-  defp await_lifecycle(
-         %__MODULE__{conn: conn, session_id: sid} = page,
-         name,
-         ref,
-         deadline,
-         lid,
-         fid
-       ) do
+  # methods never arrive here) — the connection dying, or the deadline. The milestone
+  # is pinned to the navigated document per track_lifecycle/2 (a stale about:blank
+  # milestone can't end the wait early; a successor document's can); with no loaderId
+  # in `nav` it matches on name alone. Returns `:reached` | `{:down, reason}` |
+  # `:timeout`; callers map it to their own contract.
+  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline, nav) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:cdp_event, ^conn, @lifecycle_method, %{"name" => ^name} = params, ^sid} ->
-        if own_loader?(params, lid, fid),
-          do: :reached,
-          else: await_lifecycle(page, name, ref, deadline, lid, fid)
+      {:cdp_event, ^conn, @lifecycle_method, %{"name" => event} = params, ^sid} ->
+        case track_lifecycle(params, nav) do
+          {:ours, _nav} when event == name -> :reached
+          {_, nav} -> await_lifecycle(page, name, ref, deadline, nav)
+        end
 
       {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
-        await_lifecycle(page, name, ref, deadline, lid, fid)
+        await_lifecycle(page, name, ref, deadline, nav)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
         {:down, reason}
