@@ -415,7 +415,7 @@ widely than internal state.
 mix deps.get
 mix test                         # unit tests (no Chrome needed)
 mix test --include integration   # real-Chrome tests (set CDP_EX_CHROME_BINARY)
-mix ci                           # format, credo, dialyzer, unit tests
+mix ci                           # the full gate: format, deps audit, docs, credo, dialyzer, unit tests
 ```
 
 Integration tests are tagged `:integration` and excluded by default; they launch a
