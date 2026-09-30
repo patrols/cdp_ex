@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Bumped `mint` to 1.11.0 (and `hpax` to 1.1.0) for EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding), which `mix hex.audit` had started failing CI on.
+
 ## [0.10.0] - 2026-09-21
 
 ### Added
