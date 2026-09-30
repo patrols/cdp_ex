@@ -16,9 +16,10 @@ mix test --only integration             # real Chrome; set CDP_EX_CHROME_BINARY
 - `mix ci` excludes `:integration`, so a green `mix ci` says nothing about real
   browser behaviour. Run the integration tests for any change to launch,
   teardown, page, input, fetch/proxy, or connection code.
-- CI runs `mix ci` on Elixir 1.15.8/OTP 26.2 **and** 1.19.5/OTP 28.1. Code must
-  compile on 1.15: gate newer stdlib features at compile time the way
-  `CDPEx.ProcessLabel` does for `Process.set_label/1` (1.17+).
+- CI runs `mix ci` across an Elixir/OTP matrix from the 1.15 floor up to the
+  latest release (`.github/workflows/ci.yml`). Code must compile on 1.15: gate
+  newer stdlib features at compile time the way `CDPEx.ProcessLabel` does for
+  `Process.set_label/1` (1.17+).
 - Dialyzer runs with `:unmatched_returns` and friends; PLTs live in `priv/plts`.
 
 ## Invariants
