@@ -41,13 +41,11 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
   @click_poll_interval 100
   @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
-  # Chrome's messages for a missing or torn-down execution context (all code -32000).
-  @context_missing [
-    "Execution context",
-    "execution context",
-    "Cannot find context",
-    "Inspected target navigated or closed"
-  ]
+  # Chrome's messages (all code -32000) for an execution context that wasn't there, so
+  # the script never ran, and for one torn down while a call was in flight.
+  @context_not_found ["Cannot find context", "Cannot find default execution context"]
+  @context_torn_down ["Execution context was destroyed", "Inspected target navigated or closed"]
+  @context_missing @context_not_found ++ @context_torn_down
   # Slack past a capture/wait helper's own deadline before run_in_helper/4 force-kills it.
   # The helper bounds every op by the deadline, so it returns on its own well within this;
   # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
@@ -875,12 +873,15 @@ defmodule CDPEx.Page do
       step, so there is no gap between "found" and "clicked".
       The budget bounds the retrying, not an attempt already in flight, so the
       worst case is about `wait` plus one attempt's CDP calls (each bounded by
-      `:timeout`). Default `0` (a single attempt).
+      `:timeout`). Default `0` (a single attempt); anything but a non-negative
+      integer raises `ArgumentError`.
     * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
       hit-testing, `event.isTrusted == false`); the escape hatch for elements not
       at a clickable point. It clicks the element whatever its box, so it never
       returns `:not_clickable` and `:wait` only waits for the element to exist.
-      Default `true`.
+      The lookup and the click are one script there, so `:wait` retries a CDP
+      error only when the context was never found; one torn down mid-call may be
+      the click's own navigation, and a retry would click twice. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
   Returns `:ok`, `{:error, {:selector_not_found, css}}` when nothing matches, or
@@ -914,7 +915,8 @@ defmodule CDPEx.Page do
 
   Candidates are the elements under `document.body`; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
-  label from matching unrelated text elsewhere on the page.
+  label from matching unrelated text elsewhere on the page. The search doesn't enter
+  shadow roots or iframes.
 
   Clicks the same way as `click/3` — trusted by default, synthetic with
   `trusted: false`, with the same overlay caveat. A synthetic click picks the same
@@ -924,7 +926,7 @@ defmodule CDPEx.Page do
     * `:selector` — CSS selector the candidates must match. Default: any element.
     * `:wait` — as in `click/3`, retrying while nothing matches, no match has a
       box yet (trusted clicks only), or the lookup finds no execution context.
-      Default `0`.
+      Default `0`; an invalid value raises `ArgumentError`.
     * `:trusted` — as in `click/3`. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
@@ -1072,15 +1074,13 @@ defmodule CDPEx.Page do
     end
   end
 
-  # An attempt fails in one of two phases. :locate (the evaluate that finds the element,
-  # before anything is dispatched) is retried while the element isn't there yet, and on
-  # a missing execution context mid-navigation, which the next poll can outlive (including
-  # "Inspected target navigated or closed" for a call in flight when the context went:
-  # locate never dispatches, so retrying it is safe). Chrome reports these as a generic
-  # -32000, so they are told apart by message; a closed or
-  # detached session (-32001, "Session with given id not found") is not retried. :dispatch is never retried: Input.dispatchMouseEvent failing after
-  # mousePressed went through would make a retry a double click. Exceptions, timeouts and
-  # dropped connections won't fix themselves by polling, so they return in either phase.
+  # An attempt fails in one of two phases. :locate (nothing dispatched yet) is retried
+  # while the element isn't there yet, and on a missing or torn-down execution context
+  # mid-navigation, which the next poll can outlive. Chrome reports those as a generic
+  # -32000, so they are told apart by message; a closed or detached session (-32001) is
+  # not retried. :dispatch (the click may have happened) is never retried, as a retry
+  # could double-click. Exceptions, timeouts and dropped connections won't fix
+  # themselves by polling, so they return in either phase.
   defp retry_click(attempt, deadline) do
     case attempt.() do
       {:locate, reason} = failure ->
@@ -1152,8 +1152,9 @@ defmodule CDPEx.Page do
     """
   end
 
-  # The locate and the click share one evaluate here, so its failures are :locate: a CDP
-  # error on Runtime.evaluate means the script never ran.
+  # The locate and the click share one evaluate here. Only a context that was never
+  # found proves the script didn't run; a context torn down mid-call may be the click's
+  # own navigation, so that counts as :dispatch and isn't retried (no double submit).
   defp synthetic_click(page, locator, not_found, opts) do
     js = """
     (function () {
@@ -1167,9 +1168,16 @@ defmodule CDPEx.Page do
     case evaluate(page, js, opts) do
       {:ok, true} -> :ok
       {:ok, false} -> {:locate, not_found}
+      {:error, {:cdp_error, _, _} = reason} -> {synthetic_phase(reason), reason}
       {:error, reason} -> {:locate, reason}
     end
   end
+
+  defp synthetic_phase({:cdp_error, _, %{"message" => msg}}) when is_binary(msg) do
+    if String.contains?(msg, @context_not_found), do: :locate, else: :dispatch
+  end
+
+  defp synthetic_phase(_reason), do: :dispatch
 
   defp trusted_click(page, locator, not_found, label, opts) do
     js = """

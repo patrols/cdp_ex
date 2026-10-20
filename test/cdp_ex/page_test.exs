@@ -395,21 +395,49 @@ defmodule CDPEx.PageTest do
       assert :ok = Task.await(task, 2_000)
     end
 
-    test "retries a call torn down by navigation (Inspected target navigated or closed)", %{
+    test "trusted: retries a call torn down by navigation (it only located)", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000) end)
+
+      send_cdp_error(fake, "Inspected target navigated or closed")
+      reply_evaluate(fake, %{"found" => true, "clickable" => true, "x" => 1, "y" => 2})
+
+      for type <- ["mousePressed", "mouseReleased"] do
+        assert_receive {:fake_cdp_recv, ^fake, %{"id" => mid, "params" => %{"type" => ^type}}},
+                       2_000
+
+        FakeCDP.send_text(fake, ~s({"id":#{mid},"result":{}}))
+      end
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "synthetic: retries a context that was never found (the script didn't run)", %{
       page: page,
       fake: fake
     } do
       task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000, trusted: false) end)
 
-      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
-
-      FakeCDP.send_text(
-        fake,
-        ~s({"id":#{id},"error":{"code":-32000,"message":"Inspected target navigated or closed"}})
-      )
-
+      send_cdp_error(fake, "Cannot find default execution context")
       reply_evaluate(fake, true)
+
       assert :ok = Task.await(task, 2_000)
+    end
+
+    test "synthetic: never retries a context torn down mid-call (the click may have navigated)",
+         %{page: page, fake: fake} do
+      for message <- ["Inspected target navigated or closed", "Execution context was destroyed."] do
+        task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000, trusted: false) end)
+
+        send_cdp_error(fake, message)
+
+        assert {:error, {:cdp_error, "Runtime.evaluate", %{"message" => ^message}}} =
+                 Task.await(task, 1_000)
+
+        refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
+      end
     end
 
     test "a detached-session CDP error from the locate step returns at once", %{
@@ -1859,6 +1887,12 @@ defmodule CDPEx.PageTest do
   defp reply_evaluate(fake, value) do
     assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
     FakeCDP.send_text(fake, evaluate_reply(id, value))
+  end
+
+  defp send_cdp_error(fake, message) do
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+    error = %{"code" => -32_000, "message" => message}
+    FakeCDP.send_text(fake, Jason.encode!(%{"id" => id, "error" => error}))
   end
 
   defp evaluate_reply(id, value),
