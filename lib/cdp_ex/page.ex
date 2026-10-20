@@ -41,8 +41,7 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
   @click_poll_interval 100
   @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
-  # Chrome's messages (all code -32000) for an execution context that wasn't there, so
-  # the script never ran, and for one torn down while a call was in flight.
+  # All -32000: a context that never existed (the script didn't run) vs one torn down mid-call.
   @context_not_found ["Cannot find context", "Cannot find default execution context"]
   @context_torn_down ["Execution context was destroyed", "Inspected target navigated or closed"]
   @context_missing @context_not_found ++ @context_torn_down
@@ -917,7 +916,8 @@ defmodule CDPEx.Page do
   Candidates are the elements under `document.body`; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
   label from matching unrelated text elsewhere on the page. The search doesn't enter
-  shadow roots or iframes.
+  shadow roots or iframes, and its cost grows with the page's text (it re-runs on every
+  `:wait` attempt).
 
   Clicks the same way as `click/3` — trusted by default, synthetic with
   `trusted: false`, with the same overlay caveat. A synthetic click picks the same
@@ -1075,13 +1075,8 @@ defmodule CDPEx.Page do
     end
   end
 
-  # An attempt fails in one of two phases. :locate (nothing dispatched yet) is retried
-  # while the element isn't there yet, and on a missing or torn-down execution context
-  # mid-navigation, which the next poll can outlive. Chrome reports those as a generic
-  # -32000, so they are told apart by message; a closed or detached session (-32001) is
-  # not retried. :dispatch (the click may have happened) is never retried, as a retry
-  # could double-click. Exceptions, timeouts and dropped connections won't fix
-  # themselves by polling, so they return in either phase.
+  # Only :locate failures (nothing dispatched yet) are retried; after :dispatch the click
+  # may have happened, and a retry could double-click.
   defp retry_click(attempt, deadline) do
     case attempt.() do
       {:locate, reason} = failure ->
@@ -1105,14 +1100,9 @@ defmodule CDPEx.Page do
 
   defp retryable_locate?(_reason), do: false
 
-  # Normalizes like XPath normalize-space() (only space/tab/CR/LF count). A
-  # descendant's normalized text is a substring of its ancestor's, so a subtree whose
-  # text doesn't contain the target is skipped. The walk is children-first and keeps
-  # only innermost matches (a wrapper's text equals its label's too). A boxless one (an
-  # SVG <title>, a display:contents span) climbs to its nearest matching HTMLElement
-  # ancestor with a box, skipping the <svg> to reach its button; the first candidate with
-  # a box wins, so a hidden duplicate earlier in the DOM
-  # doesn't shadow the visible one.
+  # A descendant's normalized text is a substring of its ancestor's, so a subtree that
+  # can't contain the target is skipped. The climb only accepts HTML ancestors: an SVG
+  # <title>'s <svg> has a box but no .click(), and the button is the real target.
   defp text_locator(text, selector) do
     """
     (function () {
@@ -1155,9 +1145,8 @@ defmodule CDPEx.Page do
     """
   end
 
-  # The locate and the click share one evaluate here. Only a context that was never
-  # found proves the script didn't run; a context torn down mid-call may be the click's
-  # own navigation, so that counts as :dispatch and isn't retried (no double submit).
+  # One evaluate locates and clicks, so only a never-found context or `false` proves
+  # nothing ran; a torn-down context may be the click's own navigation.
   defp synthetic_click(page, locator, not_found, opts) do
     js = """
     (function () {
@@ -1173,7 +1162,7 @@ defmodule CDPEx.Page do
       {:ok, true} -> :ok
       {:ok, false} -> {:locate, not_found}
       {:error, {:cdp_error, _, _} = reason} -> {synthetic_phase(reason), reason}
-      {:error, reason} -> {:locate, reason}
+      {:error, reason} -> {:dispatch, reason}
     end
   end
 

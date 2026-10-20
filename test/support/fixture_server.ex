@@ -171,14 +171,9 @@ defmodule CDPEx.FixtureServer do
     """
   end
 
-  # Every click lands in window.clicks as {id, trusted}. #late-btn only appears once a
-  # test calls armLate(ms), and lands in #late-slot at the end of the page so it never
-  # shifts another target mid-click; #wrapper is wider than its button, so a click at the wrapper's center hits the
-  # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
-  # "Open menu" appears twice: a display:none copy first, then the visible one. "Close"
-  # and "Next" are innermost in a boxless <title> / display:contents span, so only their
-  # button / link has a box (clicks also record the event target's own tag, so a synthetic
-  # click shows which element was picked, not just the id it bubbled to). `/interact?smooth` turns on CSS smooth scrolling.
+  # Clicks land in window.clicks as {id, tag, trusted}. #late-btn appears only when a test
+  # calls armLate(ms), at the end of the page so it can't shift another target mid-click.
+  # #wrapper is wider than its button, so its center hits the wrapper itself.
   defp interact_page(smooth?) do
     style = if smooth?, do: "<style>html { scroll-behavior: smooth; }</style>", else: ""
 
