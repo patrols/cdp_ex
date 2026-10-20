@@ -343,11 +343,30 @@ defmodule CDPEx.PageTest do
       assert attempts > 1
     end
 
-    test "a non-retryable error returns at once without spending the budget", %{
+    test "an evaluate exception returns at once without spending the budget", %{
       page: page,
       fake: fake
     } do
-      task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000) end)
+      task = Task.async(fn -> Page.click(page, ":::", wait: 10_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      details = %{"text" => "Uncaught", "exception" => %{"description" => "SyntaxError"}}
+
+      FakeCDP.send_text(
+        fake,
+        Jason.encode!(%{
+          "id" => id,
+          "result" => %{"result" => %{"type" => "object"}, "exceptionDetails" => details}
+        })
+      )
+
+      assert {:error, {:evaluate_exception, ^details}} = Task.await(task, 1_000)
+      refute_received {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}
+    end
+
+    test "retries a CDP error from the locate step, then clicks", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000) end)
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
 
@@ -356,8 +375,42 @@ defmodule CDPEx.PageTest do
         ~s({"id":#{id},"error":{"code":-32000,"message":"Cannot find context with specified id"}})
       )
 
-      assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Task.await(task, 1_000)
-      refute_received {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}
+      reply_evaluate(fake, %{"found" => true, "clickable" => true, "x" => 1, "y" => 2})
+
+      for type <- ["mousePressed", "mouseReleased"] do
+        assert_receive {:fake_cdp_recv, ^fake,
+                        %{
+                          "id" => mid,
+                          "method" => "Input.dispatchMouseEvent",
+                          "params" => %{"type" => ^type}
+                        }},
+                       2_000
+
+        FakeCDP.send_text(fake, ~s({"id":#{mid},"result":{}}))
+      end
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "never retries a CDP error from the mouse dispatch", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000) end)
+
+      reply_evaluate(fake, %{"found" => true, "clickable" => true, "x" => 1, "y" => 2})
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => press_id, "params" => %{"type" => "mousePressed"}}},
+                     2_000
+
+      FakeCDP.send_text(fake, ~s({"id":#{press_id},"result":{}}))
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => rid, "params" => %{"type" => "mouseReleased"}}},
+                     2_000
+
+      FakeCDP.send_text(fake, ~s({"id":#{rid},"error":{"code":-32000,"message":"boom"}}))
+
+      assert {:error, {:cdp_error, "Input.dispatchMouseEvent", _}} = Task.await(task, 1_000)
+      refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
     end
 
     test "wait: 0 (the default) is a single attempt", %{page: page, fake: fake} do

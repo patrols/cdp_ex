@@ -857,9 +857,13 @@ defmodule CDPEx.Page do
 
   Options:
     * `:wait` — total milliseconds to keep retrying while the element is missing
-      (`:selector_not_found`) or has no box yet (`:not_clickable`), polling every
-      #{@click_poll_interval}ms; the last of those errors is returned once the
-      budget is spent. Any other error returns immediately. Each attempt locates
+      (`:selector_not_found`), has no box yet (`:not_clickable`), or the lookup
+      itself hits a CDP error (`{:cdp_error, _, _}`, e.g. no execution context
+      while the page is mid-navigation — as `wait_for_selector/3` tolerates),
+      polling every #{@click_poll_interval}ms; the last of those errors is returned
+      once the budget is spent. A CDP error from the mouse dispatch is never
+      retried (the press may already have landed), and an evaluate exception, a
+      timeout, or a dropped connection returns immediately. Each attempt locates
       and clicks in one step, so there is no gap between "found" and "clicked".
       The budget bounds the retrying, not an attempt already in flight. Default
       `0` (a single attempt).
@@ -886,7 +890,10 @@ defmodule CDPEx.Page do
   the match is exact after that normalization. A wrapping container's text equals
   its only child's, so when matches nest the **innermost** one is clicked: in
   `<div><button>Load more</button></div>` that is the button, not the div. Among
-  separate matches the first in document order wins.
+  separate innermost matches, the first in document order **that has a box**
+  (non-zero size) wins, so a hidden copy of the label earlier in the page (a
+  collapsed mobile menu, say) doesn't shadow the visible one. When none has a box
+  the first match is chosen, and the click reports `:not_clickable`.
 
   Candidates are the elements under `document.body`; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
@@ -897,8 +904,8 @@ defmodule CDPEx.Page do
 
   Options:
     * `:selector` — CSS selector the candidates must match. Default: any element.
-    * `:wait` — as in `click/3`, retrying while nothing matches or the match has
-      no box yet. Default `0`.
+    * `:wait` — as in `click/3`, retrying while nothing matches, no match has a
+      box yet, or the lookup hits a CDP error. Default `0`.
     * `:trusted` — as in `click/3`. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
@@ -1013,32 +1020,38 @@ defmodule CDPEx.Page do
         fn -> synthetic_click(page, locator, not_found, opts) end
       end
 
-    case Keyword.get(opts, :wait, 0) do
-      0 ->
-        attempt.()
+    result =
+      case Keyword.get(opts, :wait, 0) do
+        0 ->
+          attempt.()
 
-      wait when is_integer(wait) and wait > 0 ->
-        retry_click(attempt, System.monotonic_time(:millisecond) + wait)
+        wait when is_integer(wait) and wait > 0 ->
+          retry_click(attempt, System.monotonic_time(:millisecond) + wait)
 
-      other ->
-        raise ArgumentError, "invalid :wait #{inspect(other)} (expected a non-negative integer)"
+        other ->
+          raise ArgumentError, "invalid :wait #{inspect(other)} (expected a non-negative integer)"
+      end
+
+    case result do
+      :ok -> :ok
+      {_phase, reason} -> {:error, reason}
     end
   end
 
-  # Only "not there yet" outcomes are retried: an exception, a CDP error, or a dropped
-  # connection will not fix itself by polling, and a retry after a partially
-  # dispatched trusted click could double-click.
+  # An attempt fails in one of two phases. :locate (the evaluate that finds the element,
+  # before anything is dispatched) is retried while the element isn't there yet, and on
+  # a CDP error such as a missing execution context mid-navigation, which the next poll
+  # can outlive. :dispatch is never retried: Input.dispatchMouseEvent failing after
+  # mousePressed went through would make a retry a double click. Exceptions, timeouts and
+  # dropped connections won't fix themselves by polling, so they return in either phase.
   defp retry_click(attempt, deadline) do
     case attempt.() do
-      {:error, {tag, _}} = error
-      when tag in [:selector_not_found, :text_not_found, :not_clickable] ->
-        case remaining(deadline) do
-          0 ->
-            error
-
-          left ->
-            Process.sleep(min(@click_poll_interval, left))
-            retry_click(attempt, deadline)
+      {:locate, reason} = failure ->
+        if retryable_locate?(reason) and remaining(deadline) > 0 do
+          Process.sleep(min(@click_poll_interval, remaining(deadline)))
+          retry_click(attempt, deadline)
+        else
+          failure
         end
 
       result ->
@@ -1046,36 +1059,52 @@ defmodule CDPEx.Page do
     end
   end
 
+  defp retryable_locate?({tag, _})
+       when tag in [:selector_not_found, :text_not_found, :not_clickable], do: true
+
+  defp retryable_locate?({:cdp_error, _, _}), do: true
+  defp retryable_locate?(_reason), do: false
+
   # Normalizes like XPath normalize-space() (only space/tab/CR/LF count). A
   # descendant's normalized text is a substring of its ancestor's, so a subtree whose
-  # text doesn't contain the target is skipped; the descent is children-first, which
-  # makes the hit the innermost match (a wrapper's text equals its label's too).
+  # text doesn't contain the target is skipped. The walk is children-first and keeps
+  # only innermost matches (a wrapper's text equals its label's too); the first of those
+  # with a box wins, so a hidden duplicate earlier in the DOM doesn't shadow the visible one.
   defp text_locator(text, selector) do
     """
     (function () {
       var norm = function (s) { return s.replace(/[ \\t\\r\\n]+/g, " ").replace(/^ | $/g, ""); };
       var target = norm(#{Jason.encode!(text)});
       var selector = #{Jason.encode!(selector)};
-      var find = function (el) {
+      var matches = [];
+      var walk = function (el) {
         var t = norm(el.textContent);
-        if (t.indexOf(target) === -1) { return null; }
+        if (t.indexOf(target) === -1) { return false; }
+        var inner = false;
         for (var c = el.firstElementChild; c; c = c.nextElementSibling) {
-          var hit = find(c);
-          if (hit) { return hit; }
+          if (walk(c)) { inner = true; }
         }
-        return t === target && (selector === null || el.matches(selector)) ? el : null;
+        if (inner) { return true; }
+        if (t === target && (selector === null || el.matches(selector))) {
+          matches.push(el);
+          return true;
+        }
+        return false;
       };
       if (selector !== null) { document.createDocumentFragment().querySelector(selector); }
       if (!document.body) { return null; }
-      for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) {
-        var hit = find(c);
-        if (hit) { return hit; }
+      for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
+      for (var i = 0; i < matches.length; i++) {
+        var r = matches[i].getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) { return matches[i]; }
       }
-      return null;
+      return matches.length > 0 ? matches[0] : null;
     })()
     """
   end
 
+  # The locate and the click share one evaluate here, so its failures are :locate: a CDP
+  # error on Runtime.evaluate means the script never ran.
   defp synthetic_click(page, locator, not_found, opts) do
     js = """
     (function () {
@@ -1088,8 +1117,8 @@ defmodule CDPEx.Page do
 
     case evaluate(page, js, opts) do
       {:ok, true} -> :ok
-      {:ok, false} -> {:error, not_found}
-      {:error, _} = error -> error
+      {:ok, false} -> {:locate, not_found}
+      {:error, reason} -> {:locate, reason}
     end
   end
 
@@ -1110,18 +1139,21 @@ defmodule CDPEx.Page do
 
     case evaluate(page, js, opts) do
       {:ok, %{"found" => false}} ->
-        {:error, not_found}
+        {:locate, not_found}
 
       {:ok, %{"clickable" => false}} ->
-        {:error, {:not_clickable, label}}
+        {:locate, {:not_clickable, label}}
 
       {:ok, %{"clickable" => true, "x" => x, "y" => y}} ->
-        with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout) do
-          dispatch_mouse(page, "mouseReleased", x, y, 0, timeout)
+        with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout),
+             :ok <- dispatch_mouse(page, "mouseReleased", x, y, 0, timeout) do
+          :ok
+        else
+          {:error, reason} -> {:dispatch, reason}
         end
 
-      {:error, _} = error ->
-        error
+      {:error, reason} ->
+        {:locate, reason}
     end
   end
 
