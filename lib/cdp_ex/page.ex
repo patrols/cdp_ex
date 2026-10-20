@@ -41,6 +41,13 @@ defmodule CDPEx.Page do
   @command_timeout 10_000
   @click_poll_interval 100
   @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
+  # Chrome's messages for a missing or torn-down execution context (all code -32000).
+  @context_missing [
+    "Execution context",
+    "execution context",
+    "Cannot find context",
+    "Inspected target navigated or closed"
+  ]
   # Slack past a capture/wait helper's own deadline before run_in_helper/4 force-kills it.
   # The helper bounds every op by the deadline, so it returns on its own well within this;
   # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
@@ -864,19 +871,21 @@ defmodule CDPEx.Page do
       of those errors is returned once the budget is spent. Any other CDP error
       (e.g. a closed or detached session) returns immediately, as does one from the
       mouse dispatch (the press may already have landed), an evaluate exception, a
-      timeout, or a dropped connection. Each attempt locates
-      and clicks in one step, so there is no gap between "found" and "clicked".
+      timeout, or a dropped connection. Each attempt locates and clicks in one
+      step, so there is no gap between "found" and "clicked".
       The budget bounds the retrying, not an attempt already in flight, so the
       worst case is about `wait` plus one attempt's CDP calls (each bounded by
       `:timeout`). Default `0` (a single attempt).
     * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
       hit-testing, `event.isTrusted == false`); the escape hatch for elements not
-      at a clickable point. Default `true`.
+      at a clickable point. It clicks the element whatever its box, so it never
+      returns `:not_clickable` and `:wait` only waits for the element to exist.
+      Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
   Returns `:ok`, `{:error, {:selector_not_found, css}}` when nothing matches, or
   `{:error, {:not_clickable, css}}` when the element has no usable box (zero-size
-  or not visible even after scroll).
+  or not visible even after scroll; trusted clicks only).
   """
   @spec click(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def click(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
@@ -893,23 +902,29 @@ defmodule CDPEx.Page do
   text of hidden descendants, and as in XPath only space, tab, CR and LF count as
   whitespace (`&nbsp;` does not). A wrapping container's text equals
   its only child's, so when matches nest the **innermost** one is clicked: in
-  `<div><button>Load more</button></div>` that is the button, not the div. Among
-  separate innermost matches, the first in document order **that has a box**
-  (non-zero size) wins, so a hidden copy of the label earlier in the page (a
-  collapsed mobile menu, say) doesn't shadow the visible one. When none has a box
-  the first match is chosen, and the click reports `:not_clickable`.
+  `<div><button>Load more</button></div>` that is the button, not the div.
+
+  An innermost match with no box (non-zero size) stands in for its nearest matching
+  ancestor that has one: the SVG `<title>` in an icon button, or a
+  `display: contents` span in a link, yields the button or the link. Of those
+  candidates, the first in document order **that has a box** wins, so a hidden
+  copy of the label earlier in the page (a collapsed mobile menu, say) doesn't
+  shadow the visible one. When none has a box the first innermost match is chosen,
+  and a trusted click reports `:not_clickable`.
 
   Candidates are the elements under `document.body`; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
   label from matching unrelated text elsewhere on the page.
 
   Clicks the same way as `click/3` — trusted by default, synthetic with
-  `trusted: false`, with the same overlay caveat.
+  `trusted: false`, with the same overlay caveat. A synthetic click picks the same
+  element but clicks it whatever its box, so it never reports `:not_clickable`.
 
   Options:
     * `:selector` — CSS selector the candidates must match. Default: any element.
     * `:wait` — as in `click/3`, retrying while nothing matches, no match has a
-      box yet, or the lookup finds no execution context. Default `0`.
+      box yet (trusted clicks only), or the lookup finds no execution context.
+      Default `0`.
     * `:trusted` — as in `click/3`. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
@@ -1059,8 +1074,10 @@ defmodule CDPEx.Page do
 
   # An attempt fails in one of two phases. :locate (the evaluate that finds the element,
   # before anything is dispatched) is retried while the element isn't there yet, and on
-  # a missing execution context mid-navigation, which the next poll can outlive. Chrome
-  # reports that as a generic -32000, so it is told apart by message; a closed or
+  # a missing execution context mid-navigation, which the next poll can outlive (including
+  # "Inspected target navigated or closed" for a call in flight when the context went:
+  # locate never dispatches, so retrying it is safe). Chrome reports these as a generic
+  # -32000, so they are told apart by message; a closed or
   # detached session (-32001, "Session with given id not found") is not retried. :dispatch is never retried: Input.dispatchMouseEvent failing after
   # mousePressed went through would make a retry a double click. Exceptions, timeouts and
   # dropped connections won't fix themselves by polling, so they return in either phase.
@@ -1082,7 +1099,7 @@ defmodule CDPEx.Page do
   defp retryable_locate?({tag, _}) when tag in @retryable_locate, do: true
 
   defp retryable_locate?({:cdp_error, _method, %{"message" => message}}) do
-    is_binary(message) and message =~ ~r/execution context|cannot find context/i
+    is_binary(message) and String.contains?(message, @context_missing)
   end
 
   defp retryable_locate?(_reason), do: false
@@ -1090,8 +1107,10 @@ defmodule CDPEx.Page do
   # Normalizes like XPath normalize-space() (only space/tab/CR/LF count). A
   # descendant's normalized text is a substring of its ancestor's, so a subtree whose
   # text doesn't contain the target is skipped. The walk is children-first and keeps
-  # only innermost matches (a wrapper's text equals its label's too); the first of those
-  # with a box wins, so a hidden duplicate earlier in the DOM doesn't shadow the visible one.
+  # only innermost matches (a wrapper's text equals its label's too). A boxless one (an
+  # SVG <title>, a display:contents span) climbs to its nearest matching ancestor with
+  # a box; the first candidate with a box wins, so a hidden duplicate earlier in the DOM
+  # doesn't shadow the visible one.
   defp text_locator(text, selector) do
     """
     (function () {
@@ -1099,6 +1118,13 @@ defmodule CDPEx.Page do
       var target = norm(#{Jason.encode!(text)});
       var selector = #{Jason.encode!(selector)};
       var matches = [];
+      var matching = function (el) {
+        return norm(el.textContent) === target && (selector === null || el.matches(selector));
+      };
+      var boxed = function (el) {
+        var r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
       var walk = function (el) {
         var t = norm(el.textContent);
         if (t.indexOf(target) === -1) { return false; }
@@ -1117,8 +1143,9 @@ defmodule CDPEx.Page do
       if (!document.body) { return null; }
       for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
       for (var i = 0; i < matches.length; i++) {
-        var r = matches[i].getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) { return matches[i]; }
+        for (var el = matches[i]; el && el !== document.body; el = el.parentElement) {
+          if ((el === matches[i] || matching(el)) && boxed(el)) { return el; }
+        }
       }
       return matches.length > 0 ? matches[0] : null;
     })()

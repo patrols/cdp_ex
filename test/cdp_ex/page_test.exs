@@ -395,6 +395,23 @@ defmodule CDPEx.PageTest do
       assert :ok = Task.await(task, 2_000)
     end
 
+    test "retries a call torn down by navigation (Inspected target navigated or closed)", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000, trusted: false) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32000,"message":"Inspected target navigated or closed"}})
+      )
+
+      reply_evaluate(fake, true)
+      assert :ok = Task.await(task, 2_000)
+    end
+
     test "a detached-session CDP error from the locate step returns at once", %{
       page: page,
       fake: fake

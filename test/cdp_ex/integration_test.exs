@@ -505,6 +505,20 @@ defmodule CDPEx.IntegrationTest do
                clicks(page)
     end
 
+    test "click_text/3 climbs from a boxless innermost match to its clickable ancestor", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Close")
+      assert :ok = Page.click_text(page, "Next")
+
+      assert [
+               %{"id" => "icon-close", "trusted" => true},
+               %{"id" => "next-link", "trusted" => true}
+             ] = clicks(page)
+    end
+
     test "click_text/3 matches with whitespace normalized", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
       assert :ok = Page.click_text(page, "  Show all\n events ")
@@ -563,6 +577,16 @@ defmodule CDPEx.IntegrationTest do
 
       assert :ok = Page.scroll(page, :top)
       assert {:ok, 0} = Page.evaluate(page, "window.scrollY")
+    end
+
+    test "scroll/3 is instant under CSS smooth scrolling", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture <> "interact?smooth", wait_until: :load)
+
+      assert {:ok, "smooth"} =
+               Page.evaluate(page, "getComputedStyle(document.documentElement).scrollBehavior")
+
+      assert :ok = Page.scroll(page, {0, 1234})
+      assert {:ok, 1234} = Page.evaluate(page, "window.scrollY")
     end
 
     test "type/4 enters text into a field and fires input events", %{page: page, fixture: fixture} do

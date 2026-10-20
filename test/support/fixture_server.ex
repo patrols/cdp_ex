@@ -101,7 +101,7 @@ defmodule CDPEx.FixtureServer do
     end
   end
 
-  defp page_body("/interact" <> _, _request), do: interact_page()
+  defp page_body("/interact" <> rest, _request), do: interact_page(rest =~ "smooth")
   defp page_body(_path, request), do: render(request)
 
   @json_ct ["Content-Type: application/json"]
@@ -175,12 +175,16 @@ defmodule CDPEx.FixtureServer do
   # test calls armLate(ms), and lands in #late-slot at the end of the page so it never
   # shifts another target mid-click; #wrapper is wider than its button, so a click at the wrapper's center hits the
   # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
-  # "Open menu" appears twice: a display:none copy first, then the visible one.
-  defp interact_page do
+  # "Open menu" appears twice: a display:none copy first, then the visible one. "Close"
+  # and "Next" are innermost in a boxless <title> / display:contents span, so only their
+  # button / link has a box. `/interact?smooth` turns on CSS smooth scrolling.
+  defp interact_page(smooth?) do
+    style = if smooth?, do: "<style>html { scroll-behavior: smooth; }</style>", else: ""
+
     """
     <!doctype html>
     <html>
-      <head><title>CDPEx Interact</title></head>
+      <head><title>CDPEx Interact</title>#{style}</head>
       <body style="margin:0">
         <nav style="display:none"><button id="menu-hidden">Open menu</button></nav>
         <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
@@ -192,6 +196,8 @@ defmodule CDPEx.FixtureServer do
             all   events
         </a>
         <button id="hidden-text-btn" style="display:none">Invisible</button>
+        <button id="icon-close"><svg width="16" height="16"><title>Close</title><rect width="16" height="16"></rect></svg></button>
+        <a id="next-link" href="#"><span style="display:contents">Next</span></a>
         <div style="height:5000px"></div>
         <p id="footer">end</p>
         <div id="late-slot"></div>
@@ -199,7 +205,8 @@ defmodule CDPEx.FixtureServer do
           window.clicks = [];
           document.addEventListener("click", function (e) {
             e.preventDefault();
-            window.clicks.push({id: e.target.id, trusted: e.isTrusted});
+            var hit = e.target.closest("[id]");
+            window.clicks.push({id: hit ? hit.id : "", trusted: e.isTrusted});
           });
           window.armLate = function (ms) {
             setTimeout(function () {
