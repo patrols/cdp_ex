@@ -457,6 +457,7 @@ defmodule CDPEx.IntegrationTest do
     } do
       {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
       assert {:error, {:selector_not_found, "#late-btn"}} = Page.click(page, "#late-btn")
+      assert {:ok, true} = Page.evaluate(page, "armLate(300)")
       assert :ok = Page.click(page, "#late-btn", wait: 5_000)
       assert [%{"id" => "late-btn", "trusted" => true}] = clicks(page)
     end
@@ -536,6 +537,8 @@ defmodule CDPEx.IntegrationTest do
       fixture: fixture
     } do
       {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert {:error, {:text_not_found, "Arrived late"}} = Page.click_text(page, "Arrived late")
+      assert {:ok, true} = Page.evaluate(page, "armLate(300)")
       assert :ok = Page.click_text(page, "Arrived late", wait: 5_000)
       assert [%{"id" => "late-btn", "trusted" => true}] = clicks(page)
     end

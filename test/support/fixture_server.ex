@@ -171,8 +171,9 @@ defmodule CDPEx.FixtureServer do
     """
   end
 
-  # Every click lands in window.clicks as {id, trusted}. #late-btn appears 300ms after
-  # load; #wrapper is wider than its button, so a click at the wrapper's center hits the
+  # Every click lands in window.clicks as {id, trusted}. #late-btn only appears once a
+  # test calls armLate(ms), and lands in #late-slot at the end of the page so it never
+  # shifts another target mid-click; #wrapper is wider than its button, so a click at the wrapper's center hits the
   # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
   # "Open menu" appears twice: a display:none copy first, then the visible one.
   defp interact_page do
@@ -193,18 +194,22 @@ defmodule CDPEx.FixtureServer do
         <button id="hidden-text-btn" style="display:none">Invisible</button>
         <div style="height:5000px"></div>
         <p id="footer">end</p>
+        <div id="late-slot"></div>
         <script>
           window.clicks = [];
           document.addEventListener("click", function (e) {
             e.preventDefault();
             window.clicks.push({id: e.target.id, trusted: e.isTrusted});
           });
-          setTimeout(function () {
-            var b = document.createElement("button");
-            b.id = "late-btn";
-            b.textContent = "Arrived late";
-            document.body.insertBefore(b, document.body.firstChild);
-          }, 300);
+          window.armLate = function (ms) {
+            setTimeout(function () {
+              var b = document.createElement("button");
+              b.id = "late-btn";
+              b.textContent = "Arrived late";
+              document.getElementById("late-slot").appendChild(b);
+            }, ms);
+            return true;
+          };
         </script>
       </body>
     </html>
