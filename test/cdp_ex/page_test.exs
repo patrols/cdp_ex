@@ -365,7 +365,10 @@ defmodule CDPEx.PageTest do
       refute_received {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}
     end
 
-    test "retries a CDP error from the locate step, then clicks", %{page: page, fake: fake} do
+    test "retries a missing-execution-context error from the locate step, then clicks", %{
+      page: page,
+      fake: fake
+    } do
       task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000) end)
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
@@ -390,6 +393,25 @@ defmodule CDPEx.PageTest do
       end
 
       assert :ok = Task.await(task, 2_000)
+    end
+
+    test "a detached-session CDP error from the locate step returns at once", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32001,"message":"Session with given id not found."}})
+      )
+
+      assert {:error, {:cdp_error, "Runtime.evaluate", %{"code" => -32_001}}} =
+               Task.await(task, 1_000)
+
+      refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
     end
 
     test "never retries a CDP error from the mouse dispatch", %{page: page, fake: fake} do

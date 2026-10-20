@@ -859,12 +859,12 @@ defmodule CDPEx.Page do
   Options:
     * `:wait` — total milliseconds to keep retrying while the element is missing
       (`:selector_not_found`), has no box yet (`:not_clickable`), or the lookup
-      itself hits a CDP error (`{:cdp_error, _, _}`, e.g. no execution context
-      while the page is mid-navigation — as `wait_for_selector/3` tolerates),
-      polling every #{@click_poll_interval}ms; the last of those errors is returned
-      once the budget is spent. A CDP error from the mouse dispatch is never
-      retried (the press may already have landed), and an evaluate exception, a
-      timeout, or a dropped connection returns immediately. Each attempt locates
+      finds no execution context (a `{:cdp_error, _, _}` while the page is
+      mid-navigation), waiting #{@click_poll_interval}ms between attempts; the last
+      of those errors is returned once the budget is spent. Any other CDP error
+      (e.g. a closed or detached session) returns immediately, as does one from the
+      mouse dispatch (the press may already have landed), an evaluate exception, a
+      timeout, or a dropped connection. Each attempt locates
       and clicks in one step, so there is no gap between "found" and "clicked".
       The budget bounds the retrying, not an attempt already in flight, so the
       worst case is about `wait` plus one attempt's CDP calls (each bounded by
@@ -885,11 +885,13 @@ defmodule CDPEx.Page do
   end
 
   @doc """
-  Clicks the element whose visible text is `text` — a button or link by its label.
+  Clicks the element whose text content is `text` — a button or link by its label.
 
   Text is compared after collapsing internal whitespace and trimming both sides
   (XPath `normalize-space()` semantics), against each candidate's `textContent`;
-  the match is exact after that normalization. A wrapping container's text equals
+  the match is exact after that normalization. Being `textContent`, it includes the
+  text of hidden descendants, and as in XPath only space, tab, CR and LF count as
+  whitespace (`&nbsp;` does not). A wrapping container's text equals
   its only child's, so when matches nest the **innermost** one is clicked: in
   `<div><button>Load more</button></div>` that is the button, not the div. Among
   separate innermost matches, the first in document order **that has a box**
@@ -907,7 +909,7 @@ defmodule CDPEx.Page do
   Options:
     * `:selector` — CSS selector the candidates must match. Default: any element.
     * `:wait` — as in `click/3`, retrying while nothing matches, no match has a
-      box yet, or the lookup hits a CDP error. Default `0`.
+      box yet, or the lookup finds no execution context. Default `0`.
     * `:trusted` — as in `click/3`. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
@@ -1057,8 +1059,9 @@ defmodule CDPEx.Page do
 
   # An attempt fails in one of two phases. :locate (the evaluate that finds the element,
   # before anything is dispatched) is retried while the element isn't there yet, and on
-  # a CDP error such as a missing execution context mid-navigation, which the next poll
-  # can outlive. :dispatch is never retried: Input.dispatchMouseEvent failing after
+  # a missing execution context mid-navigation, which the next poll can outlive. Chrome
+  # reports that as a generic -32000, so it is told apart by message; a closed or
+  # detached session (-32001, "Session with given id not found") is not retried. :dispatch is never retried: Input.dispatchMouseEvent failing after
   # mousePressed went through would make a retry a double click. Exceptions, timeouts and
   # dropped connections won't fix themselves by polling, so they return in either phase.
   defp retry_click(attempt, deadline) do
@@ -1078,7 +1081,10 @@ defmodule CDPEx.Page do
 
   defp retryable_locate?({tag, _}) when tag in @retryable_locate, do: true
 
-  defp retryable_locate?({:cdp_error, _, _}), do: true
+  defp retryable_locate?({:cdp_error, _method, %{"message" => message}}) do
+    is_binary(message) and message =~ ~r/execution context|cannot find context/i
+  end
+
   defp retryable_locate?(_reason), do: false
 
   # Normalizes like XPath normalize-space() (only space/tab/CR/LF count). A
