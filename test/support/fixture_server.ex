@@ -64,6 +64,7 @@ defmodule CDPEx.FixtureServer do
   #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
   #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
   #     wait_for_response/3 and wait_for_network_idle/2 paths.
+  #   /interact   — the click :wait / click_text/3 / scroll/3 page (interact_page/0).
   #   anything else serves the page.
   defp respond(request, json_version) do
     path = request_path(request)
@@ -96,9 +97,12 @@ defmodule CDPEx.FixtureServer do
         json_version_response(json_version)
 
       true ->
-        HttpFixture.http_response("200 OK", render(request))
+        HttpFixture.http_response("200 OK", page_body(path, request))
     end
   end
+
+  defp page_body("/interact" <> _, _request), do: interact_page()
+  defp page_body(_path, request), do: render(request)
 
   @json_ct ["Content-Type: application/json"]
 
@@ -162,6 +166,43 @@ defmodule CDPEx.FixtureServer do
         <div id="ticket-card-def">card-def</div>
         <div data-name="foo bar">named</div>
         <div data-label="a'b">named-quote</div>
+      </body>
+    </html>
+    """
+  end
+
+  # Every click lands in window.clicks as {id, trusted}. #late-btn appears 300ms after
+  # load; #wrapper is wider than its button, so a click at the wrapper's center hits the
+  # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
+  defp interact_page do
+    """
+    <!doctype html>
+    <html>
+      <head><title>CDPEx Interact</title></head>
+      <body style="margin:0">
+        <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
+        <span id="label-span">Subscribe</span>
+        <button id="subscribe-btn">Subscribe</button>
+        <a id="ws-link" href="#">
+          Show
+            all   events
+        </a>
+        <button id="hidden-text-btn" style="display:none">Invisible</button>
+        <div style="height:5000px"></div>
+        <p id="footer">end</p>
+        <script>
+          window.clicks = [];
+          document.addEventListener("click", function (e) {
+            e.preventDefault();
+            window.clicks.push({id: e.target.id, trusted: e.isTrusted});
+          });
+          setTimeout(function () {
+            var b = document.createElement("button");
+            b.id = "late-btn";
+            b.textContent = "Arrived late";
+            document.body.insertBefore(b, document.body.firstChild);
+          }, 300);
+        </script>
       </body>
     </html>
     """
