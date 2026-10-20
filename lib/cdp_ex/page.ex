@@ -40,6 +40,7 @@ defmodule CDPEx.Page do
   @screenshot_timeout 30_000
   @command_timeout 10_000
   @click_poll_interval 100
+  @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
   # Slack past a capture/wait helper's own deadline before run_in_helper/4 force-kills it.
   # The helper bounds every op by the deadline, so it returns on its own well within this;
   # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
@@ -865,8 +866,9 @@ defmodule CDPEx.Page do
       retried (the press may already have landed), and an evaluate exception, a
       timeout, or a dropped connection returns immediately. Each attempt locates
       and clicks in one step, so there is no gap between "found" and "clicked".
-      The budget bounds the retrying, not an attempt already in flight. Default
-      `0` (a single attempt).
+      The budget bounds the retrying, not an attempt already in flight, so the
+      worst case is about `wait` plus one attempt's CDP calls (each bounded by
+      `:timeout`). Default `0` (a single attempt).
     * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
       hit-testing, `event.isTrusted == false`); the escape hatch for elements not
       at a clickable point. Default `true`.
@@ -909,12 +911,20 @@ defmodule CDPEx.Page do
     * `:trusted` — as in `click/3`. Default `true`.
     * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
+  An empty or whitespace-only `text` raises `ArgumentError`: after normalization it
+  would match any element with no text.
+
   Returns `:ok`, `{:error, {:text_not_found, text}}` when no candidate matches,
   `{:error, {:not_clickable, text}}` when the match has no usable box, or
   `{:error, {:evaluate_exception, _}}` for an invalid `:selector`.
   """
   @spec click_text(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def click_text(%__MODULE__{} = page, text, opts \\ []) when is_binary(text) do
+    if blank_text?(text) do
+      raise ArgumentError,
+            "invalid click_text/3 text #{inspect(text)} (expected a non-whitespace label)"
+    end
+
     selector = Keyword.get(opts, :selector)
     locator = text_locator(text, selector)
     click_with_wait(page, locator, {:text_not_found, text}, text, opts)
@@ -928,6 +938,10 @@ defmodule CDPEx.Page do
   `window.scrollY` reflects it as soon as this returns. Content a page loads in
   response (infinite scroll) arrives later — follow up with `wait_for_selector/3`,
   `wait_for_function/3`, or `wait_for_network_idle/2`.
+
+  This scrolls the window only. An app whose scroll container is an inner element
+  (`body { overflow: hidden }` around a scrolling `<main>`) needs `evaluate/3` on that
+  element, e.g. `el.scrollTop = el.scrollHeight`.
 
   Returns `:ok` or `{:error, reason}`. Option: `:timeout` (default #{@evaluate_timeout}).
   """
@@ -1012,6 +1026,9 @@ defmodule CDPEx.Page do
     end
   end
 
+  # Same whitespace set as the locator's normalize-space() port.
+  defp blank_text?(text), do: Regex.match?(~r/\A[ \t\r\n]*\z/, text)
+
   defp click_with_wait(page, locator, not_found, label, opts) do
     attempt =
       if Keyword.get(opts, :trusted, true) do
@@ -1059,8 +1076,7 @@ defmodule CDPEx.Page do
     end
   end
 
-  defp retryable_locate?({tag, _})
-       when tag in [:selector_not_found, :text_not_found, :not_clickable], do: true
+  defp retryable_locate?({tag, _}) when tag in @retryable_locate, do: true
 
   defp retryable_locate?({:cdp_error, _, _}), do: true
   defp retryable_locate?(_reason), do: false

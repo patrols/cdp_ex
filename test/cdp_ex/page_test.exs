@@ -472,6 +472,19 @@ defmodule CDPEx.PageTest do
       assert :ok = Task.await(task, 2_000)
     end
 
+    test "raises on empty or whitespace-only text without touching the page", %{
+      page: page,
+      fake: fake
+    } do
+      for text <- ["", "   ", " \t\r\n "] do
+        assert_raise ArgumentError, ~r/invalid click_text\/3 text/, fn ->
+          Page.click_text(page, text)
+        end
+      end
+
+      refute_receive {:fake_cdp_recv, ^fake, _}, 100
+    end
+
     test "reports :not_clickable with the text", %{page: page, fake: fake} do
       task = Task.async(fn -> Page.click_text(page, "Hidden") end)
 
