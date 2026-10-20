@@ -6,6 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.Page.click/3` `:wait` option — a total budget (ms) for the element to appear and get a clickable box. Each attempt is the full atomic locate + click, retried every 100ms only while the result is `{:selector_not_found, _}` or `{:not_clickable, _}`; any other error (an evaluate exception, a CDP error, a dropped connection, a timeout) returns immediately. Defaults to `0`, a single attempt as before. Separate from `:timeout`, which stays the per-CDP-call timeout (#119).
+- `CDPEx.Page.click_text/3` — click an element by its visible text. Matches `textContent` exactly after whitespace normalization (XPath `normalize-space()` semantics), clicks the innermost match when matches nest (so a wrapper whose text equals its button's label is not clicked instead of the button), and takes `:selector` to restrict candidates, `:wait` and `:trusted` as `click/3`. No match returns the new `{:error, {:text_not_found, text}}`, classified `:terminal` (#119).
+- `CDPEx.Page.scroll/3` — scroll the window to `:top`, `:bottom`, or `{x, y}`; instant even under `scroll-behavior: smooth` (#119).
+
 ### Changed
 - Bumped `mint` to 1.11.0 (and `hpax` to 1.1.0) for EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding), which `mix hex.audit` had started failing CI on.
 
