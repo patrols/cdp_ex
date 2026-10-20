@@ -16,7 +16,8 @@ defmodule CDPEx.Page do
     * **Navigation** — `navigate/3`, `wait_for_navigation/2`
     * **Evaluation** — `evaluate/3`, `call_function/4`, `html/2`
     * **Waiting** — `wait_for_selector/3`, `wait_for_function/3`
-    * **Elements** — `text/3`, `attribute/4`, `visible?/3`, `click/3`, `type/4`, `press/4`
+    * **Elements** — `text/3`, `attribute/4`, `visible?/3`, `click/3`, `click_text/3`, `type/4`, `press/4`
+    * **Scrolling** — `scroll/3`
     * **Capture** — `screenshot/2`, `pdf/2`
     * **Emulation** — `set_viewport/4`, `set_user_agent/3`
     * **Cookies & headers** — `cookies/2`, `set_cookies/3`, `clear_cookies/2`, `set_extra_headers/3`
@@ -38,6 +39,7 @@ defmodule CDPEx.Page do
   @selector_timeout 5_000
   @screenshot_timeout 30_000
   @command_timeout 10_000
+  @click_poll_interval 100
   # Slack past a capture/wait helper's own deadline before run_in_helper/4 force-kills it.
   # The helper bounds every op by the deadline, so it returns on its own well within this;
   # the grace is a last-resort net (generous, to never pre-empt a merely-slow helper under
@@ -849,15 +851,22 @@ defmodule CDPEx.Page do
   The click is dispatched at the element's center but is **not** verified against
   what is actually on top — if an overlay covers the center, the overlay receives
   the event and the call still returns `:ok`. `{:error, {:not_clickable, css}}`
-  reflects the layout at call time; on pages that animate or lazy-render content
-  in, the box may not be ready yet, so retry at the caller (e.g. after
-  `wait_for_selector/3`) rather than treating it as permanent.
+  reflects the layout at call time; on pages that render or animate content in
+  late (an SPA that hydrates after load), pass `:wait` so the click retries until
+  the element is there and has a box.
 
   Options:
+    * `:wait` — total milliseconds to keep retrying while the element is missing
+      (`:selector_not_found`) or has no box yet (`:not_clickable`), polling every
+      #{@click_poll_interval}ms; the last of those errors is returned once the
+      budget is spent. Any other error returns immediately. Each attempt locates
+      and clicks in one step, so there is no gap between "found" and "clicked".
+      The budget bounds the retrying, not an attempt already in flight. Default
+      `0` (a single attempt).
     * `:trusted` — `false` falls back to a synthetic JS `.click()` (no
       hit-testing, `event.isTrusted == false`); the escape hatch for elements not
       at a clickable point. Default `true`.
-    * `:timeout` — default #{@evaluate_timeout}.
+    * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
 
   Returns `:ok`, `{:error, {:selector_not_found, css}}` when nothing matches, or
   `{:error, {:not_clickable, css}}` when the element has no usable box (zero-size
@@ -865,10 +874,83 @@ defmodule CDPEx.Page do
   """
   @spec click(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def click(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
-    if Keyword.get(opts, :trusted, true) do
-      trusted_click(page, css, opts)
-    else
-      synthetic_click(page, css, opts)
+    locator = "document.querySelector(#{Jason.encode!(css)})"
+    click_with_wait(page, locator, {:selector_not_found, css}, css, opts)
+  end
+
+  @doc """
+  Clicks the element whose visible text is `text` — a button or link by its label.
+
+  Text is compared after collapsing internal whitespace and trimming both sides
+  (XPath `normalize-space()` semantics), against each candidate's `textContent`;
+  the match is exact after that normalization. A wrapping container's text equals
+  its only child's, so when matches nest the **innermost** one is clicked: in
+  `<div><button>Load more</button></div>` that is the button, not the div. Among
+  separate matches the first in document order wins.
+
+  Candidates are the elements under `document.body`; `:selector` narrows them to
+  those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
+  label from matching unrelated text elsewhere on the page.
+
+  Clicks the same way as `click/3` — trusted by default, synthetic with
+  `trusted: false`, with the same overlay caveat.
+
+  Options:
+    * `:selector` — CSS selector the candidates must match. Default: any element.
+    * `:wait` — as in `click/3`, retrying while nothing matches or the match has
+      no box yet. Default `0`.
+    * `:trusted` — as in `click/3`. Default `true`.
+    * `:timeout` — per-CDP-call timeout, default #{@evaluate_timeout}.
+
+  Returns `:ok`, `{:error, {:text_not_found, text}}` when no candidate matches,
+  `{:error, {:not_clickable, text}}` when the match has no usable box, or
+  `{:error, {:evaluate_exception, _}}` for an invalid `:selector`.
+  """
+  @spec click_text(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def click_text(%__MODULE__{} = page, text, opts \\ []) when is_binary(text) do
+    selector = Keyword.get(opts, :selector)
+    locator = text_locator(text, selector)
+    click_with_wait(page, locator, {:text_not_found, text}, text, opts)
+  end
+
+  @doc """
+  Scrolls the window to `target`: `:top` or `:bottom` of the document (keeping the
+  horizontal position), or `{x, y}` document coordinates.
+
+  The scroll is instant even on a page that sets `scroll-behavior: smooth`, so
+  `window.scrollY` reflects it as soon as this returns. Content a page loads in
+  response (infinite scroll) arrives later — follow up with `wait_for_selector/3`,
+  `wait_for_function/3`, or `wait_for_network_idle/2`.
+
+  Returns `:ok` or `{:error, reason}`. Option: `:timeout` (default #{@evaluate_timeout}).
+  """
+  @spec scroll(t(), :top | :bottom | {number(), number()}, keyword()) :: :ok | {:error, term()}
+  def scroll(page, target, opts \\ [])
+
+  def scroll(%__MODULE__{} = page, :top, opts), do: scroll_to(page, "window.scrollX", "0", opts)
+
+  def scroll(%__MODULE__{} = page, :bottom, opts) do
+    height =
+      "Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)"
+
+    scroll_to(page, "window.scrollX", height, opts)
+  end
+
+  def scroll(%__MODULE__{} = page, {x, y}, opts) when is_number(x) and is_number(y),
+    do: scroll_to(page, Jason.encode!(x), Jason.encode!(y), opts)
+
+  defp scroll_to(page, left, top, opts) do
+    js = """
+    (function () {
+      window.scrollTo({left: #{left}, top: #{top}, behavior: "instant"});
+      return true;
+    })()
+    """
+
+    case evaluate(page, js, opts) do
+      {:ok, true} -> :ok
+      {:ok, other} -> {:error, {:unexpected_evaluate, other}}
+      {:error, _} = error -> error
     end
   end
 
@@ -923,12 +1005,81 @@ defmodule CDPEx.Page do
     end
   end
 
-  defp synthetic_click(page, css, opts) do
-    selector = Jason.encode!(css)
+  defp click_with_wait(page, locator, not_found, label, opts) do
+    attempt =
+      if Keyword.get(opts, :trusted, true) do
+        fn -> trusted_click(page, locator, not_found, label, opts) end
+      else
+        fn -> synthetic_click(page, locator, not_found, opts) end
+      end
 
+    case Keyword.get(opts, :wait, 0) do
+      0 ->
+        attempt.()
+
+      wait when is_integer(wait) and wait > 0 ->
+        retry_click(attempt, System.monotonic_time(:millisecond) + wait)
+
+      other ->
+        raise ArgumentError, "invalid :wait #{inspect(other)} (expected a non-negative integer)"
+    end
+  end
+
+  # Only "not there yet" outcomes are retried: an exception, a CDP error, or a dropped
+  # connection will not fix itself by polling, and a retry after a partially
+  # dispatched trusted click could double-click.
+  defp retry_click(attempt, deadline) do
+    case attempt.() do
+      {:error, {tag, _}} = error
+      when tag in [:selector_not_found, :text_not_found, :not_clickable] ->
+        case remaining(deadline) do
+          0 ->
+            error
+
+          left ->
+            Process.sleep(min(@click_poll_interval, left))
+            retry_click(attempt, deadline)
+        end
+
+      result ->
+        result
+    end
+  end
+
+  # Normalizes like XPath normalize-space() (only space/tab/CR/LF count). A
+  # descendant's normalized text is a substring of its ancestor's, so a subtree whose
+  # text doesn't contain the target is skipped; the descent is children-first, which
+  # makes the hit the innermost match (a wrapper's text equals its label's too).
+  defp text_locator(text, selector) do
+    """
+    (function () {
+      var norm = function (s) { return s.replace(/[ \\t\\r\\n]+/g, " ").replace(/^ | $/g, ""); };
+      var target = norm(#{Jason.encode!(text)});
+      var selector = #{Jason.encode!(selector)};
+      var find = function (el) {
+        var t = norm(el.textContent);
+        if (t.indexOf(target) === -1) { return null; }
+        for (var c = el.firstElementChild; c; c = c.nextElementSibling) {
+          var hit = find(c);
+          if (hit) { return hit; }
+        }
+        return t === target && (selector === null || el.matches(selector)) ? el : null;
+      };
+      if (selector !== null) { document.createDocumentFragment().querySelector(selector); }
+      if (!document.body) { return null; }
+      for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) {
+        var hit = find(c);
+        if (hit) { return hit; }
+      }
+      return null;
+    })()
+    """
+  end
+
+  defp synthetic_click(page, locator, not_found, opts) do
     js = """
     (function () {
-      var el = document.querySelector(#{selector});
+      var el = #{locator};
       if (!el) { return false; }
       el.click();
       return true;
@@ -937,17 +1088,15 @@ defmodule CDPEx.Page do
 
     case evaluate(page, js, opts) do
       {:ok, true} -> :ok
-      {:ok, false} -> {:error, {:selector_not_found, css}}
+      {:ok, false} -> {:error, not_found}
       {:error, _} = error -> error
     end
   end
 
-  defp trusted_click(page, css, opts) do
-    selector = Jason.encode!(css)
-
+  defp trusted_click(page, locator, not_found, label, opts) do
     js = """
     (function () {
-      var el = document.querySelector(#{selector});
+      var el = #{locator};
       if (!el) { return {found: false}; }
       if (el.scrollIntoViewIfNeeded) { el.scrollIntoViewIfNeeded(); }
       else { el.scrollIntoView({block: "center", inline: "center"}); }
@@ -961,10 +1110,10 @@ defmodule CDPEx.Page do
 
     case evaluate(page, js, opts) do
       {:ok, %{"found" => false}} ->
-        {:error, {:selector_not_found, css}}
+        {:error, not_found}
 
       {:ok, %{"clickable" => false}} ->
-        {:error, {:not_clickable, css}}
+        {:error, {:not_clickable, label}}
 
       {:ok, %{"clickable" => true, "x" => x, "y" => y}} ->
         with :ok <- dispatch_mouse(page, "mousePressed", x, y, 1, timeout) do

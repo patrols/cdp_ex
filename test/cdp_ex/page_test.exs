@@ -298,6 +298,157 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "click/3 :wait" do
+    test "retries while the selector is missing, then clicks", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click(page, "#late", wait: 2_000, trusted: false) end)
+
+      reply_evaluate(fake, false)
+      reply_evaluate(fake, false)
+      reply_evaluate(fake, true)
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "retries a trusted click while the element has no box, then dispatches", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.click(page, "#late", wait: 2_000) end)
+
+      reply_evaluate(fake, %{"found" => true, "clickable" => false})
+      reply_evaluate(fake, %{"found" => true, "clickable" => true, "x" => 10, "y" => 20})
+
+      for type <- ["mousePressed", "mouseReleased"] do
+        assert_receive {:fake_cdp_recv, ^fake,
+                        %{
+                          "id" => id,
+                          "method" => "Input.dispatchMouseEvent",
+                          "params" => %{"type" => ^type, "x" => 10, "y" => 20}
+                        }},
+                       2_000
+
+        FakeCDP.send_text(fake, ~s({"id":#{id},"result":{}}))
+      end
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "returns the last retryable error once the budget is spent", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click(page, "#hidden", wait: 300) end)
+
+      {result, attempts} =
+        answer_until_done(task, fake, %{"found" => true, "clickable" => false})
+
+      assert result == {:error, {:not_clickable, "#hidden"}}
+      assert attempts > 1
+    end
+
+    test "a non-retryable error returns at once without spending the budget", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32000,"message":"Cannot find context with specified id"}})
+      )
+
+      assert {:error, {:cdp_error, "Runtime.evaluate", _}} = Task.await(task, 1_000)
+      refute_received {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}
+    end
+
+    test "wait: 0 (the default) is a single attempt", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click(page, "#nope", trusted: false) end)
+
+      reply_evaluate(fake, false)
+
+      assert {:error, {:selector_not_found, "#nope"}} = Task.await(task, 1_000)
+      refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
+    end
+
+    test "raises on an invalid :wait", %{page: page} do
+      assert_raise ArgumentError, ~r/invalid :wait -1/, fn ->
+        Page.click(page, "#btn", wait: -1)
+      end
+    end
+  end
+
+  describe "click_text/3" do
+    test "JSON-encodes the text and selector into the locator", %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.click_text(page, ~S(Say "hi" & it's), selector: ~S(button[data-x="y"]))
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{
+                        "id" => id,
+                        "method" => "Runtime.evaluate",
+                        "params" => %{"expression" => expression}
+                      }},
+                     2_000
+
+      assert expression =~ ~S{var target = norm("Say \"hi\" & it's");}
+      assert expression =~ ~S{var selector = "button[data-x=\"y\"]";}
+
+      FakeCDP.send_text(fake, evaluate_reply(id, %{"found" => false}))
+      assert {:error, {:text_not_found, ~S(Say "hi" & it's)}} = Task.await(task, 2_000)
+    end
+
+    test "a missing :selector encodes as null", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click_text(page, "Go", trusted: false) end)
+
+      assert_receive {:fake_cdp_recv, ^fake,
+                      %{"id" => id, "params" => %{"expression" => expression}}},
+                     2_000
+
+      assert expression =~ "var selector = null;"
+      FakeCDP.send_text(fake, evaluate_reply(id, false))
+      assert {:error, {:text_not_found, "Go"}} = Task.await(task, 2_000)
+    end
+
+    test ":wait retries while the text is missing", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click_text(page, "Load more", wait: 2_000, trusted: false) end)
+
+      reply_evaluate(fake, false)
+      reply_evaluate(fake, true)
+
+      assert :ok = Task.await(task, 2_000)
+    end
+
+    test "reports :not_clickable with the text", %{page: page, fake: fake} do
+      task = Task.async(fn -> Page.click_text(page, "Hidden") end)
+
+      reply_evaluate(fake, %{"found" => true, "clickable" => false})
+
+      assert {:error, {:not_clickable, "Hidden"}} = Task.await(task, 2_000)
+    end
+  end
+
+  describe "scroll/3" do
+    test "scrolls instantly and returns :ok", %{page: page, fake: fake} do
+      for {target, fragment} <- [
+            {:top, "left: window.scrollX, top: 0,"},
+            {:bottom, "document.documentElement.scrollHeight"},
+            {{0, 250.5}, "left: 0, top: 250.5,"}
+          ] do
+        task = Task.async(fn -> Page.scroll(page, target) end)
+
+        assert_receive {:fake_cdp_recv, ^fake,
+                        %{"id" => id, "params" => %{"expression" => expression}}},
+                       2_000
+
+        assert expression =~ fragment
+        assert expression =~ ~s(behavior: "instant")
+        FakeCDP.send_text(fake, evaluate_reply(id, true))
+        assert :ok = Task.await(task, 2_000)
+      end
+    end
+  end
+
   describe "navigate/3 readiness wait" do
     test "ignores a stale milestone from a previous loader", %{page: page, conn: conn, fake: fake} do
       # Same hazard as the response: true capture, one notch quieter: a late
@@ -1598,6 +1749,32 @@ defmodule CDPEx.PageTest do
 
   defp send_network_event(fake, method, request_id) do
     FakeCDP.send_text(fake, ~s({"method":"#{method}","params":{"requestId":"#{request_id}"}}))
+  end
+
+  defp reply_evaluate(fake, value) do
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+    FakeCDP.send_text(fake, evaluate_reply(id, value))
+  end
+
+  defp evaluate_reply(id, value),
+    do: Jason.encode!(%{"id" => id, "result" => %{"result" => %{"value" => value}}})
+
+  # Answers every Runtime.evaluate with `value` until `task` returns; yields the task's
+  # result and how many attempts it made.
+  defp answer_until_done(task, fake, value, attempts \\ 0) do
+    %Task{ref: ref} = task
+
+    receive do
+      {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}} ->
+        FakeCDP.send_text(fake, evaluate_reply(id, value))
+        answer_until_done(task, fake, value, attempts + 1)
+
+      {^ref, result} ->
+        Process.demonitor(ref, [:flush])
+        {result, attempts}
+    after
+      5_000 -> flunk("task neither polled nor returned")
+    end
   end
 
   defp assert_wait_for_selector_expression(page, fake, css, expected_js) do
