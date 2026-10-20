@@ -904,14 +904,14 @@ defmodule CDPEx.Page do
   its only child's, so when matches nest the **innermost** one is clicked: in
   `<div><button>Load more</button></div>` that is the button, not the div.
 
-  An innermost match with no box (non-zero size) stands in for its nearest matching
-  HTML ancestor that has one: the SVG `<title>` in an icon button, or a
-  `display: contents` span in a link, yields the button or the link (not the
-  `<svg>`, which has a box and the same text but isn't an HTML element). Of those
-  candidates, the first in document order **that has a box** wins, so a hidden
-  copy of the label earlier in the page (a collapsed mobile menu, say) doesn't
-  shadow the visible one. When none has a box the first innermost match is chosen,
-  and a trusted click reports `:not_clickable`.
+  The first innermost match in document order **that has a box** (non-zero size)
+  wins, so a hidden copy of the label earlier in the page (a collapsed mobile menu,
+  say) doesn't shadow the visible one. Only when no match has a box does one climb
+  to its nearest matching HTML ancestor that has one: the SVG `<title>` in an icon
+  button, or a `display: contents` span in a link, yields the button or the link
+  (not the `<svg>`, which has a box and the same text but isn't an HTML element).
+  When nothing qualifies the first innermost match is chosen, and a trusted click
+  reports `:not_clickable`.
 
   Candidates are the elements under `document.body`; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
@@ -963,7 +963,8 @@ defmodule CDPEx.Page do
   (`body { overflow: hidden }` around a scrolling `<main>`) needs `evaluate/3` on that
   element, e.g. `el.scrollTop = el.scrollHeight`.
 
-  Returns `:ok` or `{:error, reason}`. Option: `:timeout` (default #{@evaluate_timeout}).
+  Returns `:ok` or `{:error, reason}`; any other `target` raises `FunctionClauseError`.
+  Option: `:timeout` (default #{@evaluate_timeout}).
   """
   @spec scroll(t(), :top | :bottom | {number(), number()}, keyword()) :: :ok | {:error, term()}
   def scroll(page, target, opts \\ [])
@@ -1110,9 +1111,6 @@ defmodule CDPEx.Page do
       var target = norm(#{Jason.encode!(text)});
       var selector = #{Jason.encode!(selector)};
       var matches = [];
-      var matching = function (el) {
-        return norm(el.textContent) === target && (selector === null || el.matches(selector));
-      };
       var boxed = function (el) {
         var r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
@@ -1134,10 +1132,13 @@ defmodule CDPEx.Page do
       if (selector !== null) { document.createDocumentFragment().querySelector(selector); }
       if (!document.body) { return null; }
       for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
-      for (var i = 0; i < matches.length; i++) {
-        for (var el = matches[i]; el && el !== document.body; el = el.parentElement) {
-          var ok = el === matches[i] || (el instanceof HTMLElement && matching(el));
-          if (ok && boxed(el)) { return el; }
+      for (var i = 0; i < matches.length; i++) { if (boxed(matches[i])) { return matches[i]; } }
+      for (var j = 0; j < matches.length; j++) {
+        for (var el = matches[j].parentElement; el && el !== document.body; el = el.parentElement) {
+          if (norm(el.textContent) !== target) { break; }
+          if (el instanceof HTMLElement && (selector === null || el.matches(selector)) && boxed(el)) {
+            return el;
+          }
         }
       }
       return matches.length > 0 ? matches[0] : null;

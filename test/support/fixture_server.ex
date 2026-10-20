@@ -182,7 +182,7 @@ defmodule CDPEx.FixtureServer do
     <html>
       <head><title>CDPEx Interact</title>#{style}</head>
       <body style="margin:0">
-        <nav style="display:none"><button id="menu-hidden">Open menu</button></nav>
+        <div id="menu-wrap" style="padding:8px"><button id="menu-hidden" style="display:none">Open menu</button></div>
         <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
         <button id="menu-visible">Open menu</button>
         <span id="label-span">Subscribe</span>
