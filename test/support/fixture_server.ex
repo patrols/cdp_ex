@@ -177,7 +177,8 @@ defmodule CDPEx.FixtureServer do
   # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
   # "Open menu" appears twice: a display:none copy first, then the visible one. "Close"
   # and "Next" are innermost in a boxless <title> / display:contents span, so only their
-  # button / link has a box. `/interact?smooth` turns on CSS smooth scrolling.
+  # button / link has a box (clicks also record the event target's own tag, so a synthetic
+  # click shows which element was picked, not just the id it bubbled to). `/interact?smooth` turns on CSS smooth scrolling.
   defp interact_page(smooth?) do
     style = if smooth?, do: "<style>html { scroll-behavior: smooth; }</style>", else: ""
 
@@ -198,6 +199,7 @@ defmodule CDPEx.FixtureServer do
         <button id="hidden-text-btn" style="display:none">Invisible</button>
         <button id="icon-close"><svg width="16" height="16"><title>Close</title><rect width="16" height="16"></rect></svg></button>
         <a id="next-link" href="#"><span style="display:contents">Next</span></a>
+        <svg width="80" height="20"><text id="svg-zoom" x="0" y="15">Zoom</text></svg>
         <div style="height:5000px"></div>
         <p id="footer">end</p>
         <div id="late-slot"></div>
@@ -206,7 +208,11 @@ defmodule CDPEx.FixtureServer do
           document.addEventListener("click", function (e) {
             e.preventDefault();
             var hit = e.target.closest("[id]");
-            window.clicks.push({id: hit ? hit.id : "", trusted: e.isTrusted});
+            window.clicks.push({
+              id: hit ? hit.id : "",
+              tag: e.target.tagName.toLowerCase(),
+              trusted: e.isTrusted
+            });
           });
           window.armLate = function (ms) {
             setTimeout(function () {

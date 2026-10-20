@@ -512,11 +512,23 @@ defmodule CDPEx.IntegrationTest do
       {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
       assert :ok = Page.click_text(page, "Close")
       assert :ok = Page.click_text(page, "Next")
+      # A synthetic click targets the picked element itself: the button, not the <svg>.
+      assert :ok = Page.click_text(page, "Close", trusted: false)
 
       assert [
                %{"id" => "icon-close", "trusted" => true},
-               %{"id" => "next-link", "trusted" => true}
+               %{"id" => "next-link", "trusted" => true},
+               %{"id" => "icon-close", "tag" => "button", "trusted" => false}
              ] = clicks(page)
+    end
+
+    test "click_text/3 trusted: false clicks a non-HTML match (SVG <text>) without throwing", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Zoom", trusted: false)
+      assert [%{"id" => "svg-zoom", "tag" => "text", "trusted" => false}] = clicks(page)
     end
 
     test "click_text/3 matches with whitespace normalized", %{page: page, fixture: fixture} do

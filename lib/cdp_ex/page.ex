@@ -906,8 +906,9 @@ defmodule CDPEx.Page do
   `<div><button>Load more</button></div>` that is the button, not the div.
 
   An innermost match with no box (non-zero size) stands in for its nearest matching
-  ancestor that has one: the SVG `<title>` in an icon button, or a
-  `display: contents` span in a link, yields the button or the link. Of those
+  HTML ancestor that has one: the SVG `<title>` in an icon button, or a
+  `display: contents` span in a link, yields the button or the link (not the
+  `<svg>`, which has a box and the same text but isn't an HTML element). Of those
   candidates, the first in document order **that has a box** wins, so a hidden
   copy of the label earlier in the page (a collapsed mobile menu, say) doesn't
   shadow the visible one. When none has a box the first innermost match is chosen,
@@ -1108,8 +1109,9 @@ defmodule CDPEx.Page do
   # descendant's normalized text is a substring of its ancestor's, so a subtree whose
   # text doesn't contain the target is skipped. The walk is children-first and keeps
   # only innermost matches (a wrapper's text equals its label's too). A boxless one (an
-  # SVG <title>, a display:contents span) climbs to its nearest matching ancestor with
-  # a box; the first candidate with a box wins, so a hidden duplicate earlier in the DOM
+  # SVG <title>, a display:contents span) climbs to its nearest matching HTMLElement
+  # ancestor with a box, skipping the <svg> to reach its button; the first candidate with
+  # a box wins, so a hidden duplicate earlier in the DOM
   # doesn't shadow the visible one.
   defp text_locator(text, selector) do
     """
@@ -1144,7 +1146,8 @@ defmodule CDPEx.Page do
       for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
       for (var i = 0; i < matches.length; i++) {
         for (var el = matches[i]; el && el !== document.body; el = el.parentElement) {
-          if ((el === matches[i] || matching(el)) && boxed(el)) { return el; }
+          var ok = el === matches[i] || (el instanceof HTMLElement && matching(el));
+          if (ok && boxed(el)) { return el; }
         }
       }
       return matches.length > 0 ? matches[0] : null;
@@ -1160,7 +1163,8 @@ defmodule CDPEx.Page do
     (function () {
       var el = #{locator};
       if (!el) { return false; }
-      el.click();
+      if (typeof el.click === "function") { el.click(); }
+      else { el.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true, view: window})); }
       return true;
     })()
     """
