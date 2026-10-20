@@ -489,6 +489,21 @@ defmodule CDPEx.IntegrationTest do
       assert [%{"id" => "inner", "trusted" => false}] = clicks(page)
     end
 
+    test "click_text/3 skips a hidden duplicate for the visible match", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Open menu", wait: 5_000)
+      assert :ok = Page.click_text(page, "Open menu", trusted: false)
+
+      assert [
+               %{"id" => "menu-visible", "trusted" => true},
+               %{"id" => "menu-visible", "trusted" => false}
+             ] =
+               clicks(page)
+    end
+
     test "click_text/3 matches with whitespace normalized", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
       assert :ok = Page.click_text(page, "  Show all\n events ")

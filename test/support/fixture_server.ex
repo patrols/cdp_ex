@@ -174,13 +174,16 @@ defmodule CDPEx.FixtureServer do
   # Every click lands in window.clicks as {id, trusted}. #late-btn appears 300ms after
   # load; #wrapper is wider than its button, so a click at the wrapper's center hits the
   # wrapper itself — a test can tell which of the two nested "Load more" matches it got.
+  # "Open menu" appears twice: a display:none copy first, then the visible one.
   defp interact_page do
     """
     <!doctype html>
     <html>
       <head><title>CDPEx Interact</title></head>
       <body style="margin:0">
+        <nav style="display:none"><button id="menu-hidden">Open menu</button></nav>
         <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
+        <button id="menu-visible">Open menu</button>
         <span id="label-span">Subscribe</span>
         <button id="subscribe-btn">Subscribe</button>
         <a id="ws-link" href="#">
