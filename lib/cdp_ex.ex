@@ -345,6 +345,9 @@ defmodule CDPEx do
   """
   @spec launch(keyword()) :: GenServer.on_start()
   def launch(opts \\ []) do
+    # A caller bug raises here, outside the span, rather than counting as a launch exception.
+    Browser.validate_launch_opts!(opts)
+
     Telemetry.span(:launch, %{}, fn ->
       result = Browser.start_link(opts)
       {result, launch_metadata(result)}

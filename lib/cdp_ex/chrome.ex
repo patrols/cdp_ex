@@ -96,7 +96,10 @@ defmodule CDPEx.Chrome do
     ignored =
       if is_list(Keyword.get(opts, :args)), do: [:headless, :window_size, :extra_args], else: []
 
-    Enum.each(opts, fn {key, value} ->
+    # Keyword.get/3 reads only a key's first occurrence, so a shadowed duplicate never mattered.
+    opts
+    |> Enum.uniq_by(&elem(&1, 0))
+    |> Enum.each(fn {key, value} ->
       if key not in ignored and !valid_opt?(key, value) do
         raise ArgumentError, "invalid #{inspect(key)} #{inspect(value)} (expected #{expected(key)})"
       end

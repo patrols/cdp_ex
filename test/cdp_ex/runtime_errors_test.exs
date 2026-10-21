@@ -453,6 +453,27 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
     assert_raise ArgumentError, ~r/keyword list/, fn -> Pool.start_link(launch_opts: :fast) end
   end
 
+  test "only a key's first occurrence is checked, as only it is read" do
+    assert Chrome.validate_opts!(headless: true, headless: nil) == :ok
+    assert_raise ArgumentError, fn -> Chrome.validate_opts!(headless: nil, headless: true) end
+  end
+
+  test "a bad option raises before the launch telemetry span starts" do
+    id = "invalid-launch-opts-#{System.unique_integer([:positive])}"
+    events = [[:cdp_ex, :launch, :start], [:cdp_ex, :launch, :exception]]
+    :telemetry.attach_many(id, events, &__MODULE__.forward/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    assert_raise ArgumentError, fn -> CDPEx.launch(headless: nil) end
+    refute_received {:telemetry, _event}
+  end
+
+  # Handlers run in the emitting process, so this ignores launches from concurrent tests.
+  @doc false
+  def forward(event, _measurements, _metadata, test_pid) do
+    if self() == test_pid, do: send(test_pid, {:telemetry, event})
+  end
+
   test "a nil :connect still launches, so its options are still checked" do
     assert_raise ArgumentError, fn -> CDPEx.launch(connect: nil, extra_args: [1]) end
     assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [connect: nil, headless: 1]) end
