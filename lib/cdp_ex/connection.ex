@@ -29,12 +29,18 @@ defmodule CDPEx.Connection do
 
   @upgrade_timeout 15_000
   @default_call_timeout 10_000
+  # crdtp's SESSION_NOT_FOUND dispatch code. Chrome returns it only for a sessionId it
+  # doesn't know, so on a call that carried one it means that session has detached.
+  @session_not_found -32_001
 
   defstruct [
     :conn,
     :ref,
     :websocket,
     next_id: 1,
+    # id => {from, method, timer, session_id}. Keyed by id alone: ids are unique per
+    # connection, and Chrome answers a call on an unknown session from the browser
+    # root, without the call's sessionId.
     pending: %{},
     # method => %{pid => MapSet<session_filter>}; a pid can hold several filters
     # (e.g. observing two sessions), and a nil filter receives every session's
@@ -72,6 +78,7 @@ defmodule CDPEx.Connection do
           | {:timeout, String.t()}
           | {:ws_closed, term()}
           | :noproc
+          | {:session_closed, String.t()}
 
   @doc """
   Sends a CDP command and blocks until its reply (or `timeout`).
@@ -80,7 +87,12 @@ defmodule CDPEx.Connection do
   error, `{:error, {:timeout, method}}`, or `{:error, {:ws_closed, reason}}` /
   `{:error, :noproc}` if the connection drops or is already gone.
 
-  Pass `opts` with `session_id: sid` to address a flattened CDP session.
+  Pass `opts` with `session_id: sid` to address a flattened CDP session. A call on
+  a session that has detached (its target closed, or `Target.detachFromTarget`) or
+  that Chrome doesn't know at all returns `{:error, {:session_closed, sid}}`: one
+  in flight when the connection sees `Target.detachedFromTarget` for it fails
+  then, and a later one fails on Chrome's "session not found" reply rather than
+  waiting out `timeout`.
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
           {:ok, map()} | {:error, call_error()}
@@ -116,6 +128,9 @@ defmodule CDPEx.Connection do
   the matching that `await_event/4` already does for waiters. The default (`nil`)
   receives every session's events (current behaviour); on a `:dedicated`
   connection, where every event is for the one page, the two are equivalent.
+  `"Target.detachedFromTarget"` (or `:all`) scoped to `sid` also delivers `sid`'s
+  own detach, which Chrome sends on the parent session (so its `session_id`
+  element is the parent's, usually `nil`, and `params["sessionId"]` is `sid`).
   """
   @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) :: :ok
   def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
@@ -134,14 +149,22 @@ defmodule CDPEx.Connection do
   `{:ws_closed, _}` (the connection itself went away) — callers must be able to
   tell those apart.
 
-  Pass `opts` with `session_id: sid` to only match events from that session.
+  Pass `opts` with `session_id: sid` to only match events from that session. Such
+  a waiter returns `{:error, {:session_closed, sid}}` if the session detaches while
+  it waits; one registered after the detach has nothing to end it and times out
+  (a `call/5` on the session first will tell you it is gone).
 
   Keep `matcher` fast and side-effect-free: it runs inside the connection process
   for each candidate event, so a slow or blocking matcher stalls the socket — and,
   on a `:session`-transport connection, every page sharing it.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
-          {:ok, map()} | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}
+          {:ok, map()}
+          | {:error,
+             {:timeout, :await_event}
+             | :noproc
+             | {:ws_closed, term()}
+             | {:session_closed, String.t()}}
   def await_event(conn, matcher, timeout \\ @default_call_timeout, opts \\ [])
       when is_function(matcher, 1) do
     session_id = Keyword.get(opts, :session_id)
@@ -234,12 +257,11 @@ defmodule CDPEx.Connection do
   def handle_call({:cdp_call, method, params, timeout, session_id}, from, state) do
     id = state.next_id
     payload = Protocol.encode(method, params, id, session_id)
-    key = {id, session_id}
 
     case ws_send(state, payload) do
       {:ok, state} ->
-        timer = arm_timeout({:call_timeout, key}, timeout)
-        pending = Map.put(state.pending, key, {from, method, timer})
+        timer = arm_timeout({:call_timeout, id}, timeout)
+        pending = Map.put(state.pending, id, {from, method, timer, session_id})
         {:noreply, %{state | next_id: id + 1, pending: pending}}
 
       {:error, state, reason} ->
@@ -288,12 +310,12 @@ defmodule CDPEx.Connection do
   end
 
   @impl true
-  def handle_info({:call_timeout, key}, state) do
-    case Map.pop(state.pending, key) do
+  def handle_info({:call_timeout, id}, state) do
+    case Map.pop(state.pending, id) do
       {nil, _} ->
         {:noreply, state}
 
-      {{from, method, _timer}, pending} ->
+      {{from, method, _timer, _session_id}, pending} ->
         GenServer.reply(from, {:error, {:timeout, method}})
         {:noreply, %{state | pending: pending}}
     end
@@ -412,33 +434,66 @@ defmodule CDPEx.Connection do
 
   defp dispatch(frame, state) do
     case Protocol.classify(frame) do
-      {:reply, id, session_id, result} -> dispatch_reply({id, session_id}, result, state)
+      {:reply, id, _session_id, result} -> dispatch_reply(id, result, state)
       {:event, method, session_id, params} -> dispatch_event(method, session_id, params, state)
       {:ping, data} -> pong(state, data)
       :ignore -> state
     end
   end
 
-  defp dispatch_reply(key, result, state) do
-    case Map.pop(state.pending, key) do
+  defp dispatch_reply(id, result, state) do
+    case Map.pop(state.pending, id) do
       {nil, _} ->
         state
 
-      {{from, method, timer}, pending} ->
+      {{from, method, timer, session_id}, pending} ->
         cancel_timer(timer)
-        GenServer.reply(from, normalize_reply(result, method))
+        GenServer.reply(from, normalize_reply(result, method, session_id))
         %{state | pending: pending}
     end
   end
 
-  defp normalize_reply({:ok, result}, _method), do: {:ok, result}
-  defp normalize_reply({:error, error}, method), do: {:error, {:cdp_error, method, error}}
+  defp normalize_reply({:ok, result}, _method, _session_id), do: {:ok, result}
+
+  # Chrome's only -32001 is "Session with given id not found": the session is gone.
+  defp normalize_reply({:error, %{"code" => @session_not_found}}, _method, session_id)
+       when is_binary(session_id) do
+    {:error, {:session_closed, session_id}}
+  end
+
+  defp normalize_reply({:error, error}, method, _session_id),
+    do: {:error, {:cdp_error, method, error}}
 
   defp dispatch_event(method, session_id, params, state) do
     state
+    |> fail_detached_session(method, params)
     |> notify_waiters(session_id, params)
     |> notify_subscribers(method, session_id, params)
   end
+
+  # Chrome never answers a call that was in flight on a session when it detached,
+  # nor fires an event a waiter on it is parked for: fail both now rather than
+  # leave them to their own timeouts.
+  defp fail_detached_session(state, "Target.detachedFromTarget", %{"sessionId" => sid})
+       when is_binary(sid) do
+    reason = {:error, {:session_closed, sid}}
+    {gone, pending} = Map.split_with(state.pending, fn {_id, entry} -> elem(entry, 3) == sid end)
+    {dead, waiters} = Enum.split_with(state.waiters, fn waiter -> elem(waiter, 1) == sid end)
+
+    Enum.each(gone, fn {_id, {from, _method, timer, _sid}} ->
+      cancel_timer(timer)
+      GenServer.reply(from, reason)
+    end)
+
+    Enum.each(dead, fn {_matcher, _sid, from, timer} ->
+      cancel_timer(timer)
+      GenServer.reply(from, reason)
+    end)
+
+    %{state | pending: pending, waiters: waiters}
+  end
+
+  defp fail_detached_session(state, _method, _params), do: state
 
   defp notify_waiters(state, event_session_id, params) do
     {matched, kept} =
@@ -462,6 +517,7 @@ defmodule CDPEx.Connection do
 
   defp notify_subscribers(state, method, session_id, params) do
     method_subs = Map.get(state.subscribers, method, %{})
+    scopes = delivery_scopes(method, session_id, params)
 
     # A pid may hold several session filters for one method (e.g. observing two
     # `:session` pages on the shared connection) and may also be an `:all`
@@ -470,13 +526,26 @@ defmodule CDPEx.Connection do
     method_subs
     |> Map.merge(state.all_subscribers, fn _pid, fs1, fs2 -> MapSet.union(fs1, fs2) end)
     |> Enum.each(fn {pid, filters} ->
-      if Enum.any?(filters, &session_match?(&1, session_id)) do
+      if delivered?(filters, scopes) do
         send(pid, {:cdp_event, self(), method, params, session_id})
       end
     end)
 
     state
   end
+
+  defp delivered?(filters, scopes) do
+    Enum.any?(filters, fn filter -> Enum.any?(scopes, &session_match?(filter, &1)) end)
+  end
+
+  # Chrome reports a session's detach on the session that attached it, so a
+  # subscription scoped to the detached session also receives its own detach.
+  defp delivery_scopes("Target.detachedFromTarget", session_id, %{"sessionId" => detached})
+       when is_binary(detached) do
+    [session_id, detached]
+  end
+
+  defp delivery_scopes(_method, session_id, _params), do: [session_id]
 
   defp safe_match(matcher, params) do
     matcher.(params)
@@ -640,7 +709,7 @@ defmodule CDPEx.Connection do
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp fail_all_pending(state, reason) do
-    Enum.each(state.pending, fn {_key, {from, _method, timer}} ->
+    Enum.each(state.pending, fn {_id, {from, _method, timer, _session_id}} ->
       cancel_timer(timer)
       GenServer.reply(from, {:error, reason})
     end)

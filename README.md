@@ -356,7 +356,7 @@ end
 ```
 
 `CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
-couldn't be established, timeout, Chrome died or was slow to start, an internal helper
+couldn't be established, the page closed, timeout, Chrome died or was slow to start, an internal helper
 crashed, or a connection-layer `net::ERR_*` navigation error, so a fresh attempt may
 succeed), `:terminal` (selector miss, JS exception, usage/validation error, which a
 retry won't fix), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*`
@@ -367,7 +367,8 @@ The reason shapes are documented as
 
 Retries are yours to bound: cap attempts, back off, and on a `:transient` result
 re-establish the resource (open a fresh page/browser) rather than reusing a dead
-handle — a dead page keeps returning `:noproc`.
+handle — a dead page keeps returning `:noproc`, or `{:session_closed, session_id}` for a
+`:session` page (the default on a `connect/2` browser).
 
 ## Telemetry
 
@@ -409,6 +410,7 @@ offers no way to label a supervisor from outside it.)
 | `{:cdp_connection, "/devtools/browser/…"}` | the browser WebSocket |
 | `{:cdp_connection, "/devtools/page/<targetId>"}` | a `:dedicated` page WebSocket |
 | `{:cdp_page_helper, :idle_wait \| :capture, target_id}` | the short-lived process behind `wait_for_network_idle/2` and `navigate/3` with `response: true` |
+| `{:cdp_page_helper, :detach_watch, target_id}` | the short-lived process that watches a `:session` page's detach during `navigate/3` and `wait_for_navigation/2` |
 | `{:cdp_fetch_auth, source}` | the `Fetch` auth handler (`:proxy`, `:server`, or `:any`) |
 | `{:cdp_fetch_disable, conn}` | the throwaway task that releases interception after its owner dies |
 | `{:cdp_pool, size}` / `{:cdp_pool_launch, pool}` | `CDPEx.Pool` and its browser-launch tasks |

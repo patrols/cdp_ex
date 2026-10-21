@@ -9,7 +9,9 @@ defmodule CDPEx.Page do
 
   Obtain one with `CDPEx.new_page/2`. If the underlying page dies (navigation to
   a new target, a crash), operations return `{:error, :noproc}` and you should
-  open a fresh page.
+  open a fresh page. On a `:session` page, whose connection is the shared browser
+  socket and outlives it, a closed or detached target returns
+  `{:error, {:session_closed, session_id}}` instead.
 
   ## Operations
 
@@ -40,6 +42,7 @@ defmodule CDPEx.Page do
   @screenshot_timeout 30_000
   @command_timeout 10_000
   @click_poll_interval 100
+  @probe_timeout 2_000
   @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
   # All -32000: a context that never existed (the script didn't run) vs one torn down mid-call.
   @context_not_found ["Cannot find context", "Cannot find default execution context"]
@@ -70,6 +73,7 @@ defmodule CDPEx.Page do
   }
 
   @lifecycle_method "Page.lifecycleEvent"
+  @target_detached "Target.detachedFromTarget"
   @request_will_be_sent "Network.requestWillBeSent"
   @response_received "Network.responseReceived"
   @loading_finished "Network.loadingFinished"
@@ -122,7 +126,8 @@ defmodule CDPEx.Page do
   its own `Network.responseReceived` subscription, so it composes safely with
   `observe_network/2` on the same page — the caller's subscription and any buffered
   events are left untouched. A normal connection drop still surfaces as
-  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}` (a `:session` page's detach as
+  `{:error, {:session_closed, sid}}`); only an abnormal crash of that
   internal helper returns `{:error, {:capture_failed, reason}}`.
 
   Options:
@@ -290,9 +295,9 @@ defmodule CDPEx.Page do
   # url}} | {:error, reason}. No before/after drain is needed — the helper's mailbox starts
   # empty and dies with it.
   defp run_capture(page, url, milestone, deadline) do
-    methods = [@lifecycle_method, @response_received]
+    methods = watched(page, [@lifecycle_method, @response_received])
 
-    case subscribe_each(page.conn, methods, remaining(deadline)) do
+    case subscribe_each(page.conn, methods, remaining(deadline), page.session_id) do
       :ok ->
         ref = Process.monitor(page.conn)
         capture_after_navigate(page, url, milestone, ref, deadline)
@@ -356,6 +361,9 @@ defmodule CDPEx.Page do
           {_, nav} -> await_capture(page, milestone, ref, deadline, nav, captured)
         end
 
+      {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+        {:down, {:session_closed, sid}}
+
       {:cdp_event, ^conn, _method, _params, _other_sid} ->
         # Another session's event, or (with milestone nil) a lifecycle we don't wait on.
         await_capture(page, milestone, ref, deadline, nav, captured)
@@ -365,9 +373,14 @@ defmodule CDPEx.Page do
     after
       remaining ->
         # Best-effort: return whatever document response we captured (nil → the caller
-        # maps it to {:error, {:no_document_response, _}}). Prefer a just-landed :DOWN.
+        # maps it to {:error, {:no_document_response, _}}). Prefer a just-landed :DOWN
+        # or detach.
         receive do
-          {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
+          {:DOWN, ^ref, :process, ^conn, reason} ->
+            {:down, reason}
+
+          {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _} ->
+            {:down, {:session_closed, sid}}
         after
           0 -> {:ok, captured}
         end
@@ -472,80 +485,161 @@ defmodule CDPEx.Page do
   # (wait_for_navigation/2, where the caller — a click, say — triggered the navigation
   # out of band and no loaderId is available; it keeps the pre-existing name-only match).
   defp subscribe_then_await(page, name, deadline, trigger) do
-    case safe_subscribe(page.conn, remaining(deadline)) do
+    case subscribe_each(page.conn, [@lifecycle_method], remaining(deadline), page.session_id) do
       {:error, reason} ->
         {:error, reason}
 
       :ok ->
         drain_events(page.conn, @lifecycle_method)
         ref = Process.monitor(page.conn)
+        watch = watch_detach(page, deadline)
+        await = &await_lifecycle(page, name, {ref, watch_tag(watch)}, deadline, &1)
 
         try do
           case trigger.() do
-            :ok -> await_lifecycle(page, name, ref, deadline, navigation(nil, nil))
-            {:ok, lid, fid} -> await_lifecycle(page, name, ref, deadline, navigation(lid, fid))
+            :ok -> await.(navigation(nil, nil))
+            {:ok, lid, fid} -> await.(navigation(lid, fid))
             {:error, _} = error -> error
           end
         after
+          stop_watch(watch)
           Process.demonitor(ref, [:flush])
-          safe_unsubscribe(page.conn)
+          :ok = unsubscribe_each(page.conn, [@lifecycle_method])
           drain_events(page.conn, @lifecycle_method)
         end
     end
   end
 
-  # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
-  # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
-  # methods never arrive here) — the connection dying, or the deadline. The milestone
+  # With nothing to send, a wait on a session that detached before the watcher
+  # subscribed would only time out: one round trip after subscribing surfaces Chrome's
+  # "session not found" as {:session_closed, sid}. Any other answer, or none within
+  # @probe_timeout (an endpoint that drops the call), means carry on.
+  defp probe_session(%__MODULE__{session_id: nil}, _deadline), do: :ok
+
+  defp probe_session(page, deadline) do
+    timeout = min(remaining(deadline), @probe_timeout)
+
+    case do_call(page, "Target.getTargetInfo", %{}, timeout) do
+      {:error, {:session_closed, _sid}} = error -> error
+      _answered -> :ok
+    end
+  end
+
+  # A `:session` page's connection is the shared browser socket, which outlives the
+  # page, so a wait that ends on the connection's :DOWN also watches for the
+  # session's detach — the session-transport equivalent (#121). The helper-run waits
+  # subscribe to it on their own pid.
+  defp watched(%__MODULE__{session_id: nil}, methods), do: methods
+  defp watched(_page, methods), do: [@target_detached | methods]
+
+  # The caller-run wait can't subscribe to the detach itself: unsubscribing would drop
+  # a subscription the caller holds on that browser-wide method, and the drain would
+  # eat its queued events. A monitored watcher subscribes instead and sends
+  # `{tag, {:session_closed, sid}}`; Connection prunes its subscription when it exits.
+  # Returns `{pid, monitor, tag}`, or nil for a dedicated page or a failed subscribe:
+  # it is bounded by the wait's own deadline, so a failure means either that deadline
+  # is spent or the connection is dead, which the wait reports by itself.
+  defp watch_detach(%__MODULE__{session_id: nil}, _deadline), do: nil
+
+  defp watch_detach(%__MODULE__{conn: conn, session_id: sid} = page, deadline) do
+    parent = self()
+    tag = make_ref()
+
+    {pid, mon} =
+      spawn_monitor(fn ->
+        ProcessLabel.set({:cdp_page_helper, :detach_watch, page.target_id})
+        parent_mon = Process.monitor(parent)
+
+        case subscribe_each(conn, [@target_detached], remaining(deadline), sid) do
+          :ok -> report_detach(conn, sid, {parent, parent_mon}, tag)
+          {:error, _reason} -> :ok
+        end
+      end)
+
+    receive do
+      {^tag, :watching} -> {pid, mon, tag}
+      {:DOWN, ^mon, :process, ^pid, _reason} -> nil
+    end
+  end
+
+  defp report_detach(conn, sid, {parent, parent_mon}, tag) do
+    send(parent, {tag, :watching})
+
+    receive do
+      {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+        send(parent, {tag, {:session_closed, sid}})
+
+      {:DOWN, ^parent_mon, :process, ^parent, _reason} ->
+        :ok
+    end
+  end
+
+  # A process's messages arrive before its :DOWN, so once the :DOWN is in, a late
+  # `{tag, _}` can be flushed for good.
+  defp stop_watch(nil), do: :ok
+
+  defp stop_watch({pid, mon, tag}) do
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^mon, :process, ^pid, _reason} -> :ok
+    end
+
+    receive do
+      {^tag, _} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  # A tag no message carries, so a dedicated page's wait never matches the clause.
+  defp watch_tag(nil), do: make_ref()
+  defp watch_tag({_pid, _mon, tag}), do: tag
+
+  # Wait for the named lifecycle event — scoped to this page's session (the
+  # subscription filters on it; `^sid` keeps the match honest) and the
+  # `Page.lifecycleEvent` method (the subscription is method-keyed, so other
+  # methods never arrive here) — the connection dying, the session's detach, or the
+  # deadline. The milestone
   # is pinned to the navigated document per track_lifecycle/2 (a stale about:blank
   # milestone can't end the wait early; a successor document's can); with no loaderId
   # in `nav` it matches on name alone. Returns `:reached` | `{:down, reason}` |
   # `:timeout`; callers map it to their own contract.
-  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline, nav) do
+  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, mons, deadline, nav) do
+    {ref, tag} = mons
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:cdp_event, ^conn, @lifecycle_method, %{"name" => event} = params, ^sid} ->
         case track_lifecycle(params, nav) do
           {:ours, _nav} when event == name -> :reached
-          {_, nav} -> await_lifecycle(page, name, ref, deadline, nav)
+          {_, nav} -> await_lifecycle(page, name, mons, deadline, nav)
         end
 
+      {^tag, {:session_closed, _sid} = reason} ->
+        {:down, reason}
+
       {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
-        await_lifecycle(page, name, ref, deadline, nav)
+        await_lifecycle(page, name, mons, deadline, nav)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
         {:down, reason}
     after
       remaining ->
-        # Exact deadline-vs-DOWN tie: a {:DOWN} may have just landed but lost the
-        # race to `after`. Prefer it over a misleading timeout.
+        # Exact deadline-vs-DOWN tie: a {:DOWN} (or the detach) may have just landed
+        # but lost the race to `after`. Prefer it over a misleading timeout.
         receive do
           {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
+          {^tag, {:session_closed, _sid} = reason} -> {:down, reason}
         after
           0 -> :timeout
         end
     end
   end
 
+  defp down_reason({:session_closed, _sid} = reason), do: reason
   defp down_reason({:shutdown, {:ws_closed, reason}}), do: {:ws_closed, reason}
   defp down_reason(_), do: :noproc
-
-  # subscribe/unsubscribe are GenServer.calls; a connection that's already dead (or
-  # dies mid-navigation) would otherwise make them exit and crash navigate/3 —
-  # which must instead return {:error, _}. Treat (un)subscription as best-effort.
-  defp safe_subscribe(conn, timeout) do
-    Connection.subscribe(conn, @lifecycle_method, timeout)
-  catch
-    :exit, {:timeout, _} -> {:error, :timeout}
-    :exit, _ -> {:error, :noproc}
-  end
-
-  defp safe_unsubscribe(conn) do
-    Connection.unsubscribe(conn, @lifecycle_method)
-  catch
-    :exit, _ -> :ok
-  end
 
   defp lifecycle_name(:load), do: "load"
   defp lifecycle_name(:network_almost_idle), do: "networkAlmostIdle"
@@ -568,7 +662,10 @@ defmodule CDPEx.Page do
     * `:timeout` — ms (default 30_000)
 
   Returns `:ok`, `{:error, :timeout}`, or `{:error, reason}` if the connection
-  drops while waiting.
+  drops while waiting. On a `:session` page it also returns
+  `{:error, {:session_closed, session_id}}` when the session detaches, and makes one
+  `Target.getTargetInfo` call before waiting so that a session already gone fails
+  at once rather than at `:timeout`.
   """
   @spec wait_for_navigation(t(), keyword()) :: :ok | {:error, term()}
   def wait_for_navigation(%__MODULE__{} = page, opts \\ []) do
@@ -586,7 +683,7 @@ defmodule CDPEx.Page do
     name = lifecycle_name(wait_until)
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
 
-    case subscribe_then_await(page, name, deadline, fn -> :ok end) do
+    case subscribe_then_await(page, name, deadline, fn -> probe_session(page, deadline) end) do
       :reached -> :ok
       :timeout -> {:error, :timeout}
       {:down, reason} -> {:error, down_reason(reason)}
@@ -723,8 +820,9 @@ defmodule CDPEx.Page do
   `querySelector` itself throws (e.g. a syntactically invalid CSS selector). A
   transient CDP error (e.g. the execution context is rebuilding mid-navigation)
   keeps polling; a thrown JS exception is fatal so a bad selector doesn't hide as
-  a perpetual no-match. Options: `:timeout` (default 5_000), `:interval` (poll
-  interval ms, default 100).
+  a perpetual no-match, and so is a closed page (`:noproc`, or
+  `{:session_closed, _}` on a `:session` page). Options: `:timeout` (default
+  5_000), `:interval` (poll interval ms, default 100).
   """
   @spec wait_for_selector(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def wait_for_selector(%__MODULE__{} = page, css, opts \\ []) when is_binary(css) do
@@ -738,8 +836,10 @@ defmodule CDPEx.Page do
   `:ok`, `{:error, :timeout}`, or `{:error, reason}` if a non-transient evaluate
   error occurs. A transient CDP error (e.g. the execution context is rebuilding
   mid-navigation) keeps polling; a non-transient one is fatal — including
-  `{:error, {:evaluate_exception, _}}` when the expression itself throws, and a
-  dropped connection. This is the shared error taxonomy behind `wait_for_selector/3`.
+  `{:error, {:evaluate_exception, _}}` when the expression itself throws, a
+  dropped connection, and a closed page (`:noproc`, or `{:session_closed, _}` on a
+  `:session` page, whose detach Chrome reports as "session not found"). This is
+  the shared error taxonomy behind `wait_for_selector/3`.
   Options: `:timeout` (default 5_000), `:interval` (poll interval ms, default 100).
   """
   @spec wait_for_function(t(), String.t(), keyword()) :: :ok | {:error, term()}
@@ -866,10 +966,11 @@ defmodule CDPEx.Page do
       finds no execution context (a `{:cdp_error, _, _}` while the page is
       mid-navigation), waiting #{@click_poll_interval}ms between attempts; the last
       of those errors is returned once the budget is spent. Any other CDP error
-      (e.g. a closed or detached session) returns immediately, as does one from the
-      mouse dispatch (the press may already have landed), an evaluate exception, a
-      timeout, or a dropped connection. Each attempt locates and clicks in one
-      step, so there is no gap between "found" and "clicked".
+      returns immediately, as does one from the mouse dispatch (the press may
+      already have landed), an evaluate exception, a timeout, a dropped
+      connection, or a closed page (`:noproc`, or `{:session_closed, _}` on a
+      `:session` page). Each attempt locates and clicks in one step, so there is
+      no gap between "found" and "clicked".
       The budget bounds the retrying, not an attempt already in flight, so the
       worst case is about `wait` plus one attempt's CDP calls (each bounded by
       `:timeout`). Default `0` (a single attempt); anything but a non-negative
@@ -1445,7 +1546,10 @@ defmodule CDPEx.Page do
   Returns `{:ok, params}` — the full `Network.responseReceived` params (HTTP status
   under `params["response"]["status"]`, request id under `params["requestId"]`) — or
   `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
-  connection drops. Lazily enables the `Network` domain. Only responses observed
+  connection drops (or, on a `:session` page, `{:error, {:session_closed, sid}}` if
+  the session detaches while it waits; a detach that lands between its
+  `Network.enable` and the wait starting is missed, and the call runs to
+  `:timeout`). Lazily enables the `Network` domain. Only responses observed
   **after** this call are considered, so call it before triggering the request.
 
   > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}
@@ -1508,7 +1612,8 @@ defmodule CDPEx.Page do
   The idle wait runs in a short-lived helper process with its own subscription, so it
   composes safely with `observe_network/2` on the same page — the caller's subscription
   and any buffered events are left untouched. A normal connection drop surfaces as
-  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}` (a `:session` page's detach as
+  `{:error, {:session_closed, sid}}`); only an abnormal crash of that
   internal helper returns `{:error, {:idle_wait_failed, reason}}`.
 
   Options:
@@ -1539,7 +1644,9 @@ defmodule CDPEx.Page do
   # the helper's subscriptions are pruned by Connection on its :DOWN and its idle-tick timers
   # die with it (an enable failure likewise just exits the helper and is auto-pruned).
   defp run_network_idle(page, idle_time, max_inflight, deadline) do
-    with :ok <- subscribe_each(page.conn, @idle_events, remaining(deadline), page.session_id),
+    methods = watched(page, @idle_events)
+
+    with :ok <- subscribe_each(page.conn, methods, remaining(deadline), page.session_id),
          :ok <- ensure_network(page, remaining(deadline)) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
 
@@ -1603,6 +1710,10 @@ defmodule CDPEx.Page do
 
         await_network_idle(ctx, inflight, idle)
 
+      {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+        _ = disarm_idle(idle)
+        {:down, {:session_closed, sid}}
+
       {:cdp_event, ^conn, _method, _params, _other_sid} ->
         # Another session's event on a shared :session connection — ignore.
         await_network_idle(ctx, inflight, idle)
@@ -1619,11 +1730,16 @@ defmodule CDPEx.Page do
         {:down, reason}
     after
       remaining(deadline) ->
-        # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} over a stale timeout.
+        # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} or detach over a
+        # stale timeout.
         receive do
           {:DOWN, ^mon, :process, ^conn, reason} ->
             _ = disarm_idle(idle)
             {:down, reason}
+
+          {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+            _ = disarm_idle(idle)
+            {:down, {:session_closed, sid}}
         after
           0 ->
             _ = disarm_idle(idle)

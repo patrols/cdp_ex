@@ -99,6 +99,9 @@ defmodule CDPEx.Browser do
       `{:error, {:unsupported_transport, :dedicated}}`. Any other value returns
       `{:error, {:invalid_transport, value}}`.
     * `:prevent_alerts` — inject no-op `alert`/`confirm`/`prompt` (default `true`)
+
+  A `:session` page whose target goes away while it is being set up returns
+  `{:error, {:session_closed, session_id}}` (`:transient`; open a new page).
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
   # The call timeout covers the worst-case internal budget — Target.createTarget

@@ -195,6 +195,124 @@ defmodule CDPEx.IntegrationTest do
   end
 
   describe "session transport" do
+    test "closing a session page fails a call blocked on it, and later calls, at once (#121)", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+      {:ok, page} = CDPEx.new_page(browser, transport: :session)
+      {:ok, _} = Page.navigate(page, fixture)
+      sid = page.session_id
+
+      blocked =
+        Task.async(fn ->
+          Page.evaluate(page, "new Promise(() => {})", await_promise: true, timeout: 15_000)
+        end)
+
+      assert eventually(fn -> map_size(:sys.get_state(page.conn).pending) > 0 end, 100)
+
+      {elapsed_us, :ok} = :timer.tc(fn -> CDPEx.close_page(browser, page) end)
+      assert {:error, {:session_closed, ^sid}} = Task.await(blocked, 2_000)
+      assert elapsed_us < 2_000_000
+
+      {elapsed_us, result} = :timer.tc(fn -> Page.evaluate(page, "1") end)
+      assert result == {:error, {:session_closed, sid}}
+      assert elapsed_us < 1_000_000
+    end
+
+    test "closing a session page ends a wait_for_selector on it promptly (#121)", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+      {:ok, page} = CDPEx.new_page(browser, transport: :session)
+      {:ok, _} = Page.navigate(page, fixture)
+      sid = page.session_id
+
+      waiting =
+        Task.async(fn ->
+          :timer.tc(fn -> Page.wait_for_selector(page, "#never-appears", timeout: 8_000) end)
+        end)
+
+      Process.sleep(300)
+      :ok = CDPEx.close_page(browser, page)
+
+      assert {elapsed_us, {:error, {:session_closed, ^sid}}} = Task.await(waiting, 5_000)
+      assert elapsed_us < 2_000_000
+    end
+
+    test "closing a session page ends a navigation or network-idle wait on it promptly (#121)", %{
+      fixture: fixture
+    } do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      waits = [
+        &Page.wait_for_navigation(&1, timeout: 8_000),
+        &Page.wait_for_network_idle(&1, idle_time: 6_000, timeout: 8_000)
+      ]
+
+      for wait <- waits do
+        {:ok, page} = CDPEx.new_page(browser, transport: :session)
+        {:ok, _} = Page.navigate(page, fixture)
+        sid = page.session_id
+
+        waiting = Task.async(fn -> :timer.tc(fn -> wait.(page) end) end)
+
+        assert eventually(fn -> detach_watched?(page) end, 100),
+               "the wait never subscribed to its session's detach"
+
+        :ok = CDPEx.close_page(browser, page)
+
+        assert {elapsed_us, {:error, {:session_closed, ^sid}}} = Task.await(waiting, 5_000)
+        assert elapsed_us < 2_000_000
+      end
+
+      # A session already gone when the wait starts: no detach event is coming.
+      {:ok, page} = CDPEx.new_page(browser, transport: :session)
+
+      # wait_for_navigation/2's probe: a live session must answer it, or it proves nothing.
+      assert {:ok, %{"targetInfo" => %{"targetId" => tid}}} =
+               Connection.call(page.conn, "Target.getTargetInfo", %{}, 5_000,
+                 session_id: page.session_id
+               )
+
+      assert tid == page.target_id
+      :ok = CDPEx.close_page(browser, page)
+
+      for wait <- waits do
+        {elapsed_us, result} = :timer.tc(fn -> wait.(page) end)
+        assert result == {:error, {:session_closed, page.session_id}}
+        assert elapsed_us < 1_000_000
+      end
+    end
+
+    test "a with_page deadline on a browser pid's session page returns near the deadline (#121)",
+         %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          CDPEx.with_page(
+            browser,
+            fn page ->
+              {:ok, _} = Page.navigate(page, fixture)
+              Process.put(:waiting, true)
+              Page.wait_for_selector(page, "#never-appears", timeout: 8_000)
+            end,
+            transport: :session,
+            deadline: 3_000
+          )
+        end)
+
+      assert Process.get(:waiting), "fun didn't reach its wait within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      # Before #121 the in-flight evaluate waited out its 15s call timeout.
+      assert elapsed_us < 4_500_000
+      assert :sys.get_state(browser).sessions == %{}
+    end
+
     test "two session pages share one browser connection and stay isolated", %{fixture: fixture} do
       {:ok, browser} = CDPEx.launch()
       on_exit(fn -> stop_quietly(browser) end)
@@ -1692,6 +1810,16 @@ defmodule CDPEx.IntegrationTest do
 
   defp os_alive?(os_pid) do
     match?({_, 0}, System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true))
+  end
+
+  # The Browser holds its own detach subscription; count only the wait's.
+  defp detach_watched?(page) do
+    page.conn
+    |> :sys.get_state()
+    |> Map.fetch!(:subscribers)
+    |> Map.get("Target.detachedFromTarget", %{})
+    |> Map.delete(page.browser)
+    |> map_size() > 0
   end
 
   defp stop_quietly(browser) do

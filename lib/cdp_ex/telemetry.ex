@@ -78,7 +78,8 @@ defmodule CDPEx.Telemetry do
       * `outcome` — what the returned error hides:
         * `:value` — `fun` returned a non-error value after the deadline
         * `{:error, reason}` — `fun` returned this error tuple, typically the
-          teardown's own (`:noproc`, `{:ws_closed, _}`)
+          teardown's own (`:noproc`, `{:ws_closed, _}`, or `{:session_closed, _}`
+          on a `:session` page)
         * `{:raised, kind, reason}` — `fun` raised, exited or threw (`kind` is
           `:error`, `:exit` or `:throw`; an `:error` reason is normalized to its
           exception)

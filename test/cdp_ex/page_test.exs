@@ -296,6 +296,35 @@ defmodule CDPEx.PageTest do
 
       assert :ok = Task.await(task, 2_000)
     end
+
+    test "stops on a closed session but polls through a missing context on one (#121)", %{
+      page: page,
+      fake: fake
+    } do
+      page = %{page | session_id: "S"}
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_selector(page, "#late", timeout: 5_000, interval: 10)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id1, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id1},"sessionId":"S","error":{"code":-32000,"message":"Cannot find context with specified id"}})
+      )
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id2, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id2},"error":{"code":-32001,"message":"Session with given id not found."}})
+      )
+
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+      refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 100
+    end
   end
 
   describe "click/3 :wait" do
@@ -441,7 +470,7 @@ defmodule CDPEx.PageTest do
       end
     end
 
-    test "a detached-session CDP error from the locate step returns at once", %{
+    test "a CDP error other than a missing context from the locate step returns at once", %{
       page: page,
       fake: fake
     } do
@@ -451,12 +480,27 @@ defmodule CDPEx.PageTest do
 
       FakeCDP.send_text(
         fake,
+        ~s({"id":#{id},"error":{"code":-32000,"message":"Object reference chain is too long"}})
+      )
+
+      assert {:error, {:cdp_error, "Runtime.evaluate", %{"code" => -32_000}}} =
+               Task.await(task, 1_000)
+
+      refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
+    end
+
+    test "a detached session from the locate step returns at once", %{page: page, fake: fake} do
+      page = %{page | session_id: "S"}
+      task = Task.async(fn -> Page.click(page, "#btn", wait: 10_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Runtime.evaluate"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
         ~s({"id":#{id},"error":{"code":-32001,"message":"Session with given id not found."}})
       )
 
-      assert {:error, {:cdp_error, "Runtime.evaluate", %{"code" => -32_001}}} =
-               Task.await(task, 1_000)
-
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
       refute_receive {:fake_cdp_recv, ^fake, %{"method" => "Runtime.evaluate"}}, 200
     end
 
@@ -713,7 +757,205 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "a :session page whose session detaches mid-wait (#121)" do
+    setup %{page: page} do
+      %{page: %{page | session_id: "S"}}
+    end
+
+    test "wait_for_navigation/2 ends on its own session's detach, not another's", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 5_000) end)
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+      answer_probe(fake)
+
+      send_detach(fake, "OTHER")
+      refute Task.yield(task, 100), "another session's detach ended the wait"
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+      # The watcher is gone, and Connection pruned its subscription.
+      wait_until_subscriber_count_below(conn, "Target.detachedFromTarget", 1)
+    end
+
+    test "wait_for_navigation/2 leaves the caller's own detach subscription and events alone", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      :ok = Connection.subscribe(conn, "Target.detachedFromTarget")
+      send_detach(fake, "QUEUED")
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", _, _} = queued, 2_000
+      send(self(), queued)
+
+      # The wait runs in this process, beside its subscription, so the milestone
+      # that ends it has to come from elsewhere.
+      caller = self()
+
+      spawn_link(fn ->
+        wait_until_subscribed(conn, caller)
+        answer_pending_probe(conn, fake)
+
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+        )
+      end)
+
+      assert :ok = Page.wait_for_navigation(page, timeout: 2_000)
+      assert_received ^queued
+
+      send_detach(fake, "LATER")
+
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "LATER"}, _},
+                     2_000
+    end
+
+    test "wait_for_navigation/2 on an already-detached session returns at once", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 5_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "sessionId" => "S"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32001,"message":"Session with given id not found."}})
+      )
+
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
+    test "an unanswered probe delays wait_for_navigation/2 by its cap, not the timeout", %{
+      page: page,
+      fake: fake
+    } do
+      task =
+        Task.async(fn -> :timer.tc(fn -> Page.wait_for_navigation(page, timeout: 6_000) end) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Target.getTargetInfo"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {elapsed_us, :ok} = Task.await(task, 7_000)
+      assert elapsed_us < 4_000_000
+    end
+
+    test "a detach that loses the race to the milestone leaves no message behind", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          result = Page.wait_for_navigation(page, timeout: 5_000)
+          {result, Process.info(self(), :messages)}
+        end)
+
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+      answer_probe(fake)
+      true = :erlang.suspend_process(task.pid)
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+      )
+
+      send_detach(fake, "S")
+      # The watcher has forwarded the detach and exited once its subscription is pruned.
+      wait_until_subscriber_count_below(conn, "Target.detachedFromTarget", 1)
+      true = :erlang.resume_process(task.pid)
+
+      assert {:ok, {:messages, []}} = Task.await(task, 1_000)
+    end
+
+    test "navigate/3 ends its readiness wait on the detach, as an error", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", timeout: 5_000) end)
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"sessionId":"S","result":{"loaderId":"L"}}))
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
+    test "wait_for_response/3 ends on the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_response(page, "/api", timeout: 5_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"sessionId":"S","result":{}}))
+      wait_until_waiting(conn)
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
+    test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.navigate(page, "http://example.test/", response: true, timeout: 5_000)
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"sessionId":"S","result":{}}))
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"sessionId":"S","result":{"loaderId":"L"}}))
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
+    test "wait_for_network_idle/2 ends on the detach", %{page: page, conn: conn, fake: fake} do
+      task =
+        Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 5_000, timeout: 8_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"sessionId":"S","result":{}}))
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+  end
+
   describe "navigate/3 with response: true" do
+    test "a dedicated page never subscribes to the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      answer_network_enable(fake)
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
+      assert subscriber_count(conn, "Target.detachedFromTarget") == 0
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {:ok, %Page{}, _response} = Task.await(task, 2_000)
+    end
+
     test "reports the main document's status + final URL, correlated by loaderId", %{
       page: page,
       conn: conn,
@@ -1555,6 +1797,14 @@ defmodule CDPEx.PageTest do
       on_exit(fn -> :telemetry.detach(handler) end)
     end
 
+    test "a dedicated page never subscribes to the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
+      enable_network_idle(fake, conn)
+
+      assert subscriber_count(conn, "Target.detachedFromTarget") == 0
+      assert :ok = Task.await(task, 2_000)
+    end
+
     test "resolves when nothing is in flight from the call onward", %{page: page, fake: fake} do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
       enable_network_idle(fake)
@@ -1801,6 +2051,23 @@ defmodule CDPEx.PageTest do
   defp wait_until_any_subscribed(conn, method, retries \\ 100),
     do: wait_until_subscriber_count(conn, method, 1, retries)
 
+  defp wait_until_subscriber_count_below(conn, method, count, retries \\ 100) do
+    cond do
+      map_size(Map.get(:sys.get_state(conn).subscribers, method, %{})) < count ->
+        :ok
+
+      retries == 0 ->
+        flunk("#{method} still has #{count} or more subscribers")
+
+      true ->
+        Process.sleep(10)
+        wait_until_subscriber_count_below(conn, method, count, retries - 1)
+    end
+  end
+
+  defp subscriber_count(conn, method),
+    do: map_size(Map.get(:sys.get_state(conn).subscribers, method, %{}))
+
   # Poll until `method` has at least `count` distinct subscriber pids.
   defp wait_until_subscriber_count(conn, method, count, retries \\ 100) do
     cond do
@@ -1889,6 +2156,40 @@ defmodule CDPEx.PageTest do
     # Wait for the helper to finish its pre-loop drain and start counting, or an
     # event sent next would be discarded as setup noise rather than tracked.
     if conn, do: assert_receive({:idle_watching, _meta}, 2_000)
+  end
+
+  # wait_for_navigation/2's round trip on a :session page, answered as a live session.
+  defp answer_probe(fake) do
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Target.getTargetInfo"}},
+                   2_000
+
+    FakeCDP.send_text(fake, ~s({"id":#{id},"sessionId":"S","result":{}}))
+  end
+
+  # answer_probe/1 for a process that isn't FakeCDP's controller: find the call in
+  # the connection's pending map instead of the controller's mailbox.
+  defp answer_pending_probe(conn, fake, retries \\ 100) do
+    probe =
+      Enum.find(:sys.get_state(conn).pending, fn {_id, entry} ->
+        elem(entry, 1) == "Target.getTargetInfo"
+      end)
+
+    case probe do
+      {id, _entry} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"sessionId":"S","result":{}}))
+
+      nil when retries > 0 ->
+        Process.sleep(10)
+        answer_pending_probe(conn, fake, retries - 1)
+    end
+  end
+
+  # Untagged, as Chrome sends it: on the browser session that attached `sid`.
+  defp send_detach(fake, sid) do
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"#{sid}","targetId":"T"}})
+    )
   end
 
   defp send_network_event(fake, method, request_id) do

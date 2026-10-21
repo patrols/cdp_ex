@@ -183,6 +183,22 @@ defmodule CDPEx.ProcessLabelTest do
 
       Task.shutdown(task, :brutal_kill)
     end
+
+    test "labels a session page's detach watcher with its role and target" do
+      Process.flag(:trap_exit, true)
+      {:ok, server} = FakeCDP.start()
+      {:ok, conn} = Connection.start_link(server.url)
+      assert_receive {:fake_cdp_connected, _fake}, 2_000
+      on_exit(fn -> close_quietly(conn) end)
+
+      page = %Page{browser: self(), conn: conn, target_id: "TARGET-3", session_id: "S"}
+      task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 2_000) end)
+
+      watcher = await_subscriber(conn, "Target.detachedFromTarget")
+      assert label_of(watcher) == {:cdp_page_helper, :detach_watch, "TARGET-3"}
+
+      Task.shutdown(task, :brutal_kill)
+    end
   end
 
   describe "CDPEx.Fetch" do

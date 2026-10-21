@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- A `transport: :session` page whose target closed or detached no longer leaves its calls and waits running to their own timeouts. Calls fail with the new `{:error, {:session_closed, session_id}}` (classified `:transient`, like a dedicated page's `:noproc`): one in flight when the session detaches fails at once, and a later one fails on Chrome's "session not found" reply, which used to be dropped because it carries no `sessionId`. `navigate/3`, `wait_for_navigation/2`, `wait_for_network_idle/2`, `wait_for_response/3` and session-scoped `Connection.await_event/4` waiters end with the same error on the detach, and `wait_for_selector/3`, `wait_for_function/3` and `click/3 :wait` stop retrying. `with_page/3`'s `:deadline` (and `CDPEx.Pool.with_page/3`'s) now returns near the deadline on session pages too. A `Connection.subscribe/4` to `"Target.detachedFromTarget"` (or `:all`) scoped to a session now also receives that session's own detach (#123).
+
 ## [0.11.0] - 2026-10-21
 
 ### Added

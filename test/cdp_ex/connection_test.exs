@@ -193,6 +193,130 @@ defmodule CDPEx.ConnectionTest do
     assert {:ok, %{"who" => "B"}} = Task.await(b)
   end
 
+  describe "a detached session (#121)" do
+    test "Target.detachedFromTarget fails that session's in-flight calls and waiters only", %{
+      conn: conn,
+      fake: fake
+    } do
+      gone = Task.async(fn -> Connection.call(conn, "Slow.op", %{}, 5_000, session_id: "S1") end)
+      kept = Task.async(fn -> Connection.call(conn, "Slow.op", %{}, 5_000, session_id: "S2") end)
+
+      ids =
+        for _ <- 1..2, into: %{} do
+          assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "sessionId" => sid}}, 2_000
+          {sid, id}
+        end
+
+      registered = waiter_count(conn)
+
+      waiter =
+        Task.async(fn ->
+          Connection.await_event(conn, fn _ -> true end, 5_000, session_id: "S1")
+        end)
+
+      await_waiter(conn, registered)
+
+      other =
+        Task.async(fn ->
+          Connection.await_event(conn, fn _ -> true end, 5_000, session_id: "S2")
+        end)
+
+      await_waiter(conn, registered + 1)
+
+      wide =
+        Task.async(fn -> Connection.await_event(conn, fn params -> params["n"] == 1 end, 5_000) end)
+
+      await_waiter(conn, registered + 2)
+
+      # Untagged: Chrome reports the detach on the browser session that attached it.
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"S1","targetId":"T1"}})
+      )
+
+      assert {:error, {:session_closed, "S1"}} = Task.await(gone, 1_000)
+      assert {:error, {:session_closed, "S1"}} = Task.await(waiter, 1_000)
+
+      # Waiters on another session, or on none, outlive it.
+      refute Task.yield(other, 100)
+      refute Task.yield(wide, 0)
+
+      FakeCDP.send_text(fake, ~s({"method":"Some.event","sessionId":"S2","params":{"n":1}}))
+      assert {:ok, _} = Task.await(other, 1_000)
+      assert {:ok, _} = Task.await(wide, 1_000)
+
+      # A late reply for the failed call is dropped; the other session is untouched.
+      FakeCDP.send_text(fake, ~s({"id":#{ids["S1"]},"sessionId":"S1","result":{}}))
+      FakeCDP.send_text(fake, ~s({"id":#{ids["S2"]},"sessionId":"S2","result":{"who":"S2"}}))
+      assert {:ok, %{"who" => "S2"}} = Task.await(kept, 1_000)
+    end
+
+    test "a call on it fails on Chrome's untagged session-not-found reply", %{
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          Connection.call(conn, "Runtime.evaluate", %{}, 5_000, session_id: "S1")
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "sessionId" => "S1"}}, 2_000
+
+      # Real Chrome's reply: from the browser root, so it carries no sessionId.
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32001,"message":"Session with given id not found."}})
+      )
+
+      assert {:error, {:session_closed, "S1"}} = Task.await(task, 1_000)
+    end
+
+    test "a detach subscription scoped to a session receives that session's detach only", %{
+      conn: conn,
+      fake: fake
+    } do
+      :ok = Connection.subscribe(conn, "Target.detachedFromTarget", 5_000, session_id: "S1")
+
+      for sid <- ["S2", "S1"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"#{sid}","targetId":"T"}})
+        )
+      end
+
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S1"}, nil},
+                     2_000
+
+      refute_received {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S2"}, _}
+    end
+
+    test "an :all subscription scoped to a session also receives that session's detach only", %{
+      conn: conn,
+      fake: fake
+    } do
+      :ok = Connection.subscribe(conn, :all, 5_000, session_id: "S1")
+
+      for sid <- ["S2", "S1"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"#{sid}","targetId":"T"}})
+        )
+      end
+
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S1"}, nil},
+                     2_000
+
+      refute_received {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S2"}, _}
+    end
+
+    test "a -32001 error on a call without a session stays a cdp_error", %{conn: conn, fake: fake} do
+      task = Task.async(fn -> Connection.call(conn, "Some.op", %{}, 5_000) end)
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Some.op"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{id},"error":{"code":-32001,"message":"x"}}))
+      assert {:error, {:cdp_error, "Some.op", %{"code" => -32_001}}} = Task.await(task, 1_000)
+    end
+  end
+
   test "events carry their sessionId to subscribers", %{conn: conn, fake: fake} do
     :ok = Connection.subscribe(conn, "Page.lifecycleEvent")
 
