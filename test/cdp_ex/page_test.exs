@@ -829,6 +829,24 @@ defmodule CDPEx.PageTest do
       assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
     end
 
+    test "an unanswered probe delays wait_for_navigation/2 by its cap, not the timeout", %{
+      page: page,
+      fake: fake
+    } do
+      task =
+        Task.async(fn -> :timer.tc(fn -> Page.wait_for_navigation(page, timeout: 6_000) end) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Target.getTargetInfo"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {elapsed_us, :ok} = Task.await(task, 7_000)
+      assert elapsed_us < 4_000_000
+    end
+
     test "a detach that loses the race to the milestone leaves no message behind", %{
       page: page,
       conn: conn,

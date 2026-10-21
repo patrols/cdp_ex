@@ -42,6 +42,7 @@ defmodule CDPEx.Page do
   @screenshot_timeout 30_000
   @command_timeout 10_000
   @click_poll_interval 100
+  @probe_timeout 2_000
   @retryable_locate [:selector_not_found, :text_not_found, :not_clickable]
   # All -32000: a context that never existed (the script didn't run) vs one torn down mid-call.
   @context_not_found ["Cannot find context", "Cannot find default execution context"]
@@ -510,11 +511,14 @@ defmodule CDPEx.Page do
 
   # With nothing to send, a wait on a session that detached before the watcher
   # subscribed would only time out: one round trip after subscribing surfaces Chrome's
-  # "session not found" as {:session_closed, sid}. Any other answer means carry on.
+  # "session not found" as {:session_closed, sid}. Any other answer, or none within
+  # @probe_timeout (an endpoint that drops the call), means carry on.
   defp probe_session(%__MODULE__{session_id: nil}, _deadline), do: :ok
 
   defp probe_session(page, deadline) do
-    case do_call(page, "Target.getTargetInfo", %{}, remaining(deadline)) do
+    timeout = min(remaining(deadline), @probe_timeout)
+
+    case do_call(page, "Target.getTargetInfo", %{}, timeout) do
       {:error, {:session_closed, _sid}} = error -> error
       _answered -> :ok
     end

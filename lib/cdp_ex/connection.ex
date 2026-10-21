@@ -127,9 +127,9 @@ defmodule CDPEx.Connection do
   the matching that `await_event/4` already does for waiters. The default (`nil`)
   receives every session's events (current behaviour); on a `:dedicated`
   connection, where every event is for the one page, the two are equivalent.
-  `"Target.detachedFromTarget"` scoped to `sid` also delivers `sid`'s own detach,
-  which Chrome sends on the parent session (so its `session_id` element is the
-  parent's, usually `nil`, and `params["sessionId"]` is `sid`).
+  `"Target.detachedFromTarget"` (or `:all`) scoped to `sid` also delivers `sid`'s
+  own detach, which Chrome sends on the parent session (so its `session_id`
+  element is the parent's, usually `nil`, and `params["sessionId"]` is `sid`).
   """
   @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) :: :ok
   def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
