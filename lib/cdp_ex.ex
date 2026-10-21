@@ -35,6 +35,10 @@ defmodule CDPEx do
   the reason shapes. That includes runtime failures — Chrome that can't be spawned, a
   browser, page or pool process that is gone or stops mid-call, a call it can't serve
   in time — which come back as values, never as a raise or an exit in the caller.
+  The guarantee covers return values, not links: a browser from `launch/1` or
+  `connect/2` stays linked to the process that started it, so if Chrome dies, a starter
+  that doesn't trap exits still receives the exit signal (run it under a supervisor;
+  `with_page/3` with launch options contains this for its throwaway browser).
   Invalid arguments (a bad `:deadline` or `:wait`, a wrong type) still raise; that is a
   bug in the calling code. So does anything `with_page/3`'s own `fun` raises, throws or
   exits with. To drive retries without hard-coding that list, classify the
