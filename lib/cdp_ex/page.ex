@@ -904,16 +904,19 @@ defmodule CDPEx.Page do
   its only child's, so when matches nest the **innermost** one is clicked: in
   `<div><button>Load more</button></div>` that is the button, not the div.
 
-  The first innermost match in document order **that has a box** (non-zero size)
-  wins, so a hidden copy of the label earlier in the page (a collapsed mobile menu,
-  say) doesn't shadow the visible one. Only when no match has a box does one climb
+  The first innermost match in document order **that is visible** (a non-zero box,
+  not `visibility: hidden` or `opacity: 0`) wins, so a hidden copy of the label
+  earlier in the page (a collapsed mobile menu, say) doesn't shadow the visible one;
+  a copy moved off-canvas with a transform is not detected. Failing that, the first
+  match with a box wins. Only when no match has a box does one climb
   to its nearest matching HTML ancestor that has one: the SVG `<title>` in an icon
   button, or a `display: contents` span in a link, yields the button or the link
   (not the `<svg>`, which has a box and the same text but isn't an HTML element).
   When nothing qualifies the first innermost match is chosen, and a trusted click
   reports `:not_clickable`.
 
-  Candidates are the elements under `document.body`; `:selector` narrows them to
+  Candidates are the elements under `document.body`, excluding `<script>`, `<style>`,
+  `<template>` and `<noscript>` content; `:selector` narrows them to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
   label from matching unrelated text elsewhere on the page. The search doesn't enter
   shadow roots or iframes, and its cost grows with the page's text (it re-runs on every
@@ -924,7 +927,8 @@ defmodule CDPEx.Page do
   element but clicks it whatever its box, so it never reports `:not_clickable`.
 
   Options:
-    * `:selector` — CSS selector the candidates must match. Default: any element.
+    * `:selector` — CSS selector (a string) the candidates must match; any other
+      value raises `ArgumentError`. Default: any element.
     * `:wait` — as in `click/3`, retrying while nothing matches, no match has a
       box yet (trusted clicks only), or the lookup finds no execution context.
       Default `0`; an invalid value raises `ArgumentError`.
@@ -945,7 +949,7 @@ defmodule CDPEx.Page do
             "invalid click_text/3 text #{inspect(text)} (expected a non-whitespace label)"
     end
 
-    selector = Keyword.get(opts, :selector)
+    selector = text_selector!(Keyword.get(opts, :selector))
     locator = text_locator(text, selector)
     click_with_wait(page, locator, {:text_not_found, text}, text, opts)
   end
@@ -1104,6 +1108,11 @@ defmodule CDPEx.Page do
   # A descendant's normalized text is a substring of its ancestor's, so a subtree that
   # can't contain the target is skipped. The climb only accepts HTML ancestors: an SVG
   # <title>'s <svg> has a box but no .click(), and the button is the real target.
+  defp text_selector!(selector) when is_nil(selector) or is_binary(selector), do: selector
+
+  defp text_selector!(other),
+    do: raise(ArgumentError, "invalid :selector #{inspect(other)} (expected a CSS string)")
+
   defp text_locator(text, selector) do
     """
     (function () {
@@ -1115,7 +1124,12 @@ defmodule CDPEx.Page do
         var r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
       };
+      var visible = function (el) {
+        return boxed(el) && (typeof el.checkVisibility !== "function" ||
+          el.checkVisibility({visibilityProperty: true, opacityProperty: true}));
+      };
       var walk = function (el) {
+        if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT)$/.test(el.tagName.toUpperCase())) { return false; }
         var t = norm(el.textContent);
         if (t.indexOf(target) === -1) { return false; }
         var inner = false;
@@ -1132,7 +1146,8 @@ defmodule CDPEx.Page do
       if (selector !== null) { document.createDocumentFragment().querySelector(selector); }
       if (!document.body) { return null; }
       for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
-      for (var i = 0; i < matches.length; i++) { if (boxed(matches[i])) { return matches[i]; } }
+      for (var i = 0; i < matches.length; i++) { if (visible(matches[i])) { return matches[i]; } }
+      for (var k = 0; k < matches.length; k++) { if (boxed(matches[k])) { return matches[k]; } }
       for (var j = 0; j < matches.length; j++) {
         for (var el = matches[j].parentElement; el && el !== document.body; el = el.parentElement) {
           if (norm(el.textContent) !== target) { break; }

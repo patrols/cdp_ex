@@ -8,7 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `CDPEx.Page.click/3` `:wait` option: a total budget (ms) for the element to appear and get a clickable box. The whole locate + click is retried, 100ms apart, while the element is missing, has no box, or the page has no execution context mid-navigation; any other error returns at once, and nothing is retried after the mouse events are dispatched, so a click never fires twice. Defaults to `0` (one attempt, as before); `:timeout` is still the per-call timeout (#119).
-- `CDPEx.Page.click_text/3`: click an element by its text content (`textContent`, whitespace-normalized like XPath `normalize-space()`, exact match). Clicks the innermost match, prefers one with a box so a hidden duplicate doesn't win, and climbs from a boxless match (an SVG `<title>`, a `display: contents` span) to its clickable HTML ancestor. Takes `:selector`, `:wait` and `:trusted`. Returns the new `{:error, {:text_not_found, text}}` (`:terminal`) when nothing matches (#119).
+- `CDPEx.Page.click_text/3`: click an element by its text content (`textContent`, whitespace-normalized like XPath `normalize-space()`, exact match). Clicks the innermost match, prefers a visible one so a hidden duplicate (`display: none`, `visibility: hidden`, `opacity: 0`) doesn't win, and climbs from a boxless match (an SVG `<title>`, a `display: contents` span) to its clickable HTML ancestor. Takes `:selector`, `:wait` and `:trusted`. Returns the new `{:error, {:text_not_found, text}}` (`:terminal`) when nothing matches (#119).
 - `CDPEx.Page.scroll/3`: scroll the window to `:top`, `:bottom` or `{x, y}`, instantly even under `scroll-behavior: smooth` (#119).
 
 ### Changed

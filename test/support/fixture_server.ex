@@ -184,6 +184,7 @@ defmodule CDPEx.FixtureServer do
       <body style="margin:0">
         <div id="menu-wrap" style="padding:8px"><button id="menu-hidden" style="display:none">Open menu</button></div>
         <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
+        <button id="menu-invisible" style="visibility:hidden">Open menu</button>
         <button id="menu-visible">Open menu</button>
         <span id="label-span">Subscribe</span>
         <button id="subscribe-btn">Subscribe</button>

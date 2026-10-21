@@ -402,6 +402,7 @@ defmodule CDPEx.PageTest do
       task = Task.async(fn -> Page.click(page, "#btn", wait: 2_000) end)
 
       send_cdp_error(fake, "Inspected target navigated or closed")
+      send_cdp_error(fake, "Execution context was destroyed.")
       reply_evaluate(fake, %{"found" => true, "clickable" => true, "x" => 1, "y" => 2})
 
       for type <- ["mousePressed", "mouseReleased"] do
@@ -546,6 +547,16 @@ defmodule CDPEx.PageTest do
       for text <- ["", "   ", " \t\r\n "] do
         assert_raise ArgumentError, ~r/invalid click_text\/3 text/, fn ->
           Page.click_text(page, text)
+        end
+      end
+
+      refute_receive {:fake_cdp_recv, ^fake, _}, 100
+    end
+
+    test "raises on a non-string :selector without touching the page", %{page: page, fake: fake} do
+      for selector <- [:button, 1] do
+        assert_raise ArgumentError, ~r/invalid :selector/, fn ->
+          Page.click_text(page, "Go", selector: selector)
         end
       end
 
