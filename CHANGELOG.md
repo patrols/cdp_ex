@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-21
+
 ### Added
 - `CDPEx.Page.click/3` `:wait` option: a total budget (ms) for the element to appear and get a clickable box. The whole locate + click is retried, 100ms apart, while the element is missing, has no box, or the page has no execution context mid-navigation; any other error returns at once, and nothing is retried after the mouse events are dispatched, so a click never fires twice. Defaults to `0` (one attempt, as before); `:timeout` is still the per-call timeout (#119).
 - `CDPEx.Page.click_text/3`: click an element by its text content (`textContent`, whitespace-normalized like XPath `normalize-space()`, exact match). Clicks the innermost match, resolving a boxless one (an SVG `<title>`, a `display: contents` span) to its clickable HTML ancestor, and prefers a visible target so a hidden duplicate (`display: none`, `visibility: hidden`, `opacity: 0`) doesn't win. Takes `:selector`, `:wait` and `:trusted`. Returns the new `{:error, {:text_not_found, text}}` (`:terminal`) when nothing matches (#119).
@@ -16,7 +18,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.with_page/3` with launch options no longer kills a caller that doesn't trap exits when the launch fails; it returns `{:error, reason}`. On OTP 24/25 the failed start's `{:EXIT, pid, reason}` is left in the caller's mailbox instead (#120).
 
 ### Changed
-- Bumped `mint` to 1.11.0 (and `hpax` to 1.1.0) for EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding), which `mix hex.audit` had started failing CI on.
+- CDPEx's own lockfile now uses `mint` 1.11.0 (and `hpax` 1.1.0), which fix EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding). This release doesn't raise the version floor, so run `mix deps.update mint hpax` in your project to pick up the fixes (#112).
 
 ## [0.10.0] - 2026-09-21
 
@@ -231,7 +233,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/patrols/cdp_ex/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/patrols/cdp_ex/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/patrols/cdp_ex/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/patrols/cdp_ex/compare/v0.7.0...v0.8.0
