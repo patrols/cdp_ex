@@ -904,16 +904,17 @@ defmodule CDPEx.Page do
   its only child's, so when matches nest the **innermost** one is clicked: in
   `<div><button>Load more</button></div>` that is the button, not the div.
 
-  The first innermost match in document order **that is visible** (a non-zero box,
+  Each innermost match is first resolved to its click target: itself if it has a box,
+  otherwise (unless it is `display: none`) its nearest matching HTML ancestor that
+  has one. The first target in document order **that is visible** (a non-zero box,
   not `visibility: hidden` or `opacity: 0`) wins, so a hidden copy of the label
   earlier in the page (a collapsed mobile menu, say) doesn't shadow the visible one;
   a copy moved off-canvas with a transform is not detected. Failing that, the first
-  match with a box wins. Only when no match has a box does one climb
-  to its nearest matching HTML ancestor that has one: the SVG `<title>` in an icon
-  button, or a `display: contents` span in a link, yields the button or the link
-  (not the `<svg>`, which has a box and the same text but isn't an HTML element).
-  When nothing qualifies the first innermost match is chosen, and a trusted click
-  reports `:not_clickable`.
+  target with a box wins. The climb is what makes an SVG `<title>` in an icon button,
+  or a `display: contents` span in a link, click the button or the link (not the
+  `<svg>`, which has a box and the same text but isn't an HTML element). When nothing
+  has a box the first innermost match is chosen, and a trusted click reports
+  `:not_clickable`.
 
   Candidates are the elements under `document.body`, excluding `<script>`, `<style>`,
   `<template>` and `<noscript>` content; `:selector` narrows them to
@@ -1105,14 +1106,15 @@ defmodule CDPEx.Page do
 
   defp retryable_locate?(_reason), do: false
 
-  # A descendant's normalized text is a substring of its ancestor's, so a subtree that
-  # can't contain the target is skipped. The climb only accepts HTML ancestors: an SVG
-  # <title>'s <svg> has a box but no .click(), and the button is the real target.
   defp text_selector!(selector) when is_nil(selector) or is_binary(selector), do: selector
 
   defp text_selector!(other),
     do: raise(ArgumentError, "invalid :selector #{inspect(other)} (expected a CSS string)")
 
+  # A descendant's normalized text is a substring of its ancestor's, so a subtree that
+  # can't contain the target is skipped. The climb only accepts HTML ancestors (an SVG
+  # <title>'s <svg> has a box but no .click()) and stops at display:none, so a hidden
+  # copy can't borrow its wrapper's box.
   defp text_locator(text, selector) do
     """
     (function () {
@@ -1146,17 +1148,21 @@ defmodule CDPEx.Page do
       if (selector !== null) { document.createDocumentFragment().querySelector(selector); }
       if (!document.body) { return null; }
       for (var c = document.body.firstElementChild; c; c = c.nextElementSibling) { walk(c); }
-      for (var i = 0; i < matches.length; i++) { if (visible(matches[i])) { return matches[i]; } }
-      for (var k = 0; k < matches.length; k++) { if (boxed(matches[k])) { return matches[k]; } }
-      for (var j = 0; j < matches.length; j++) {
-        for (var el = matches[j].parentElement; el && el !== document.body; el = el.parentElement) {
-          if (norm(el.textContent) !== target) { break; }
+      var hidden = function (el) { return getComputedStyle(el).display === "none"; };
+      var resolve = function (m) {
+        if (boxed(m) || (m instanceof HTMLElement && hidden(m))) { return m; }
+        for (var el = m.parentElement; el && el !== document.body; el = el.parentElement) {
+          if (hidden(el) || norm(el.textContent) !== target) { break; }
           if (el instanceof HTMLElement && (selector === null || el.matches(selector)) && boxed(el)) {
             return el;
           }
         }
-      }
-      return matches.length > 0 ? matches[0] : null;
+        return m;
+      };
+      var targets = matches.map(resolve);
+      for (var i = 0; i < targets.length; i++) { if (visible(targets[i])) { return targets[i]; } }
+      for (var k = 0; k < targets.length; k++) { if (boxed(targets[k])) { return targets[k]; } }
+      return targets.length > 0 ? targets[0] : null;
     })()
     """
   end

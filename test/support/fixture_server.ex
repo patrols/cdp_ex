@@ -193,6 +193,7 @@ defmodule CDPEx.FixtureServer do
             all   events
         </a>
         <button id="hidden-text-btn" style="display:none">Invisible</button>
+        <button id="close-drawer" style="opacity:0">Close</button>
         <button id="icon-close"><svg width="16" height="16"><title>Close</title><rect width="16" height="16"></rect></svg></button>
         <a id="next-link" href="#"><span style="display:contents">Next</span></a>
         <svg width="80" height="20"><text id="svg-zoom" x="0" y="15">Zoom</text></svg>
