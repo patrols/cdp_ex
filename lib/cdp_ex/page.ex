@@ -371,9 +371,14 @@ defmodule CDPEx.Page do
     after
       remaining ->
         # Best-effort: return whatever document response we captured (nil → the caller
-        # maps it to {:error, {:no_document_response, _}}). Prefer a just-landed :DOWN.
+        # maps it to {:error, {:no_document_response, _}}). Prefer a just-landed :DOWN
+        # or detach.
         receive do
-          {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
+          {:DOWN, ^ref, :process, ^conn, reason} ->
+            {:down, reason}
+
+          {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _} ->
+            {:down, {:session_closed, sid}}
         after
           0 -> {:ok, captured}
         end
@@ -585,9 +590,11 @@ defmodule CDPEx.Page do
   defp watch_tag(nil), do: make_ref()
   defp watch_tag({_pid, _mon, tag}), do: tag
 
-  # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
-  # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
-  # methods never arrive here) — the connection dying, or the deadline. The milestone
+  # Wait for the named lifecycle event — scoped to this page's session (the
+  # subscription filters on it; `^sid` keeps the match honest) and the
+  # `Page.lifecycleEvent` method (the subscription is method-keyed, so other
+  # methods never arrive here) — the connection dying, the session's detach, or the
+  # deadline. The milestone
   # is pinned to the navigated document per track_lifecycle/2 (a stale about:blank
   # milestone can't end the wait early; a successor document's can); with no loaderId
   # in `nav` it matches on name alone. Returns `:reached` | `{:down, reason}` |
@@ -613,10 +620,11 @@ defmodule CDPEx.Page do
         {:down, reason}
     after
       remaining ->
-        # Exact deadline-vs-DOWN tie: a {:DOWN} may have just landed but lost the
-        # race to `after`. Prefer it over a misleading timeout.
+        # Exact deadline-vs-DOWN tie: a {:DOWN} (or the detach) may have just landed
+        # but lost the race to `after`. Prefer it over a misleading timeout.
         receive do
           {:DOWN, ^ref, :process, ^conn, reason} -> {:down, reason}
+          {^tag, {:session_closed, _sid} = reason} -> {:down, reason}
         after
           0 -> :timeout
         end
@@ -648,7 +656,10 @@ defmodule CDPEx.Page do
     * `:timeout` — ms (default 30_000)
 
   Returns `:ok`, `{:error, :timeout}`, or `{:error, reason}` if the connection
-  drops while waiting.
+  drops while waiting. On a `:session` page it also returns
+  `{:error, {:session_closed, session_id}}` when the session detaches, and makes one
+  `Target.getTargetInfo` call before waiting so that a session already gone fails
+  at once rather than at `:timeout`.
   """
   @spec wait_for_navigation(t(), keyword()) :: :ok | {:error, term()}
   def wait_for_navigation(%__MODULE__{} = page, opts \\ []) do
@@ -1709,11 +1720,16 @@ defmodule CDPEx.Page do
         {:down, reason}
     after
       remaining(deadline) ->
-        # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} over a stale timeout.
+        # Exact deadline-vs-DOWN tie: prefer a just-landed {:DOWN} or detach over a
+        # stale timeout.
         receive do
           {:DOWN, ^mon, :process, ^conn, reason} ->
             _ = disarm_idle(idle)
             {:down, reason}
+
+          {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+            _ = disarm_idle(idle)
+            {:down, {:session_closed, sid}}
         after
           0 ->
             _ = disarm_idle(idle)

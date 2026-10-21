@@ -270,6 +270,14 @@ defmodule CDPEx.IntegrationTest do
 
       # A session already gone when the wait starts: no detach event is coming.
       {:ok, page} = CDPEx.new_page(browser, transport: :session)
+
+      # wait_for_navigation/2's probe: a live session must answer it, or it proves nothing.
+      assert {:ok, %{"targetInfo" => %{"targetId" => tid}}} =
+               Connection.call(page.conn, "Target.getTargetInfo", %{}, 5_000,
+                 session_id: page.session_id
+               )
+
+      assert tid == page.target_id
       :ok = CDPEx.close_page(browser, page)
 
       for wait <- waits do
