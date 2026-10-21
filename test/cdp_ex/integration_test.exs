@@ -48,7 +48,7 @@ defmodule CDPEx.IntegrationTest do
       assert CDPEx.stop(browser) == :ok
     end
 
-    test "Pool.with_page/3 on it returns {:error, :noproc}" do
+    test "CDPEx.with_page/3 on a pooled browser (via Pool.with_browser/3) returns {:error, :noproc}" do
       {:ok, pool} = Pool.start_link(size: 1)
       on_exit(fn -> stop_pool_quietly(pool) end)
 

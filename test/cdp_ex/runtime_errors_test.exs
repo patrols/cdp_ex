@@ -40,6 +40,7 @@ defmodule CDPEx.RuntimeErrorsTest do
   alias CDPEx.RuntimeErrorsTest.Stub
 
   @moduletag :tmp_dir
+  @root? System.cmd("id", ["-u"]) == {"0\n", 0}
 
   defp dead_pid do
     pid = spawn(fn -> :ok end)
@@ -84,19 +85,16 @@ defmodule CDPEx.RuntimeErrorsTest do
                {:error, {:launch_failed, {:user_data_dir, :enotdir}}}
     end
 
+    @tag skip: @root? && "root ignores the owner execute bit"
     test "a spawn the OS refuses is {:launch_failed, {:spawn, posix}}", %{tmp_dir: tmp} do
       # Execute bit for "other" only: executable?/1 lets it through, but the owner
-      # can't run it, so Port.open raises :eacces. (Root ignores the bit; skip there.)
+      # can't run it, so Port.open raises :eacces.
       path = Path.join(tmp, "not_mine")
       File.write!(path, "#!/bin/sh\n")
       File.chmod!(path, 0o601)
 
-      if System.cmd("id", ["-u"]) == {"0\n", 0} do
-        :ok
-      else
-        assert Chrome.launch(chrome_binary: path, user_data_dir: Path.join(tmp, "profile")) ==
-                 {:error, {:launch_failed, {:spawn, :eacces}}}
-      end
+      assert Chrome.launch(chrome_binary: path, user_data_dir: Path.join(tmp, "profile")) ==
+               {:error, {:launch_failed, {:spawn, :eacces}}}
     end
   end
 
@@ -274,6 +272,29 @@ defmodule CDPEx.RuntimeErrorsTest do
   end
 end
 
+defmodule CDPEx.RuntimeErrorsTest.UncleanStop do
+  @moduledoc false
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
+
+  alias CDPEx.Browser
+
+  test "stop helpers stay quiet for a gone or clean stop and warn for anything else" do
+    for reason <- [:noproc, :normal, :shutdown, {:shutdown, :closed}] do
+      assert capture_log(fn -> assert Browser.warn_unclean_stop("X", reason) == :ok end) ==
+               ""
+    end
+
+    log =
+      capture_log(fn ->
+        assert Browser.warn_unclean_stop("X", {%RuntimeError{}, []}) == :ok
+      end)
+
+    assert log =~ "[X] stopped with"
+  end
+end
+
 defmodule CDPEx.RuntimeErrorsTest.CloseTimeout do
   # A separate module so this 15s wait runs alongside the authenticate one.
   @moduledoc false
@@ -324,6 +345,7 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
   alias CDPEx.Chrome
 
   @moduletag :tmp_dir
+  @root? System.cmd("id", ["-u"]) == {"0\n", 0}
 
   setup %{tmp_dir: tmp} do
     scratch = Path.join(tmp, "scratch")
@@ -338,17 +360,15 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
     %{scratch: scratch}
   end
 
+  @tag skip: @root? && "root ignores the owner execute bit"
   test "a spawn the OS refuses removes the profile dir cdp_ex created",
        %{tmp_dir: tmp, scratch: scratch} do
     path = Path.join(tmp, "not_mine")
     File.write!(path, "#!/bin/sh\n")
     File.chmod!(path, 0o601)
 
-    # Root ignores the owner execute bit, so there is no :eacces to provoke there.
-    if System.cmd("id", ["-u"]) != {"0\n", 0} do
-      assert Chrome.launch(chrome_binary: path) == {:error, {:launch_failed, {:spawn, :eacces}}}
-      assert File.ls!(scratch) == []
-    end
+    assert Chrome.launch(chrome_binary: path) == {:error, {:launch_failed, {:spawn, :eacces}}}
+    assert File.ls!(scratch) == []
   end
 
   test ":extra_args Port.open rejects raise ArgumentError and remove the profile dir",

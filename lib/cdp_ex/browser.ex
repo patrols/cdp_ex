@@ -147,6 +147,7 @@ defmodule CDPEx.Browser do
     {pid, mon} =
       Process.spawn(
         fn ->
+          ProcessLabel.set({:cdp_authenticate, page.target_id})
           reply = call(browser, {:authenticate, page, opts}, 15_000, :authenticate)
           Process.unlink(caller)
           send(caller, {tag, reply})
@@ -200,7 +201,20 @@ defmodule CDPEx.Browser do
     GenServer.stop(browser, :normal)
   catch
     # Already stopped, or stopped on its own (Chrome died) while this one was waiting.
-    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self -> :ok
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
+      warn_unclean_stop("CDPEx.Browser", reason)
+  end
+
+  # A reason other than "already gone" means terminate/2 itself failed, which can leave
+  # Chrome unreaped; stop/1 still returns :ok but says so.
+  @doc false
+  def warn_unclean_stop(_who, reason)
+      when reason in [:noproc, :normal, :shutdown] or
+             (is_tuple(reason) and elem(reason, 0) == :shutdown), do: :ok
+
+  def warn_unclean_stop(who, reason) do
+    Logger.warning("[#{who}] stopped with #{inspect(reason)} rather than cleanly")
+    :ok
   end
 
   # A Browser that is gone, or stops before replying, took its pages with it.

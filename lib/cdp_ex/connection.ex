@@ -21,6 +21,7 @@ defmodule CDPEx.Connection do
 
   use GenServer, restart: :temporary
 
+  alias CDPEx.Browser
   alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
@@ -152,6 +153,7 @@ defmodule CDPEx.Connection do
     GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
   catch
     :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, :subscribe}}
+    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
@@ -209,7 +211,8 @@ defmodule CDPEx.Connection do
   def close(conn) do
     GenServer.stop(conn, :normal)
   catch
-    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self -> :ok
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
+      Browser.warn_unclean_stop("CDPEx.Connection", reason)
   end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
