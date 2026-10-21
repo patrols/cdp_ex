@@ -535,8 +535,9 @@ defmodule CDPEx.Page do
   # a subscription the caller holds on that browser-wide method, and the drain would
   # eat its queued events. A monitored watcher subscribes instead and sends
   # `{tag, {:session_closed, sid}}`; Connection prunes its subscription when it exits.
-  # Returns `{pid, monitor, tag}`, or nil for a dedicated page (or a dead connection,
-  # which the wait's own monitor reports).
+  # Returns `{pid, monitor, tag}`, or nil for a dedicated page or a failed subscribe:
+  # it is bounded by the wait's own deadline, so a failure means either that deadline
+  # is spent or the connection is dead, which the wait reports by itself.
   defp watch_detach(%__MODULE__{session_id: nil}, _deadline), do: nil
 
   defp watch_detach(%__MODULE__{conn: conn, session_id: sid} = page, deadline) do
@@ -1544,7 +1545,8 @@ defmodule CDPEx.Page do
   Returns `{:ok, params}` — the full `Network.responseReceived` params (HTTP status
   under `params["response"]["status"]`, request id under `params["requestId"]`) — or
   `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
-  connection drops. Lazily enables the `Network` domain. Only responses observed
+  connection drops (or, on a `:session` page, `{:error, {:session_closed, sid}}` if
+  the session detaches). Lazily enables the `Network` domain. Only responses observed
   **after** this call are considered, so call it before triggering the request.
 
   > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}

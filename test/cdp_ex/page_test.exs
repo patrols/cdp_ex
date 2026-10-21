@@ -890,6 +890,17 @@ defmodule CDPEx.PageTest do
       assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
     end
 
+    test "wait_for_response/3 ends on the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_response(page, "/api", timeout: 5_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"sessionId":"S","result":{}}))
+      wait_until_waiting(conn)
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
     test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
       task =
         Task.async(fn ->

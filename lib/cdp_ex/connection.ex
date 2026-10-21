@@ -88,8 +88,8 @@ defmodule CDPEx.Connection do
   `{:error, :noproc}` if the connection drops or is already gone.
 
   Pass `opts` with `session_id: sid` to address a flattened CDP session. A call on
-  a session that has detached (its target closed, or `Target.detachFromTarget`)
-  returns `{:error, {:session_closed, sid}}`: one in flight when the connection
+  a session that has detached (its target closed, or `Target.detachFromTarget`) or
+  that Chrome doesn't know at all returns `{:error, {:session_closed, sid}}`: one in flight when the connection
   sees `Target.detachedFromTarget` for it fails then, and a later one fails on
   Chrome's "session not found" reply rather than waiting out `timeout`.
   """
