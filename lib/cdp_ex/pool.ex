@@ -38,6 +38,7 @@ defmodule CDPEx.Pool do
   use GenServer
 
   alias CDPEx.Browser
+  alias CDPEx.Exits
   alias CDPEx.ProcessLabel
 
   require Logger
@@ -149,9 +150,6 @@ defmodule CDPEx.Pool do
   @spec with_page(GenServer.server(), (CDPEx.Page.t() -> result), keyword()) ::
           result | {:error, term()}
         when result: var
-
-  # ── GenServer callbacks ─────────────────────────────────────────────────────
-
   def with_page(pool, fun, opts \\ []) when is_function(fun, 1) do
     {timeout, page_opts} = Keyword.pop(opts, :checkout_timeout, @default_checkout_timeout)
     with_browser(pool, fn browser -> CDPEx.with_page(browser, fun, page_opts) end, timeout)
@@ -163,8 +161,10 @@ defmodule CDPEx.Pool do
     GenServer.stop(pool, :normal)
   catch
     :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
-      Browser.warn_unclean_stop("CDPEx.Pool", reason)
+      Exits.warn_unclean_stop("CDPEx.Pool", reason)
   end
+
+  # ── GenServer callbacks ─────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do

@@ -28,6 +28,7 @@ defmodule CDPEx.Browser do
 
   alias CDPEx.Chrome
   alias CDPEx.Connection
+  alias CDPEx.Exits
   alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.ProcessLabel
@@ -55,6 +56,7 @@ defmodule CDPEx.Browser do
     # which a launched browser never is in production but a unit fixture can be.
     connected: false,
     pages: %{},
+    # ── Public API ──────────────────────────────────────────────────────────────
     sessions: %{},
     auths: %{},
     intercepts: %{},
@@ -62,8 +64,6 @@ defmodule CDPEx.Browser do
   ]
 
   @type t :: %__MODULE__{}
-
-  # ── Public API ──────────────────────────────────────────────────────────────
 
   @doc """
   Starts a browser. See `CDPEx.Chrome` for launch options.
@@ -196,27 +196,16 @@ defmodule CDPEx.Browser do
   A launched browser also kills its Chrome; a connected one (`CDPEx.connect/2`)
   closes only the pages it opened and leaves the remote Chrome running.
   """
+
+  # ── GenServer callbacks ─────────────────────────────────────────────────────
+
   @spec stop(GenServer.server()) :: :ok
   def stop(browser) do
     GenServer.stop(browser, :normal)
   catch
     # Already stopped, or stopped on its own (Chrome died) while this one was waiting.
     :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
-      warn_unclean_stop("CDPEx.Browser", reason)
-  end
-
-  # A reason other than "already gone" means terminate/2 itself failed, which can leave
-  # Chrome unreaped; stop/1 still returns :ok but says so.
-  @doc false
-  def warn_unclean_stop(_who, reason)
-      when reason in [:noproc, :normal, :shutdown] or
-             (is_tuple(reason) and elem(reason, 0) == :shutdown) do
-    :ok
-  end
-
-  def warn_unclean_stop(who, reason) do
-    Logger.warning("[#{who}] stopped with #{inspect(reason)} rather than cleanly")
-    :ok
+      Exits.warn_unclean_stop("CDPEx.Browser", reason)
   end
 
   # A Browser that is gone, or stops before replying, took its pages with it.
@@ -226,8 +215,6 @@ defmodule CDPEx.Browser do
     :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, op}}
     :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
-
-  # ── GenServer callbacks ─────────────────────────────────────────────────────
 
   @impl true
   def init(launch_opts) do

@@ -302,17 +302,17 @@ defmodule CDPEx.RuntimeErrorsTest.UncleanStop do
 
   import ExUnit.CaptureLog
 
-  alias CDPEx.Browser
+  alias CDPEx.Exits
 
   test "stop helpers stay quiet for a gone or clean stop and warn for anything else" do
-    for reason <- [:noproc, :normal, :shutdown, {:shutdown, :closed}] do
-      assert capture_log(fn -> assert Browser.warn_unclean_stop("X", reason) == :ok end) ==
+    for reason <- [:noproc, :normal, :shutdown, {:shutdown, :closed}, {:chrome_exited, 0}] do
+      assert capture_log(fn -> assert Exits.warn_unclean_stop("X", reason) == :ok end) ==
                ""
     end
 
     log =
       capture_log(fn ->
-        assert Browser.warn_unclean_stop("X", {%RuntimeError{}, []}) == :ok
+        assert Exits.warn_unclean_stop("X", {%RuntimeError{}, []}) == :ok
       end)
 
     assert log =~ "[X] stopped with"

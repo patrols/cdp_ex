@@ -708,7 +708,9 @@ defmodule CDPEx.Page do
   of this browser's open pages returns `{:error, :unknown_page}`, a page that is
   already authenticated returns `{:error, :already_authenticated}`, and a page that
   already has request interception enabled returns `{:error, {:conflict, :intercepting}}`
-  (auth and interception both drive the `Fetch` domain — use one per page).
+  (auth and interception both drive the `Fetch` domain — use one per page). A browser
+  that is gone returns `{:error, :noproc}`, and one that can't arm the handler within
+  15s returns `{:error, {:timeout, :authenticate}}`.
 
   If an earlier `authenticate/4` on this page was abandoned while still arming (e.g. its
   call timed out under heavy load), the orphaned handler is torn down automatically and

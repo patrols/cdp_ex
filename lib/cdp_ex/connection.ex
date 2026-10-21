@@ -21,7 +21,7 @@ defmodule CDPEx.Connection do
 
   use GenServer, restart: :temporary
 
-  alias CDPEx.Browser
+  alias CDPEx.Exits
   alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
@@ -212,7 +212,7 @@ defmodule CDPEx.Connection do
     GenServer.stop(conn, :normal)
   catch
     :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
-      Browser.warn_unclean_stop("CDPEx.Connection", reason)
+      Exits.warn_unclean_stop("CDPEx.Connection", reason)
   end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
