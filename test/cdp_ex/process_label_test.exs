@@ -80,10 +80,8 @@ defmodule CDPEx.ProcessLabelTest do
       conn = await_linked_conn(task.pid)
       assert label_of(conn) == {:cdp_connection, "/devtools/browser/fake"}
 
-      # init/1 stops, and start_link propagates that down the link, so the task
-      # exits rather than returning — wait it out so the stall never outlives the test.
-      assert_receive {:EXIT, _pid, {:ws_upgrade, :upgrade_timeout}}, 3_000
-      Task.shutdown(task, :brutal_kill)
+      # Wait the stall out so it never outlives the test.
+      assert Task.await(task, 3_000) == {:error, {:ws_upgrade, :upgrade_timeout}}
     end
   end
 

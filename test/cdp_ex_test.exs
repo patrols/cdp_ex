@@ -31,6 +31,10 @@ defmodule CDPExTest do
       :timeout,
       {:timeout, "Page.navigate"},
       {:timeout, :await_event},
+      {:timeout, :new_page},
+      {:timeout, :close_page},
+      {:timeout, :authenticate},
+      {:timeout, :subscribe},
       :deadline_exceeded,
       {:chrome_exited, 1, "stderr excerpt"},
       {:debug_url_not_found, "stdout excerpt"},
@@ -79,6 +83,8 @@ defmodule CDPExTest do
       {:cdp_error, "Page.navigate", %{"code" => -32_000, "message" => "boom"}},
       {:write_failed, :eacces},
       {:write_failed, :enospc},
+      {:launch_failed, {:spawn, :emfile}},
+      {:launch_failed, {:user_data_dir, :eacces}},
       {:no_document_response, "https://example.com/#hash"},
       {:connect_discovery_failed, :econnrefused}
     ]

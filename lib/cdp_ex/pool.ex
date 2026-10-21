@@ -103,6 +103,8 @@ defmodule CDPEx.Pool do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {:shutdown, _} -> {:error, :noproc}
     :exit, {{:shutdown, _}, _} -> {:error, :noproc}
+    # A pool that crashed mid-wait is just as gone.
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
   @doc "Returns a browser borrowed with `checkout/2`."
@@ -149,9 +151,13 @@ defmodule CDPEx.Pool do
     with_browser(pool, fn browser -> CDPEx.with_page(browser, fun, page_opts) end, timeout)
   end
 
-  @doc "Stops the pool, stopping every browser (and reaping Chrome)."
+  @doc "Stops the pool, stopping every browser (and reaping Chrome). `:ok` if it is already gone."
   @spec stop(GenServer.server()) :: :ok
-  def stop(pool), do: GenServer.stop(pool, :normal)
+  def stop(pool) do
+    GenServer.stop(pool, :normal)
+  catch
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self -> :ok
+  end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 

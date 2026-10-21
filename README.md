@@ -342,8 +342,12 @@ For a one-off HTTP Basic challenge on an *origin* (not a proxy), arm it per page
 
 ## Error handling
 
-Operations return `{:error, reason}` on failure. Rather than hard-code the reason
-shapes, classify them to drive retries:
+Operations return `{:error, reason}` on failure, runtime failures included: Chrome
+that can't be spawned, a browser, page or pool that is gone or dies mid-call, a call
+that can't be served in time. None of them raises or exits in your process, so
+`with_page/3` needs no `rescue`/`catch :exit` around it. Invalid arguments still
+raise, and so does anything your own `with_page` function raises, throws or exits
+with. Rather than hard-code the reason shapes, classify them to drive retries:
 
 ```elixir
 case CDPEx.Page.navigate(page, url) do

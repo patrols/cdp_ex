@@ -66,21 +66,22 @@ defmodule CDPEx.Fetch do
   @impl true
   def handle_continue(:arm, state) do
     # Subscribe BEFORE enabling so no paused request can slip through between the
-    # enable and the first event delivery. These are GenServer.calls; if `conn`
-    # already died (a rare race where the Browser processed authenticate/4 just
-    # ahead of the page-conn EXIT) they exit — catch it and stop with :noproc.
-    Connection.subscribe(state.conn, "Fetch.requestPaused")
-    Connection.subscribe(state.conn, "Fetch.authRequired")
-
-    case Connection.call(state.conn, "Fetch.enable", %{"handleAuthRequests" => true}, @call_timeout,
-           session_id: state.session_id
-         ) do
-      {:ok, _} ->
-        # Signal the Browser we're armed so it can reply :ok to the still-waiting
-        # authenticate/4 caller — preserving the "armed before return" guarantee
-        # while leaving the Browser free to process other messages during the enable.
-        send(state.browser, {:armed, self()})
-        {:noreply, state}
+    # enable and the first event delivery. If `conn` already died (a rare race where
+    # the Browser processed authenticate/4 just ahead of the page-conn EXIT) the
+    # subscribe fails, and so does the arm.
+    with :ok <- Connection.subscribe(state.conn, "Fetch.requestPaused"),
+         :ok <- Connection.subscribe(state.conn, "Fetch.authRequired"),
+         {:ok, _} <- call(state, "Fetch.enable", %{"handleAuthRequests" => true}) do
+      # Signal the Browser we're armed so it can reply :ok to the still-waiting
+      # authenticate/4 caller — preserving the "armed before return" guarantee
+      # while leaving the Browser free to process other messages during the enable.
+      send(state.browser, {:armed, self()})
+      {:noreply, state}
+    else
+      {:error, :noproc} ->
+        # The page connection died mid-arm (a close/authenticate race) — benign, no log.
+        send(state.browser, {:arm_failed, self(), :noproc})
+        {:stop, :normal, state}
 
       {:error, reason} ->
         # A real CDP error on a live conn — worth a log line, since the caller only
@@ -90,11 +91,6 @@ defmodule CDPEx.Fetch do
         send(state.browser, {:arm_failed, self(), reason})
         {:stop, :normal, state}
     end
-  catch
-    :exit, _ ->
-      # The page connection died mid-arm (a close/authenticate race) — benign, no log.
-      send(state.browser, {:arm_failed, self(), :noproc})
-      {:stop, :normal, state}
   end
 
   @impl true

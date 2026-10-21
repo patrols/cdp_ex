@@ -2070,25 +2070,23 @@ defmodule CDPEx.Page do
     end
   end
 
-  # Subscribe/unsubscribe the caller to a list of event methods, tolerating a
-  # connection that died mid-call so the observe ops surface {:error, :noproc} / :ok
-  # rather than crashing the caller. `timeout` lets a caller fold the registration into an
-  # overall deadline; a snapshot is fine — if one subscribe exhausts it the call exits and
-  # the catch below short-circuits the rest. A budget-exhausted call surfaces as :timeout
-  # (the conn is alive, the deadline elapsed) vs :noproc for a genuinely dead conn.
+  # Subscribe the caller to a list of event methods, stopping at the first failure.
+  # `timeout` lets a caller fold the registration into an overall deadline; a snapshot is
+  # fine — if one subscribe exhausts it the rest are skipped. A budget-exhausted call
+  # surfaces as :timeout (the conn is alive, the deadline elapsed) vs :noproc for a
+  # genuinely dead conn.
   defp subscribe_each(conn, methods, timeout, session_id \\ nil) do
-    Enum.each(methods, &Connection.subscribe(conn, &1, timeout, session_id: session_id))
-    :ok
-  catch
-    :exit, {:timeout, _} -> {:error, :timeout}
-    :exit, _ -> {:error, :noproc}
+    Enum.reduce_while(methods, :ok, fn method, :ok ->
+      case Connection.subscribe(conn, method, timeout, session_id: session_id) do
+        :ok -> {:cont, :ok}
+        {:error, {:timeout, :subscribe}} -> {:halt, {:error, :timeout}}
+        {:error, :noproc} -> {:halt, {:error, :noproc}}
+      end
+    end)
   end
 
   defp unsubscribe_each(conn, methods) do
     Enum.each(methods, &Connection.unsubscribe(conn, &1))
-    :ok
-  catch
-    :exit, _ -> :ok
   end
 
   defp ok_call(page, method, params, timeout) do

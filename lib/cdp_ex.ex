@@ -32,7 +32,12 @@ defmodule CDPEx do
   ## Error handling
 
   Every operation returns `{:error, reason}` on failure; `t:error_reason/0` documents
-  the reason shapes. To drive retries without hard-coding that list, classify the
+  the reason shapes. That includes runtime failures — Chrome that can't be spawned, a
+  browser, page or pool process that is gone or stops mid-call, a call it can't serve
+  in time — which come back as values, never as a raise or an exit in the caller.
+  Invalid arguments (a bad `:deadline` or `:wait`, a wrong type) still raise; that is a
+  bug in the calling code. So does anything `with_page/3`'s own `fun` raises, throws or
+  exits with. To drive retries without hard-coding that list, classify the
   reason instead of matching it:
 
       case CDPEx.Page.navigate(page, url) do
@@ -94,9 +99,10 @@ defmodule CDPEx do
   returns but never adds here — still relies on review, and such a stray reason would
   fall through `classify_error/1` to `:unknown`.
 
-  Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5` and
-  `await_event/4` return `{:timeout, context}` (a CDP method, or `:await_event`),
-  while the high-level `CDPEx.Page` `wait_for_*` functions and `CDPEx.Pool.checkout/2`
+  Two timeout shapes, by layer: the low-level `CDPEx.Connection.call/5`,
+  `await_event/4` and `subscribe/4` and the `CDPEx.Browser` requests return
+  `{:timeout, context}` (a CDP method, `:await_event`, `:subscribe`, `:new_page`,
+  `:close_page`, or `:authenticate`), while the high-level `CDPEx.Page` `wait_for_*` functions and `CDPEx.Pool.checkout/2`
   return a bare `:timeout` ("the awaited condition didn't happen in time").
 
   A WebSocket frame that fails to decode is not a standalone reason: the connection
@@ -113,7 +119,7 @@ defmodule CDPEx do
           | :unknown_page
           | :already_authenticated
           | :already_intercepting
-          | {:timeout, :await_event}
+          | {:timeout, :await_event | :new_page | :close_page | :authenticate | :subscribe}
           | {:conflict, :authenticated | :intercepting}
           | {:navigate, String.t()}
           | {:no_document_response, String.t()}
@@ -187,7 +193,9 @@ defmodule CDPEx do
       crack: an ambiguous navigation `net::ERR_*` (DNS `ERR_NAME_NOT_RESOLVED`,
       `ERR_ABORTED`, `ERR_BLOCKED_BY_*` — unlike the connection-layer codes above), the
       CDP error code (`{:cdp_error, _, _}`), the file-write posix reason
-      (`{:write_failed, _}`), whether a `{:no_document_response, _}` was a
+      (`{:write_failed, _}`), why Chrome couldn't be started at all
+      (`{:launch_failed, _}` — an unwritable profile dir or a refused spawn: `:emfile`
+      may clear, `:eacces` won't), whether a `{:no_document_response, _}` was a
       same-document hop or a slow miss, or a `connect/2` endpoint-discovery failure
       (`{:connect_discovery_failed, _}` — a transient network blip and a permanently
       bad endpoint are indistinguishable here). Also covers any term `CDPEx` doesn't
@@ -256,6 +264,7 @@ defmodule CDPEx do
   def classify_error({:navigate, _}), do: :unknown
   def classify_error({:cdp_error, _, _}), do: :unknown
   def classify_error({:write_failed, _}), do: :unknown
+  def classify_error({:launch_failed, _}), do: :unknown
   def classify_error({:no_document_response, _}), do: :unknown
   def classify_error({:connect_discovery_failed, _}), do: :unknown
   # Anything else — a reason CDPEx doesn't produce, or a future shape.
@@ -297,7 +306,11 @@ defmodule CDPEx do
   defp transient_net_error?(_error_text), do: false
 
   @doc """
-  Launches a headless Chrome browser and returns its process pid.
+  Launches a headless Chrome browser and returns `{:ok, pid}`, or `{:error, reason}`
+  (e.g. `{:chrome_not_found, path}`, `{:launch_failed, _}`, `{:debug_url_not_found, _}`).
+
+  The browser is linked to the caller, but a failed launch returns its error without
+  exiting the caller, whether or not it traps exits.
 
   Accepts the launch options documented in `CDPEx.Chrome` (e.g. `:headless`,
   `:chrome_binary`, `:extra_args`, `:window_size`, `:launch_timeout`). On slow
@@ -386,7 +399,10 @@ defmodule CDPEx do
     end)
   end
 
-  @doc "Stops a browser started with `launch/1` (kills Chrome) or `connect/2` (closes the pages it opened, leaves Chrome running)."
+  @doc """
+  Stops a browser started with `launch/1` (kills Chrome) or `connect/2` (closes the
+  pages it opened, leaves Chrome running). `:ok` if the browser is already gone.
+  """
   @spec stop(pid()) :: :ok
   def stop(browser), do: Browser.stop(browser)
 
@@ -397,9 +413,11 @@ defmodule CDPEx do
   @doc """
   Closes a page opened with `new_page/2`.
 
-  Returns `{:error, :unknown_page}` if `page` was not opened on `browser`.
+  Returns `{:error, :unknown_page}` if `page` was not opened on `browser`, and
+  `{:error, :noproc}` if `browser` is gone (see `CDPEx.Browser.close_page/2`).
   """
-  @spec close_page(pid(), Page.t()) :: :ok | {:error, :unknown_page}
+  @spec close_page(pid(), Page.t()) ::
+          :ok | {:error, :unknown_page | :noproc | {:timeout, :close_page}}
   def close_page(browser, page), do: Browser.close_page(browser, page)
 
   @doc """
@@ -413,12 +431,16 @@ defmodule CDPEx do
   that Chrome. Returns whatever `fun` returns, or `{:error, reason}` if the
   page/browser could not be created.
 
+  Failures in `with_page`'s own work (the launch or connect, opening the page, a
+  browser that is gone or dies under it, the teardown) come back as
+  `{:error, reason}`, never as a raise or an exit. A raise, throw or exit from `fun`
+  itself propagates unchanged: that is the caller's code.
+
   With launch options, the throwaway browser is linked but **contained**: if it
   fails to start, or crashes during the call (e.g. its connection drops),
   `with_page` returns `{:error, reason}` instead of letting the exit propagate to
   the caller. To do that it briefly traps exits in the calling process for the
-  duration of the call, launch included. (On OTP 24/25 a failed start still leaves
-  its `{:EXIT, pid, reason}` in the caller's mailbox; OTP 26+ consumes it.)
+  duration of the call, launch included.
   Only the browser's own `{:EXIT, _, _}` is drained — a *foreign* process linked
   to the caller that exits during this window has its exit delivered as a message
   left in the caller's mailbox, so a caller that links other processes and relies
