@@ -2,6 +2,7 @@ defmodule CDPEx.RuntimeErrorsTest.Stub do
   @moduledoc false
   # Stands in for a Browser or Pool on the far side of a GenServer.call. `mode`:
   #   :crash  — dies (not :normal, not :shutdown) on any call, before replying
+  #   :ws_closed — stops the way a Connection does when its socket closes mid-call
   #   :hold   — never replies; tells `notify` who called, and whether that caller
   #             later goes down (the Browser's #40 cleanup hook for authenticate)
   use GenServer
@@ -13,6 +14,9 @@ defmodule CDPEx.RuntimeErrorsTest.Stub do
 
   @impl true
   def handle_call(_request, _from, {:crash, _} = state), do: {:stop, :boom, state}
+
+  def handle_call(_request, _from, {:ws_closed, _} = state),
+    do: {:stop, {:shutdown, {:ws_closed, :closed}}, state}
 
   def handle_call(request, {caller, _tag}, {:hold, notify} = state) do
     Process.monitor(caller)
@@ -269,6 +273,26 @@ defmodule CDPEx.RuntimeErrorsTest do
         wait_for_waiter(pool)
       end
     end
+  end
+end
+
+defmodule CDPEx.RuntimeErrorsTest.SubscribeWsClosed do
+  @moduledoc false
+  use ExUnit.Case, async: true
+
+  alias CDPEx.Connection
+  alias CDPEx.Page
+  alias CDPEx.RuntimeErrorsTest.Stub
+
+  test "a socket closing mid-subscribe is {:ws_closed, _}, and page waits return it" do
+    {:ok, conn} = Stub.start(:ws_closed)
+
+    assert Connection.subscribe(conn, "Network.requestWillBeSent") ==
+             {:error, {:ws_closed, :closed}}
+
+    {:ok, conn} = Stub.start(:ws_closed)
+    page = %Page{browser: self(), conn: conn, target_id: "T"}
+    assert Page.observe_network(page) == {:error, {:ws_closed, :closed}}
   end
 end
 

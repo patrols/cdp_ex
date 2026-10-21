@@ -210,7 +210,9 @@ defmodule CDPEx.Browser do
   @doc false
   def warn_unclean_stop(_who, reason)
       when reason in [:noproc, :normal, :shutdown] or
-             (is_tuple(reason) and elem(reason, 0) == :shutdown), do: :ok
+             (is_tuple(reason) and elem(reason, 0) == :shutdown) do
+    :ok
+  end
 
   def warn_unclean_stop(who, reason) do
     Logger.warning("[#{who}] stopped with #{inspect(reason)} rather than cleanly")

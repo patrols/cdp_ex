@@ -148,7 +148,7 @@ defmodule CDPEx.Connection do
   `{:error, {:timeout, :subscribe}}` if it doesn't register within `timeout`.
   """
   @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) ::
-          :ok | {:error, :noproc | {:timeout, :subscribe}}
+          :ok | {:error, :noproc | {:timeout, :subscribe} | {:ws_closed, term()}}
   def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []) do
     GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
   catch

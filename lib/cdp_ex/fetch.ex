@@ -78,9 +78,10 @@ defmodule CDPEx.Fetch do
       send(state.browser, {:armed, self()})
       {:noreply, state}
     else
-      {:error, :noproc} ->
+      {:error, reason}
+      when reason == :noproc or (is_tuple(reason) and elem(reason, 0) == :ws_closed) ->
         # The page connection died mid-arm (a close/authenticate race) — benign, no log.
-        send(state.browser, {:arm_failed, self(), :noproc})
+        send(state.browser, {:arm_failed, self(), reason})
         {:stop, :normal, state}
 
       {:error, reason} ->

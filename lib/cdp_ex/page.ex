@@ -2081,6 +2081,7 @@ defmodule CDPEx.Page do
         :ok -> {:cont, :ok}
         {:error, {:timeout, :subscribe}} -> {:halt, {:error, :timeout}}
         {:error, :noproc} -> {:halt, {:error, :noproc}}
+        {:error, {:ws_closed, _}} = error -> {:halt, error}
       end
     end)
   end
