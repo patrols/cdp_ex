@@ -214,13 +214,11 @@ defmodule CDPEx.Browser do
       Exits.warn_unclean_stop("CDPEx.Browser", reason)
   end
 
-  # A Browser that is gone, or stops before replying, took its pages with it. A socket
-  # close keeps its reason, as Connection.call/5 does.
+  # A Browser that is gone, or stops before replying, took its pages with it.
   defp call(browser, request, timeout, op) do
     GenServer.call(browser, request, timeout)
   catch
     :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, op}}
-    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
