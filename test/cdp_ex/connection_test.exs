@@ -216,6 +216,18 @@ defmodule CDPEx.ConnectionTest do
 
       await_waiter(conn, registered)
 
+      other =
+        Task.async(fn ->
+          Connection.await_event(conn, fn _ -> true end, 5_000, session_id: "S2")
+        end)
+
+      await_waiter(conn, registered + 1)
+
+      wide =
+        Task.async(fn -> Connection.await_event(conn, fn params -> params["n"] == 1 end, 5_000) end)
+
+      await_waiter(conn, registered + 2)
+
       # Untagged: Chrome reports the detach on the browser session that attached it.
       FakeCDP.send_text(
         fake,
@@ -224,6 +236,14 @@ defmodule CDPEx.ConnectionTest do
 
       assert {:error, {:session_closed, "S1"}} = Task.await(gone, 1_000)
       assert {:error, {:session_closed, "S1"}} = Task.await(waiter, 1_000)
+
+      # Waiters on another session, or on none, outlive it.
+      refute Task.yield(other, 100)
+      refute Task.yield(wide, 0)
+
+      FakeCDP.send_text(fake, ~s({"method":"Some.event","sessionId":"S2","params":{"n":1}}))
+      assert {:ok, _} = Task.await(other, 1_000)
+      assert {:ok, _} = Task.await(wide, 1_000)
 
       # A late reply for the failed call is dropped; the other session is untouched.
       FakeCDP.send_text(fake, ~s({"id":#{ids["S1"]},"sessionId":"S1","result":{}}))

@@ -932,6 +932,30 @@ defmodule CDPEx.PageTest do
   end
 
   describe "navigate/3 with response: true" do
+    test "a dedicated page never subscribes to the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", response: true) end)
+
+      answer_network_enable(fake)
+      wait_until_any_subscribed(conn, "Network.responseReceived")
+      wait_until_any_subscribed(conn, "Page.lifecycleEvent")
+      assert subscriber_count(conn, "Target.detachedFromTarget") == 0
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"result":{"frameId":"F","loaderId":"L"}}))
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Network.responseReceived","params":{"type":"Document","loaderId":"L","frameId":"F","response":{"status":200,"url":"http://example.test/"}}})
+      )
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","params":{"name":"networkAlmostIdle"}})
+      )
+
+      assert {:ok, %Page{}, _response} = Task.await(task, 2_000)
+    end
+
     test "reports the main document's status + final URL, correlated by loaderId", %{
       page: page,
       conn: conn,
@@ -1773,6 +1797,14 @@ defmodule CDPEx.PageTest do
       on_exit(fn -> :telemetry.detach(handler) end)
     end
 
+    test "a dedicated page never subscribes to the detach", %{page: page, conn: conn, fake: fake} do
+      task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
+      enable_network_idle(fake, conn)
+
+      assert subscriber_count(conn, "Target.detachedFromTarget") == 0
+      assert :ok = Task.await(task, 2_000)
+    end
+
     test "resolves when nothing is in flight from the call onward", %{page: page, fake: fake} do
       task = Task.async(fn -> Page.wait_for_network_idle(page, idle_time: 100, timeout: 2_000) end)
       enable_network_idle(fake)
@@ -2032,6 +2064,9 @@ defmodule CDPEx.PageTest do
         wait_until_subscriber_count_below(conn, method, count, retries - 1)
     end
   end
+
+  defp subscriber_count(conn, method),
+    do: map_size(Map.get(:sys.get_state(conn).subscribers, method, %{}))
 
   # Poll until `method` has at least `count` distinct subscriber pids.
   defp wait_until_subscriber_count(conn, method, count, retries \\ 100) do
