@@ -706,10 +706,13 @@ defmodule CDPEx do
         {:launch_timeout, Chrome.default_launch_timeout()}
       end
 
-    if deadline <= Keyword.get(launch_opts, key, default) do
-      Keyword.put(launch_opts, key, deadline)
-    else
-      launch_opts
+    # A non-integer is left for launch validation to reject, as it is without a deadline.
+    case Keyword.get(launch_opts, key, default) do
+      current when is_integer(current) and deadline <= current ->
+        Keyword.put(launch_opts, key, deadline)
+
+      _ ->
+        launch_opts
     end
   end
 

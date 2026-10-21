@@ -448,6 +448,18 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
     end
 
     assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [window_size: {800}]) end
+    assert_raise ArgumentError, ~r/keyword list/, fn -> Pool.start_link(launch_opts: :fast) end
+  end
+
+  test "a nil :connect still launches, so its options are still checked" do
+    assert_raise ArgumentError, fn -> CDPEx.launch(connect: nil, extra_args: [1]) end
+    assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [connect: nil, headless: 1]) end
+  end
+
+  test "a :deadline doesn't paper over an invalid :launch_timeout" do
+    assert_raise ArgumentError, ~r/invalid :launch_timeout/, fn ->
+      CDPEx.with_page([launch_timeout: "5000"], fn _ -> :ok end, deadline: 1_000)
+    end
   end
 
   test "valid and unknown options pass" do

@@ -90,8 +90,6 @@ defmodule CDPEx.Chrome do
   end
 
   @doc false
-  # CDPEx.Browser runs launch/1 inside its init/1, where a raise would exit down the link
-  # rather than raise in the caller, so Browser and Pool call this from start_link first.
   @spec validate_opts!(keyword()) :: :ok
   def validate_opts!(opts) do
     Enum.each(opts, fn {key, value} ->
