@@ -18,7 +18,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.with_page/3` with launch options no longer kills a caller that doesn't trap exits when the launch fails; it returns `{:error, reason}`. On OTP 24/25 the failed start's `{:EXIT, pid, reason}` is left in the caller's mailbox instead (#120).
 
 ### Changed
-- Bumped `mint` to 1.11.0 (and `hpax` to 1.1.0) for EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding), which `mix hex.audit` had started failing CI on (#112).
+- CDPEx's own lockfile now uses `mint` 1.11.0 (and `hpax` 1.1.0), which fix EEF-CVE-2026-91043 (HPACK-indexed cookie fields bypass `max_header_list_size`), EEF-CVE-2026-92103 (HTTP/2 oversized frames buffered before the `max_frame_size` check), and EEF-CVE-2026-94194 (HTTP/1 chunked framing applied when chunked is not the final transfer coding). This release doesn't raise the version floor, so run `mix deps.update mint hpax` in your project to pick up the fixes (#112).
 
 ## [0.10.0] - 2026-09-21
 
