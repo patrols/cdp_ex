@@ -126,7 +126,8 @@ defmodule CDPEx.Page do
   its own `Network.responseReceived` subscription, so it composes safely with
   `observe_network/2` on the same page — the caller's subscription and any buffered
   events are left untouched. A normal connection drop still surfaces as
-  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}` (a `:session` page's detach as
+  `{:error, {:session_closed, sid}}`); only an abnormal crash of that
   internal helper returns `{:error, {:capture_failed, reason}}`.
 
   Options:
@@ -1611,7 +1612,8 @@ defmodule CDPEx.Page do
   The idle wait runs in a short-lived helper process with its own subscription, so it
   composes safely with `observe_network/2` on the same page — the caller's subscription
   and any buffered events are left untouched. A normal connection drop surfaces as
-  `{:error, :noproc}` / `{:error, {:ws_closed, _}}`; only an abnormal crash of that
+  `{:error, :noproc}` / `{:error, {:ws_closed, _}}` (a `:session` page's detach as
+  `{:error, {:session_closed, sid}}`); only an abnormal crash of that
   internal helper returns `{:error, {:idle_wait_failed, reason}}`.
 
   Options:
