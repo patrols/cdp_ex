@@ -1546,7 +1546,9 @@ defmodule CDPEx.Page do
   under `params["response"]["status"]`, request id under `params["requestId"]`) — or
   `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
   connection drops (or, on a `:session` page, `{:error, {:session_closed, sid}}` if
-  the session detaches). Lazily enables the `Network` domain. Only responses observed
+  the session detaches while it waits; a detach that lands between its
+  `Network.enable` and the wait starting is missed, and the call runs to
+  `:timeout`). Lazily enables the `Network` domain. Only responses observed
   **after** this call are considered, so call it before triggering the request.
 
   > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}

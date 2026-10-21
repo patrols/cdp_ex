@@ -89,9 +89,10 @@ defmodule CDPEx.Connection do
 
   Pass `opts` with `session_id: sid` to address a flattened CDP session. A call on
   a session that has detached (its target closed, or `Target.detachFromTarget`) or
-  that Chrome doesn't know at all returns `{:error, {:session_closed, sid}}`: one in flight when the connection
-  sees `Target.detachedFromTarget` for it fails then, and a later one fails on
-  Chrome's "session not found" reply rather than waiting out `timeout`.
+  that Chrome doesn't know at all returns `{:error, {:session_closed, sid}}`: one
+  in flight when the connection sees `Target.detachedFromTarget` for it fails
+  then, and a later one fails on Chrome's "session not found" reply rather than
+  waiting out `timeout`.
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
           {:ok, map()} | {:error, call_error()}
@@ -454,7 +455,7 @@ defmodule CDPEx.Connection do
 
   defp normalize_reply({:ok, result}, _method, _session_id), do: {:ok, result}
 
-  # The only -32001 Chrome sends is "Session with given id not found": the session detached.
+  # Chrome's only -32001 is "Session with given id not found": the session is gone.
   defp normalize_reply({:error, %{"code" => @session_not_found}}, _method, session_id)
        when is_binary(session_id) do
     {:error, {:session_closed, session_id}}
