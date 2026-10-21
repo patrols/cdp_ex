@@ -64,6 +64,7 @@ defmodule CDPEx.FixtureServer do
   #   /missing    — a genuine 404 (with a body, so Chrome still paints it).
   #   /data       — a tiny XHR/fetch target (the #fetch-btn calls it), for the
   #     wait_for_response/3 and wait_for_network_idle/2 paths.
+  #   /interact   — the click :wait / click_text/3 / scroll/3 page (interact_page/0).
   #   anything else serves the page.
   defp respond(request, json_version) do
     path = request_path(request)
@@ -96,9 +97,12 @@ defmodule CDPEx.FixtureServer do
         json_version_response(json_version)
 
       true ->
-        HttpFixture.http_response("200 OK", render(request))
+        HttpFixture.http_response("200 OK", page_body(path, request))
     end
   end
+
+  defp page_body("/interact" <> rest, _request), do: interact_page(rest =~ "smooth")
+  defp page_body(_path, request), do: render(request)
 
   @json_ct ["Content-Type: application/json"]
 
@@ -162,6 +166,61 @@ defmodule CDPEx.FixtureServer do
         <div id="ticket-card-def">card-def</div>
         <div data-name="foo bar">named</div>
         <div data-label="a'b">named-quote</div>
+      </body>
+    </html>
+    """
+  end
+
+  # Clicks land in window.clicks as {id, tag, trusted}. #late-btn appears only when a test
+  # calls armLate(ms), at the end of the page so it can't shift another target mid-click.
+  # #wrapper is wider than its button, so its center hits the wrapper itself.
+  defp interact_page(smooth?) do
+    style = if smooth?, do: "<style>html { scroll-behavior: smooth; }</style>", else: ""
+
+    """
+    <!doctype html>
+    <html>
+      <head><title>CDPEx Interact</title>#{style}</head>
+      <body style="margin:0">
+        <div id="menu-wrap" style="padding:8px"><button id="menu-hidden" style="display:none">Open menu</button></div>
+        <div id="wrapper" style="width:600px;padding:20px 0"><button id="inner">Load more</button></div>
+        <button id="menu-invisible" style="visibility:hidden">Open menu</button>
+        <button id="menu-visible">Open menu</button>
+        <span id="label-span">Subscribe</span>
+        <button id="subscribe-btn">Subscribe</button>
+        <a id="ws-link" href="#">
+          Show
+            all   events
+        </a>
+        <button id="hidden-text-btn" style="display:none">Invisible</button>
+        <button id="close-drawer" style="opacity:0">Close</button>
+        <button id="icon-close"><svg width="16" height="16"><title>Close</title><rect width="16" height="16"></rect></svg></button>
+        <a id="next-link" href="#"><span style="display:contents">Next</span></a>
+        <svg width="80" height="20"><text id="svg-zoom" x="0" y="15">Zoom</text></svg>
+        <div style="height:5000px"></div>
+        <p id="footer">end</p>
+        <div id="late-slot"></div>
+        <script>
+          window.clicks = [];
+          document.addEventListener("click", function (e) {
+            e.preventDefault();
+            var hit = e.target.closest("[id]");
+            window.clicks.push({
+              id: hit ? hit.id : "",
+              tag: e.target.tagName.toLowerCase(),
+              trusted: e.isTrusted
+            });
+          });
+          window.armLate = function (ms) {
+            setTimeout(function () {
+              var b = document.createElement("button");
+              b.id = "late-btn";
+              b.textContent = "Arrived late";
+              document.getElementById("late-slot").appendChild(b);
+            }, ms);
+            return true;
+          };
+        </script>
       </body>
     </html>
     """

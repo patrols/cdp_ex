@@ -222,9 +222,11 @@ crashed browser is relaunched on demand.
 | `wait_for_response/3` | Block until a network response URL matches (fn / `Regex` / substring) |
 | `wait_for_network_idle/2` | Block until the network settles (Puppeteer "networkidle") |
 | `evaluate/3` | Run JS and return the value (`returnByValue`) |
-| `click/3` | Real trusted click on the first match (synthetic via `trusted: false`) |
+| `click/3` | Real trusted click on the first match (synthetic via `trusted: false`); `wait:` retries until it exists and has a box |
+| `click_text/3` | Click an element by its text content (whitespace-normalized, innermost match) |
 | `type/4` | Focus an element and enter text (`Input.insertText`) |
 | `press/4` | Press a named key — `Enter`, `Tab`, arrows, … — with real key events |
+| `scroll/3` | Scroll the window to `:top`, `:bottom`, or `{x, y}` |
 | `html/2` | Full serialized DOM (`document.documentElement.outerHTML`) |
 | `screenshot/2` | PNG bytes, or write to `:path` |
 | `pdf/2` | Render the page to PDF bytes, or write to `:path` |

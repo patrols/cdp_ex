@@ -451,6 +451,156 @@ defmodule CDPEx.IntegrationTest do
       assert {:error, {:selector_not_found, "#nope"}} = Page.click(page, "#nope")
     end
 
+    test "click/3 :wait clicks an element that is injected after load", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert {:error, {:selector_not_found, "#late-btn"}} = Page.click(page, "#late-btn")
+      assert {:ok, true} = Page.evaluate(page, "armLate(300)")
+      assert :ok = Page.click(page, "#late-btn", wait: 5_000)
+      assert [%{"id" => "late-btn", "trusted" => true}] = clicks(page)
+    end
+
+    test "click/3 :wait gives up with the last error once the budget is spent", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      {elapsed_us, result} = :timer.tc(fn -> Page.click(page, "#hidden-text-btn", wait: 400) end)
+      assert result == {:error, {:not_clickable, "#hidden-text-btn"}}
+      assert elapsed_us >= 400_000
+    end
+
+    test "click_text/3 clicks the innermost match, not its wrapper", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Load more")
+      assert [%{"id" => "inner", "trusted" => true}] = clicks(page)
+    end
+
+    test "click_text/3 trusted: false clicks the same element synthetically", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Load more", trusted: false)
+      assert [%{"id" => "inner", "trusted" => false}] = clicks(page)
+    end
+
+    test "click_text/3 skips a hidden duplicate for the visible match", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Open menu", wait: 5_000)
+      assert :ok = Page.click_text(page, "Open menu", trusted: false)
+
+      assert [
+               %{"id" => "menu-visible", "trusted" => true},
+               %{"id" => "menu-visible", "trusted" => false}
+             ] =
+               clicks(page)
+    end
+
+    test "click_text/3 climbs from a boxless innermost match to its clickable ancestor", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Close")
+      assert :ok = Page.click_text(page, "Next")
+      # A synthetic click targets the picked element itself: the button, not the <svg>.
+      assert :ok = Page.click_text(page, "Close", trusted: false)
+
+      assert [
+               %{"id" => "icon-close", "trusted" => true},
+               %{"id" => "next-link", "trusted" => true},
+               %{"id" => "icon-close", "tag" => "button", "trusted" => false}
+             ] = clicks(page)
+    end
+
+    test "click_text/3 trusted: false clicks a non-HTML match (SVG <text>) without throwing", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Zoom", trusted: false)
+      assert [%{"id" => "svg-zoom", "tag" => "text", "trusted" => false}] = clicks(page)
+    end
+
+    test "click_text/3 matches with whitespace normalized", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "  Show all\n events ")
+      assert [%{"id" => "ws-link", "trusted" => true}] = clicks(page)
+    end
+
+    test "click_text/3 :selector restricts the candidates", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert :ok = Page.click_text(page, "Subscribe")
+      assert :ok = Page.click_text(page, "Subscribe", selector: "button, a")
+
+      assert [%{"id" => "label-span"}, %{"id" => "subscribe-btn"}] = clicks(page)
+    end
+
+    test "click_text/3 errors", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert {:error, {:text_not_found, "Nope"}} = Page.click_text(page, "Nope")
+      # Exact after normalization: a substring of a label is not a match.
+      assert {:error, {:text_not_found, "Load"}} = Page.click_text(page, "Load")
+      assert {:error, {:not_clickable, "Invisible"}} = Page.click_text(page, "Invisible")
+
+      assert {:error, {:evaluate_exception, _}} =
+               Page.click_text(page, "Nope", selector: ":::", wait: 5_000)
+
+      assert clicks(page) == []
+    end
+
+    test "click_text/3 :wait clicks text that appears after load", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert {:error, {:text_not_found, "Arrived late"}} = Page.click_text(page, "Arrived late")
+      assert {:ok, true} = Page.evaluate(page, "armLate(300)")
+      assert :ok = Page.click_text(page, "Arrived late", wait: 5_000)
+      assert [%{"id" => "late-btn", "trusted" => true}] = clicks(page)
+    end
+
+    test "scroll/3 moves the window to the bottom, a point, and the top", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture <> "interact", wait_until: :load)
+      assert {:ok, 0} = Page.evaluate(page, "window.scrollY")
+
+      assert :ok = Page.scroll(page, :bottom)
+
+      assert {:ok, true} =
+               Page.evaluate(
+                 page,
+                 "window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1"
+               )
+
+      assert :ok = Page.scroll(page, {0, 1234})
+      assert {:ok, 1234} = Page.evaluate(page, "window.scrollY")
+
+      assert :ok = Page.scroll(page, :top)
+      assert {:ok, 0} = Page.evaluate(page, "window.scrollY")
+    end
+
+    test "scroll/3 is instant under CSS smooth scrolling", %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture <> "interact?smooth", wait_until: :load)
+
+      assert {:ok, "smooth"} =
+               Page.evaluate(page, "getComputedStyle(document.documentElement).scrollBehavior")
+
+      assert :ok = Page.scroll(page, {0, 1234})
+      assert {:ok, 1234} = Page.evaluate(page, "window.scrollY")
+    end
+
     test "type/4 enters text into a field and fires input events", %{page: page, fixture: fixture} do
       {:ok, _} = Page.navigate(page, fixture)
       assert :ok = Page.type(page, "#name", "Ada")
@@ -1271,6 +1421,11 @@ defmodule CDPEx.IntegrationTest do
         {:dictionary, dict} <- [Process.info(pid, :dictionary)],
         Keyword.get(dict, :"$initial_call") == {CDPEx.Fetch, :init, 1},
         do: pid
+  end
+
+  defp clicks(page) do
+    {:ok, clicks} = Page.evaluate(page, "window.clicks")
+    clicks
   end
 
   defp stop_quietly(browser) do
