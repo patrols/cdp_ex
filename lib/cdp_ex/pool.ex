@@ -135,9 +135,12 @@ defmodule CDPEx.Pool do
   returning the browser afterwards. The pooled counterpart of `CDPEx.with_page/3`
   — it reuses a warm browser instead of launching one per call.
 
-  `opts` are forwarded to `CDPEx.with_page/3` (e.g. `:prevent_alerts`); pass
-  `:checkout_timeout` to bound the wait for a free browser. Returns `fun`'s value,
-  or `{:error, reason}`.
+  `opts` are forwarded to `CDPEx.with_page/3` (e.g. `:prevent_alerts`, or
+  `:deadline`, which closes the page — not the pooled browser — and whose clock
+  starts after checkout, so it doesn't cover the wait for a free browser; with a
+  connect-mode `:start_fun` pages default to `:session`, where the deadline's
+  session-transport caveat applies); pass `:checkout_timeout` to bound that wait.
+  Returns `fun`'s value, or `{:error, reason}`.
   """
   @spec with_page(GenServer.server(), (CDPEx.Page.t() -> result), keyword()) ::
           result | {:error, term()}

@@ -26,7 +26,8 @@ defmodule CDPEx do
       end)
 
   Observability is via `:telemetry` — see `CDPEx.Telemetry` for the event taxonomy
-  (launch / navigate spans, page open/close, and error events). Silent by default.
+  (launch / navigate spans, page open/close, `with_page/3` deadlines, and error
+  events). Silent by default.
 
   ## Error handling
 
@@ -57,8 +58,10 @@ defmodule CDPEx do
   """
 
   alias CDPEx.Browser
+  alias CDPEx.Chrome
   alias CDPEx.Connect
   alias CDPEx.Page
+  alias CDPEx.ProcessLabel
   alias CDPEx.Telemetry
 
   @typedoc """
@@ -69,7 +72,8 @@ defmodule CDPEx do
   method, an exit status, a stderr/contents excerpt) are open and may gain detail.
 
   The only bare, context-free reasons are `:noproc`, the high-level `:timeout`,
-  `:unknown_page`, `:already_authenticated`, and `:already_intercepting` —
+  `:deadline_exceeded` (`with_page/3`'s `:deadline`), `:unknown_page`,
+  `:already_authenticated`, and `:already_intercepting` —
   self-describing control-flow outcomes with no payload to carry, the way GenServer
   uses `:noproc`. Validation failures that *do* have offending data to surface are
   tagged instead (`{:invalid_response_body, excerpt}`, `{:invalid_pdf_data, excerpt}`,
@@ -101,10 +105,11 @@ defmodule CDPEx do
   """
   @type error_reason ::
           CDPEx.Connection.call_error()
-          | CDPEx.Chrome.launch_error()
+          | Chrome.launch_error()
           | {:ws_connect, term()}
           | {:ws_upgrade, term()}
           | :timeout
+          | :deadline_exceeded
           | :unknown_page
           | :already_authenticated
           | :already_intercepting
@@ -165,7 +170,8 @@ defmodule CDPEx do
 
     * `:transient` — environmental or timing failures: the connection dropped or
       couldn't be established (`{:ws_closed, _}`, `{:ws_connect, _}`, `{:ws_upgrade, _}`,
-      `:noproc`), a wait or call timed out (`:timeout`, `{:timeout, _}`), Chrome died
+      `:noproc`), a wait or call timed out (`:timeout`, `{:timeout, _}`,
+      `:deadline_exceeded`), Chrome died
       or was slow to start (`{:chrome_exited, _, _}`, `{:debug_url_not_found, _}`,
       `{:devtools_file_malformed, _}`), an internal capture/idle helper crashed
       (`{:capture_failed, _}`, `{:idle_wait_failed, _}`), or a navigation hit a
@@ -204,6 +210,7 @@ defmodule CDPEx do
   def classify_error(:noproc), do: :transient
   def classify_error(:timeout), do: :transient
   def classify_error({:timeout, _}), do: :transient
+  def classify_error(:deadline_exceeded), do: :transient
   def classify_error({:chrome_exited, _, _}), do: :transient
   def classify_error({:debug_url_not_found, _}), do: :transient
   def classify_error({:devtools_file_malformed, _}), do: :transient
@@ -405,14 +412,82 @@ defmodule CDPEx do
   page/browser could not be created.
 
   With launch options, the throwaway browser is linked but **contained**: if it
-  crashes during the call (e.g. its connection drops) `with_page` returns
-  `{:error, reason}` instead of letting the crash propagate to the caller. To do
-  that it briefly traps exits in the calling process for the duration of the call.
+  fails to start, or crashes during the call (e.g. its connection drops),
+  `with_page` returns `{:error, reason}` instead of letting the exit propagate to
+  the caller. To do that it briefly traps exits in the calling process for the
+  duration of the call, launch included. (On OTP 24/25 a failed start still leaves
+  its `{:EXIT, pid, reason}` in the caller's mailbox; OTP 26+ consumes it.)
   Only the browser's own `{:EXIT, _, _}` is drained — a *foreign* process linked
   to the caller that exits during this window has its exit delivered as a message
   left in the caller's mailbox, so a caller that links other processes and relies
   on un-trapped exit propagation should pass a pre-launched browser pid instead.
   On slow cold-start hosts, raise `:launch_timeout` (a ceiling, not a fixed wait).
+
+  `opts` go to `new_page/2`, except `:deadline`.
+
+  ## Deadline
+
+  Each page operation has its own timeout, but they stack: a navigation, a few
+  selector waits and some retries can hold a browser for minutes. Pass `deadline: ms`
+  (a positive integer) to bound the whole call. The clock starts when `with_page` is
+  called, so a launch counts against it.
+
+  The rule, by the monotonic clock: the call is **exceeded iff `fun` had not returned
+  by the deadline** (or never started). Then `with_page` returns
+  `{:error, :deadline_exceeded}` however `fun` came back — a value, an error tuple, or
+  a raise/exit caused by the teardown. A `new_page/2` error comes back as itself,
+  late or not (the teardown waits for `new_page/2` to return); a page that only
+  arrives after the deadline means `fun` is not started. If `fun` returned in time,
+  its result or raise comes back untouched: the deadline stops there, and closing the
+  page or stopping a throwaway browser afterwards runs on their own timeouts. Without
+  a deadline nothing changes.
+
+  `fun` still runs in the calling process (`self()`, the process dictionary, Logger
+  metadata and links behave as without a deadline). A watchdog process enforces the
+  deadline by tearing down the browser resource underneath it: a throwaway browser
+  (launch options or `connect:`) is stopped, reaping a launched Chrome; with a browser
+  pid, only the page `with_page` opened is closed and the browser stays yours (a
+  page `fun` opens itself is not released). The browser call `fun` is blocked in then
+  fails fast and `fun` unwinds. Work in `fun` that doesn't touch the browser — a
+  sleep, a computation — runs on until its next browser call, so the bound is "the
+  browser is released at the deadline", not "`fun` is preempted".
+
+  Some stages can't be interrupted and are bounded differently:
+
+    * **Launch** — the browser doesn't exist yet, so `:launch_timeout` is capped at the
+      deadline when the deadline is smaller or equal (default `15_000`), and so is
+      connect-mode's `:discovery_timeout` (default `5_000`). The WebSocket connect and
+      upgrade after them (normally milliseconds) keep their own timeouts. A start whose
+      capped timeout runs out at or after the deadline returns
+      `{:error, :deadline_exceeded}`, with its own error in the telemetry event's
+      `:launch_error`; any other start failure comes back as itself.
+    * **`new_page/2`** — the browser serves it as one call (target creation, bootstrap,
+      a proxy's auth arm), so a deadline that fires mid-way takes effect when it
+      returns; `fun` is then not started. A start that returns after the deadline
+      skips `new_page/2` altogether.
+    * **`transport: :session` pages on a browser pid** (the default for a
+      `connect/2` browser) — the page is closed, but its calls ride the browser
+      socket, which stays open, and Chrome doesn't answer a call on a closed session:
+      a call in flight, or made after the deadline, waits out its own timeout before
+      `fun` sees the failure. Use the `:dedicated` transport where you can; tracked
+      in [#121](https://github.com/patrols/cdp_ex/issues/121).
+    * **Closing the page on a browser pid** goes through the Browser, so on a shared or
+      pooled browser it queues behind whatever the Browser is serving (another
+      caller's `new_page/2`). If `close_page/2`'s own 15s timeout runs out first, the
+      page stays open and the call in `fun` runs to its own timeout.
+
+  With a throwaway browser the teardown's `{:EXIT, browser, :normal}` arrives while
+  `fun` may still be running (the call traps exits, as for a browser crash); it is
+  drained before `with_page` returns, but a catch-all `receive` in `fun` can take it.
+
+  If the caller dies mid-call, a throwaway browser is reaped through its link as
+  before, and on a browser pid the watchdog closes the page — once `new_page/2` has
+  returned it; a caller that dies while `new_page/2` is in flight leaves that page
+  open, as without a deadline.
+
+  An invalid `:deadline` (not an integer in `1..4_294_967_295`) raises
+  `ArgumentError`. An exceeded deadline emits
+  `[:cdp_ex, :with_page, :deadline_exceeded]` (see `CDPEx.Telemetry`).
 
       # against an existing browser
       CDPEx.with_page(browser, fn page ->
@@ -425,6 +500,9 @@ defmodule CDPEx do
 
       # against an existing Chrome (discovered via /json/version)
       CDPEx.with_page([connect: "http://localhost:9222"], &CDPEx.Page.html/1)
+
+      # the whole call, launch included, within 20s
+      CDPEx.with_page([], &CDPEx.Page.html/1, deadline: 20_000)
   """
   @spec with_page(pid() | keyword(), (Page.t() -> result), keyword()) ::
           result | {:error, term()}
@@ -432,13 +510,86 @@ defmodule CDPEx do
   def with_page(browser_or_opts, fun, opts \\ [])
 
   def with_page(browser, fun, opts) when is_pid(browser) and is_function(fun, 1) do
+    case pop_deadline(opts) do
+      {nil, opts} ->
+        run_page(browser, fun, opts, nil)
+
+      {deadline, opts} ->
+        deadline_at = now_ms() + deadline
+
+        guard_deadline(deadline, deadline_at, {:close_page, browser}, fn watch ->
+          run_page(browser, fun, opts, watch)
+        end)
+    end
+  end
+
+  def with_page(launch_opts, fun, opts) when is_list(launch_opts) and is_function(fun, 1) do
+    if Keyword.has_key?(launch_opts, :deadline) do
+      raise ArgumentError,
+            ":deadline goes in with_page/3's third argument, not the launch options"
+    end
+
+    case pop_deadline(opts) do
+      {nil, opts} ->
+        with_throwaway(
+          launch_opts,
+          fn browser -> run_page(browser, fun, opts, nil) end,
+          &{:error, &1}
+        )
+
+      {deadline, opts} ->
+        with_throwaway_deadline(launch_opts, fun, opts, deadline)
+    end
+  end
+
+  defp with_throwaway_deadline(launch_opts, fun, opts, deadline) do
+    deadline_at = now_ms() + deadline
+    launch_opts = cap_start_timeout(launch_opts, deadline)
+
+    with_throwaway(
+      launch_opts,
+      fn browser ->
+        guard_deadline(deadline, deadline_at, {:stop, browser}, fn watch ->
+          run_page(browser, fun, opts, watch)
+        end)
+      end,
+      &start_error(&1, deadline, deadline_at)
+    )
+  end
+
+  # Only a timeout the cap can cause is the deadline's; a rejected upgrade or a missing
+  # binary must not come back as a transient :deadline_exceeded and be retried.
+  defp start_error(reason, deadline, deadline_at) do
+    if start_timeout?(reason) and now_ms() >= deadline_at do
+      deadline_exceeded(%{deadline: deadline, outcome: :not_started, launch_error: reason})
+    else
+      {:error, reason}
+    end
+  end
+
+  defp start_timeout?({:debug_url_not_found, _}), do: true
+  defp start_timeout?({:devtools_file_malformed, _}), do: true
+  defp start_timeout?({:connect_discovery_failed, :discovery_timeout}), do: true
+  defp start_timeout?(_reason), do: false
+
+  defp run_page(browser, fun, opts, nil), do: open_and_run(browser, fun, opts, nil)
+
+  # A start can return past the deadline (its WebSocket connect isn't capped); don't
+  # spend an uninterruptible new_page on an already-decided call.
+  defp run_page(browser, fun, opts, {_watchdog, ref, deadline_at} = watch) do
+    if now_ms() >= deadline_at do
+      {ref, :expired}
+    else
+      open_and_run(browser, fun, opts, watch)
+    end
+  end
+
+  defp open_and_run(browser, fun, opts, watch) do
     case new_page(browser, opts) do
       {:ok, page} ->
         try do
-          fun.(page)
+          run_fun(fun, page, watch)
         after
-          # Best-effort: the page/browser may have already exited, and a teardown
-          # exit must not mask `fun`'s result or a raised exception.
           safe(fn -> close_page(browser, page) end)
         end
 
@@ -447,7 +598,31 @@ defmodule CDPEx do
     end
   end
 
-  def with_page(launch_opts, fun, opts) when is_list(launch_opts) and is_function(fun, 1) do
+  defp run_fun(fun, page, nil), do: fun.(page)
+
+  defp run_fun(fun, page, {watchdog, ref, deadline_at}) do
+    send(watchdog, {:page, ref, page})
+
+    # new_page can't be interrupted, so it may return after the deadline; don't start
+    # `fun` on a page that is already being torn down.
+    if now_ms() >= deadline_at do
+      {ref, :expired}
+    else
+      outcome =
+        try do
+          {:ok, fun.(page)}
+        catch
+          kind, reason -> {kind, reason, __STACKTRACE__}
+        end
+
+      # Before run_page's close_page, which can queue behind other callers' new_page.
+      finished_at = now_ms()
+      stop_watchdog(watchdog, ref)
+      {ref, :finished, finished_at, outcome}
+    end
+  end
+
+  defp with_throwaway(launch_opts, body, on_start_error) do
     # `[connect: endpoint]` attaches to a running Chrome instead of launching one;
     # the resource-safe trap/stop/drain machinery below is identical (stop/1 on a
     # connected browser closes only the pages we opened — it never kills Chrome).
@@ -457,34 +632,177 @@ defmodule CDPEx do
         {endpoint, rest} -> fn -> connect(endpoint, rest) end
       end
 
-    case start.() do
-      {:ok, browser} ->
-        # launch/1 links `browser` to us. Trap exits for the duration of this call
-        # so a browser crash (e.g. its connection dropping mid-call) arrives as a
-        # message — `fun`'s own {:error, _} returns first and is never masked —
-        # instead of a link exit that would kill the caller, breaking with_page's
-        # resource-safe contract. We keep the link (not just a monitor) so that if
-        # the *caller* dies, the browser is still reaped via Browser.terminate/2.
-        prev_trap = Process.flag(:trap_exit, true)
+    # Trap from before the launch so a failed init doesn't kill the caller; keep the
+    # link so caller death reaps the browser.
+    prev_trap = Process.flag(:trap_exit, true)
 
-        try do
+    try do
+      case start.() do
+        {:ok, browser} ->
           try do
-            with_page(browser, fun, opts)
+            try do
+              body.(browser)
+            after
+              safe(fn -> stop(browser) end)
+            end
           after
-            safe(fn -> stop(browser) end)
+            # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
+            # our own stop/1) so it can't surface to the caller once we restore the
+            # prior trap_exit flag. A foreign linked process's EXIT is left as-is.
+            drain_exit(browser)
           end
-        after
-          # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
-          # our own stop/1) so it can't surface to the caller once we restore the
-          # prior trap_exit flag. A foreign linked process's EXIT is left as-is.
-          drain_exit(browser)
-          Process.flag(:trap_exit, prev_trap)
-        end
 
-      {:error, _} = error ->
-        error
+        {:error, reason} ->
+          on_start_error.(reason)
+      end
+    after
+      Process.flag(:trap_exit, prev_trap)
     end
   end
+
+  defp pop_deadline(opts) do
+    case Keyword.pop(opts, :deadline) do
+      {nil, _} = absent ->
+        absent
+
+      # The upper bound is `receive ... after`'s limit; past it the watchdog would crash.
+      {deadline, _} = popped when is_integer(deadline) and deadline in 1..4_294_967_295 ->
+        popped
+
+      {other, _} ->
+        raise ArgumentError,
+              "invalid :deadline #{inspect(other)} (expected integer ms in 1..4_294_967_295)"
+    end
+  end
+
+  # There is no browser for the watchdog to tear down until the start returns.
+  defp cap_start_timeout(launch_opts, deadline) do
+    {key, default} =
+      if Keyword.get(launch_opts, :connect) do
+        {:discovery_timeout, Connect.default_discovery_timeout()}
+      else
+        {:launch_timeout, Chrome.default_launch_timeout()}
+      end
+
+    if deadline <= Keyword.get(launch_opts, key, default) do
+      Keyword.put(launch_opts, key, deadline)
+    else
+      launch_opts
+    end
+  end
+
+  # The verdict is the clock's, not the watchdog's: it only fires at or after
+  # `deadline_at`, so any teardown `fun` saw implies a late return, and a starved
+  # watchdog can't let a late `fun` through. It sends the caller nothing, and is
+  # monitored only once `fun` is done, so a `receive` in `fun` can't swallow anything.
+  defp guard_deadline(deadline, deadline_at, teardown, body) do
+    ref = make_ref()
+    caller = self()
+    watchdog = spawn(fn -> watchdog(caller, ref, deadline, deadline_at, teardown) end)
+
+    result =
+      try do
+        {:ok, body.({watchdog, ref, deadline_at})}
+      catch
+        kind, reason -> {kind, reason, __STACKTRACE__}
+      end
+
+    stop_watchdog(watchdog, ref)
+
+    case result do
+      {:ok, {^ref, :expired}} ->
+        deadline_exceeded(%{deadline: deadline, outcome: :not_started})
+
+      {:ok, {^ref, :finished, finished_at, outcome}} when finished_at >= deadline_at ->
+        deadline_exceeded(%{deadline: deadline, outcome: outcome_tag(outcome)})
+
+      {:ok, {^ref, :finished, _finished_at, outcome}} ->
+        unwrap(outcome)
+
+      # new_page/2 failed on its own: fire/4 waits for the page before tearing down.
+      _ ->
+        unwrap(result)
+    end
+  end
+
+  # Can't hang: a fresh monitor on a dead watchdog is an immediate :DOWN, and a live
+  # one exits on :cancel or once its (bounded) teardown returns.
+  defp stop_watchdog(watchdog, ref) do
+    mon = Process.monitor(watchdog)
+    send(watchdog, {:cancel, ref})
+
+    receive do
+      {:DOWN, ^mon, :process, ^watchdog, _} -> :ok
+    end
+  end
+
+  defp unwrap({:ok, value}), do: value
+  defp unwrap({kind, reason, stacktrace}), do: :erlang.raise(kind, reason, stacktrace)
+
+  # The returned error hides what `fun` did; telemetry keeps it.
+  defp outcome_tag({:ok, {:error, _} = error}), do: error
+  defp outcome_tag({:ok, _value}), do: :value
+
+  defp outcome_tag({kind, reason, stacktrace}) do
+    {:raised, kind, Exception.normalize(kind, reason, stacktrace)}
+  end
+
+  defp deadline_exceeded(metadata) do
+    Telemetry.deadline_exceeded(metadata)
+    {:error, :deadline_exceeded}
+  end
+
+  defp watchdog(caller, ref, deadline, deadline_at, teardown) do
+    ProcessLabel.set({:cdp_deadline, deadline})
+    caller_mon = Process.monitor(caller)
+    watch(caller_mon, ref, deadline_at, teardown, nil)
+  end
+
+  defp watch(caller_mon, ref, deadline_at, teardown, page) do
+    receive do
+      {:cancel, ^ref} -> :ok
+      {:page, ^ref, page} -> watch(caller_mon, ref, deadline_at, teardown, page)
+      {:DOWN, ^caller_mon, :process, _, _} -> caller_down(teardown, page)
+    after
+      max(deadline_at - now_ms(), 0) ->
+        # A just-in-time `fun` may have its cancel in flight; don't make it wait on a
+        # teardown. (A cancel landing after this check still waits, bounded.)
+        receive do
+          {:cancel, ^ref} -> :ok
+        after
+          0 -> fire(caller_mon, ref, teardown, page)
+        end
+    end
+  end
+
+  # new_page can't be interrupted, and stopping the browser under it would exit the
+  # caller's call; wait for the page (or for new_page to fail and the caller to cancel).
+  defp fire(caller_mon, ref, teardown, nil) do
+    receive do
+      {:page, ^ref, page} -> fire(caller_mon, ref, teardown, page)
+      {:cancel, ^ref} -> :ok
+      {:DOWN, ^caller_mon, :process, _, _} -> :ok
+    end
+  end
+
+  # Bounded, unlike stop/1, so a hung terminate can't hold stop_watchdog/2 forever. On
+  # a timeout the terminate request stays queued and with_throwaway's own stop/1 follows.
+  defp fire(_caller_mon, _ref, {:stop, browser}, _page) do
+    safe(fn -> GenServer.stop(browser, :normal, 15_000) end)
+  end
+
+  defp fire(_caller_mon, _ref, {:close_page, browser}, page) do
+    safe(fn -> close_page(browser, page) end)
+  end
+
+  # The link reaps a throwaway browser; nothing else closes a page on a caller-owned one.
+  defp caller_down({:close_page, browser}, %Page{} = page) do
+    safe(fn -> close_page(browser, page) end)
+  end
+
+  defp caller_down(_teardown, _page), do: :ok
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   # Run a teardown action, swallowing an already-dead-process exit (or any raise)
   # so cleanup in `with_page/3` never overrides the operation's real outcome.
