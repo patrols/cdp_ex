@@ -916,8 +916,10 @@ defmodule CDPEx.Page do
   has a box the first innermost match is chosen, and a trusted click reports
   `:not_clickable`.
 
-  Candidates are the elements under `document.body`, excluding `<script>`, `<style>`,
-  `<template>` and `<noscript>` content; `:selector` narrows them to
+  Candidates are the elements under `document.body`, never inside `<script>`,
+  `<style>`, `<template>` or `<noscript>`; text in such a child still counts toward its
+  parent's `textContent`, so a button with an inline `<svg><style>` doesn't match its
+  label (use `click/3` with a selector there). `:selector` narrows candidates to
   those matching a CSS selector (e.g. `selector: "button, a"`), which also stops a
   label from matching unrelated text elsewhere on the page. The search doesn't enter
   shadow roots or iframes, and its cost grows with the page's text (it re-runs on every
