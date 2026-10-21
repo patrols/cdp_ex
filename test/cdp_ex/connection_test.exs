@@ -290,6 +290,25 @@ defmodule CDPEx.ConnectionTest do
       refute_received {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S2"}, _}
     end
 
+    test "an :all subscription scoped to a session also receives that session's detach only", %{
+      conn: conn,
+      fake: fake
+    } do
+      :ok = Connection.subscribe(conn, :all, 5_000, session_id: "S1")
+
+      for sid <- ["S2", "S1"] do
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"#{sid}","targetId":"T"}})
+        )
+      end
+
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S1"}, nil},
+                     2_000
+
+      refute_received {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "S2"}, _}
+    end
+
     test "a -32001 error on a call without a session stays a cdp_error", %{conn: conn, fake: fake} do
       task = Task.async(fn -> Connection.call(conn, "Some.op", %{}, 5_000) end)
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Some.op"}}, 2_000
