@@ -342,8 +342,21 @@ For a one-off HTTP Basic challenge on an *origin* (not a proxy), arm it per page
 
 ## Error handling
 
-Operations return `{:error, reason}` on failure. Rather than hard-code the reason
-shapes, classify them to drive retries:
+Operations return `{:error, reason}` on failure, runtime failures included: Chrome
+that can't be spawned, a browser, page or pool that is gone or dies mid-call, a call
+that can't be served in time. None of them raises or exits in your process, so
+`with_page/3` needs no `rescue`/`catch :exit` around it. Invalid arguments still
+raise, and so does anything your own `with_page` function raises, throws or exits
+with.
+
+That covers return values, not links. A browser started with `CDPEx.launch/1` or
+`CDPEx.connect/2` is linked to the process that started it (the link is what reaps
+Chrome when that process dies), so if the browser stops on its own, for example
+because Chrome died, the exit signal still reaches a starter that doesn't trap exits.
+Run a long-lived browser under your own supervisor. `with_page/3` with launch options
+contains this for its throwaway browser.
+
+Rather than hard-code the reason shapes, classify them to drive retries:
 
 ```elixir
 case CDPEx.Page.navigate(page, url) do
@@ -411,6 +424,7 @@ offers no way to label a supervisor from outside it.)
 | `{:cdp_connection, "/devtools/page/<targetId>"}` | a `:dedicated` page WebSocket |
 | `{:cdp_page_helper, :idle_wait \| :capture, target_id}` | the short-lived process behind `wait_for_network_idle/2` and `navigate/3` with `response: true` |
 | `{:cdp_page_helper, :detach_watch, target_id}` | the short-lived process that watches a `:session` page's detach during `navigate/3` and `wait_for_navigation/2` |
+| `{:cdp_authenticate, target_id}` | the short-lived relay behind `Page.authenticate/4` |
 | `{:cdp_fetch_auth, source}` | the `Fetch` auth handler (`:proxy`, `:server`, or `:any`) |
 | `{:cdp_fetch_disable, conn}` | the throwaway task that releases interception after its owner dies |
 | `{:cdp_pool, size}` / `{:cdp_pool_launch, pool}` | `CDPEx.Pool` and its browser-launch tasks |

@@ -322,12 +322,12 @@ defmodule CDPEx.WithPageDeadlineTest do
                :ball
     end
 
-    test "propagates new_page's exit for a dead browser" do
+    test "returns new_page's {:error, :noproc} for a dead browser" do
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
       assert_receive {:DOWN, ^ref, _, _, _}
 
-      assert catch_exit(CDPEx.with_page(dead, fn _ -> :ok end, deadline: 5_000))
+      assert CDPEx.with_page(dead, fn _ -> :ok end, deadline: 5_000) == {:error, :noproc}
       assert Process.info(self(), :monitors) == {:monitors, []}
     end
   end

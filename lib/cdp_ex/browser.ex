@@ -28,6 +28,7 @@ defmodule CDPEx.Browser do
 
   alias CDPEx.Chrome
   alias CDPEx.Connection
+  alias CDPEx.Exits
   alias CDPEx.Fetch
   alias CDPEx.Page
   alias CDPEx.ProcessLabel
@@ -102,6 +103,12 @@ defmodule CDPEx.Browser do
 
   A `:session` page whose target goes away while it is being set up returns
   `{:error, {:session_closed, session_id}}` (`:transient`; open a new page).
+
+  A browser that is gone, or stops before replying, returns `{:error, :noproc}`. One
+  that can't serve the request within 75s returns `{:error, {:timeout, :new_page}}`;
+  a page it still opens after that is not handed to anyone and stays open until the
+  browser stops, so retrying on the same browser can pile these up — prefer a fresh
+  browser (or stop this one) after a timeout.
   """
   @spec new_page(GenServer.server(), keyword()) :: {:ok, Page.t()} | {:error, term()}
   # The call timeout covers the worst-case internal budget — Target.createTarget
@@ -109,23 +116,62 @@ defmodule CDPEx.Browser do
   # (@arm_timeout) — so a stalled stage can't make the caller give up while the Browser is
   # still working, which would orphan an armed page. Normal new_page returns in well under
   # a second; this is only the pathological ceiling.
-  def new_page(browser, opts \\ []), do: GenServer.call(browser, {:new_page, opts}, 75_000)
+  def new_page(browser, opts \\ []), do: call(browser, {:new_page, opts}, 75_000, :new_page)
 
   @doc """
   Closes a page opened with `new_page/2`.
 
   Returns `{:error, :unknown_page}` if the page does not belong to this browser
-  (a handle from a different browser, or one that was already closed).
+  (a handle from a different browser, or one that was already closed),
+  `{:error, :noproc}` if the browser is gone (its pages went with it), and
+  `{:error, {:timeout, :close_page}}` if it can't serve the request within 15s.
   """
-  @spec close_page(GenServer.server(), Page.t()) :: :ok | {:error, :unknown_page}
-  def close_page(browser, %Page{} = page), do: GenServer.call(browser, {:close_page, page}, 15_000)
+  @spec close_page(GenServer.server(), Page.t()) ::
+          :ok | {:error, :unknown_page | :noproc | {:timeout, :close_page}}
+  def close_page(browser, %Page{} = page),
+    do: call(browser, {:close_page, page}, 15_000, :close_page)
 
   # Internal hop for `CDPEx.Page.authenticate/4`, which owns the input contract
   # (credential guards + `:source` validation). Not part of the public API.
   @doc false
   @spec authenticate(GenServer.server(), Page.t(), keyword()) :: :ok | {:error, term()}
   def authenticate(browser, %Page{} = page, opts) do
-    GenServer.call(browser, {:authenticate, page, opts}, 15_000)
+    # The call runs in a throwaway process because the Browser monitors whoever made
+    # it: when that process goes down while the handler is still arming, the Browser
+    # tears the handler down (#40). A timeout caught in the caller would leave it alive
+    # and the page stuck on :already_authenticated. The relay is linked to the caller so
+    # the caller's death takes it down too, which is the :DOWN the Browser acts on; it
+    # unlinks before replying so a caller that traps exits gets no stray {:EXIT}.
+    caller = self()
+    tag = make_ref()
+
+    {pid, mon} =
+      Process.spawn(
+        fn ->
+          ProcessLabel.set({:cdp_authenticate, page.target_id})
+          reply = call(browser, {:authenticate, page, opts}, 15_000, :authenticate)
+          Process.unlink(caller)
+          send(caller, {tag, reply})
+        end,
+        [:link, :monitor]
+      )
+
+    receive do
+      {^tag, reply} ->
+        Process.demonitor(mon, [:flush])
+        reply
+
+      {:DOWN, ^mon, :process, ^pid, _reason} ->
+        Process.unlink(pid)
+
+        receive do
+          {:EXIT, ^pid, _} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, :noproc}
+    end
   end
 
   # Internal hops for `CDPEx.Page.enable/disable_request_interception/2`, which own the
@@ -160,7 +206,21 @@ defmodule CDPEx.Browser do
   closes only the pages it opened and leaves the remote Chrome running.
   """
   @spec stop(GenServer.server()) :: :ok
-  def stop(browser), do: GenServer.stop(browser, :normal)
+  def stop(browser) do
+    GenServer.stop(browser, :normal)
+  catch
+    # Already stopped, or stopped on its own (Chrome died) while this one was waiting.
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
+      Exits.warn_unclean_stop("CDPEx.Browser", reason)
+  end
+
+  # A Browser that is gone, or stops before replying, took its pages with it.
+  defp call(browser, request, timeout, op) do
+    GenServer.call(browser, request, timeout)
+  catch
+    :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, op}}
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
+  end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
@@ -184,7 +244,7 @@ defmodule CDPEx.Browser do
       connect_ws && Keyword.has_key?(launch_opts, :proxy) ->
         # :proxy is a Chrome launch flag (--proxy-server); connect-mode launches no
         # Chrome, so it could never take effect. Reject rather than silently ignore it.
-        {:stop, {:unsupported_with_connect, :proxy}}
+        stop_init({:unsupported_with_connect, :proxy})
 
       connect_ws ->
         # Connect-mode: attach to an already-running Chrome. No Chrome.launch, and
@@ -205,9 +265,22 @@ defmodule CDPEx.Browser do
             []
           )
         else
-          {:error, reason} -> {:stop, reason}
+          {:error, reason} -> stop_init(reason)
         end
     end
+  end
+
+  # A failed init exits the process with `reason`, and through the link that exit
+  # would kill a caller not trapping exits before start_link could return
+  # {:error, reason}. Drop the link to the starter first; a supervisor or
+  # CDPEx.Pool's launch task gets the same {:error, reason} as before.
+  defp stop_init(reason) do
+    case parent_pid() do
+      pid when is_pid(pid) -> Process.unlink(pid)
+      _ -> true
+    end
+
+    {:stop, reason}
   end
 
   # Translate the `:proxy` launch option into a `--proxy-server` flag (appended to
@@ -245,39 +318,40 @@ defmodule CDPEx.Browser do
     # The OS pid is the one identifier that ties this GenServer to a row in `ps`.
     ProcessLabel.set({:cdp_browser, browser_label_id(chrome)})
 
-    case Connection.start_link(ws_url, conn_opts) do
-      {:ok, conn} ->
-        # Prune session entries when their target ends (tab closed/crashed, or our
-        # own close_page) so long-lived browsers don't accumulate stale sessions —
-        # parity with the dedicated path, which self-prunes on a page-conn EXIT.
-        # subscribe/2 is a GenServer.call: if the browser socket dropped in the
-        # window after start_link, it exits — and since the GenServer loop hasn't
-        # started, terminate/2 never runs, so reap Chrome (and the conn) here or
-        # leak the OS process and temp profile, same as the start_link path below.
-        try do
-          Connection.subscribe(conn, "Target.detachedFromTarget")
-
-          {:ok,
-           %__MODULE__{
-             chrome: chrome,
-             connected: is_nil(chrome),
-             browser_conn: conn,
-             host: host,
-             port: port,
-             opts: launch_opts,
-             parent: parent,
-             proxy_auth: proxy_auth
-           }}
-        catch
-          :exit, reason ->
-            safe_close(conn)
-            if chrome, do: Chrome.stop(chrome)
-            {:stop, reason}
-        end
-
+    # Prune session entries when their target ends (tab closed/crashed, or our own
+    # close_page) so long-lived browsers don't accumulate stale sessions — parity with
+    # the dedicated path, which self-prunes on a page-conn EXIT. If the browser socket
+    # dropped in the window after start_link, subscribe/4 fails — and since the
+    # GenServer loop hasn't started, terminate/2 never runs, so reap Chrome (and the
+    # conn) here or leak the OS process and temp profile.
+    with {:ok, conn} <- Connection.start_link(ws_url, conn_opts),
+         :ok <- subscribe_detached(conn) do
+      {:ok,
+       %__MODULE__{
+         chrome: chrome,
+         connected: is_nil(chrome),
+         browser_conn: conn,
+         host: host,
+         port: port,
+         opts: launch_opts,
+         parent: parent,
+         proxy_auth: proxy_auth
+       }}
+    else
       {:error, reason} ->
         if chrome, do: Chrome.stop(chrome)
-        {:stop, reason}
+        stop_init(reason)
+    end
+  end
+
+  defp subscribe_detached(conn) do
+    case Connection.subscribe(conn, "Target.detachedFromTarget") do
+      :ok ->
+        :ok
+
+      {:error, _} = error ->
+        safe_close(conn)
+        error
     end
   end
 
@@ -892,9 +966,9 @@ defmodule CDPEx.Browser do
     :ok
   end
 
-  # Stop a page connection, tolerating an already-dead process. `Connection.close/1`
-  # is a `GenServer.stop`, which exits with `:noproc` if the process is gone — that
-  # exit must never propagate out of teardown.
+  # Stop a page connection from teardown, where nothing may raise or exit.
+  # `Connection.close/1` is already `:ok` on a gone process; the rescue and catch are
+  # a backstop so a surprise there can't skip the Chrome.stop/1 that follows.
   defp safe_close(conn) do
     if Process.alive?(conn), do: Connection.close(conn)
     :ok

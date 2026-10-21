@@ -21,6 +21,7 @@ defmodule CDPEx.Connection do
 
   use GenServer, restart: :temporary
 
+  alias CDPEx.Exits
   alias CDPEx.ProcessLabel
   alias CDPEx.Protocol
   alias CDPEx.Telemetry
@@ -61,7 +62,9 @@ defmodule CDPEx.Connection do
   Starts a connection to the given `ws://host:port/path` URL.
 
   Options: `:upgrade_timeout` (ms, default 15_000) and `:name` (registers the
-  GenServer). Returns `{:ok, pid}` once the WebSocket handshake completes.
+  GenServer). Returns `{:ok, pid}` once the WebSocket handshake completes. A failed
+  connect or upgrade returns its `:ws_connect` / `:ws_upgrade` error without
+  exiting the linked caller.
   """
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(ws_url, opts \\ []) do
@@ -79,13 +82,17 @@ defmodule CDPEx.Connection do
           | {:ws_closed, term()}
           | :noproc
           | {:session_closed, String.t()}
+          | {:invalid_args, term()}
 
   @doc """
   Sends a CDP command and blocks until its reply (or `timeout`).
 
   Returns `{:ok, result}`, `{:error, {:cdp_error, method, error}}` on a protocol
   error, `{:error, {:timeout, method}}`, or `{:error, {:ws_closed, reason}}` /
-  `{:error, :noproc}` if the connection drops or is already gone.
+  `{:error, :noproc}` if the connection drops or is already gone. `params` that
+  can't be encoded as JSON (e.g. a binary that isn't valid UTF-8) return
+  `{:error, {:invalid_args, reason}}`; the command is not sent. A `method` that isn't a
+  string or `params` that aren't a map raise `FunctionClauseError` in the caller.
 
   Pass `opts` with `session_id: sid` to address a flattened CDP session. A call on
   a session that has detached (its target closed, or `Target.detachFromTarget`) or
@@ -96,7 +103,11 @@ defmodule CDPEx.Connection do
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
           {:ok, map()} | {:error, call_error()}
-  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ []) do
+  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ [])
+
+  # Guarded here, in the caller, because Protocol.encode/4 raising FunctionClauseError
+  # inside the connection would crash it and surface to the caller as :noproc.
+  def call(conn, method, params, timeout, opts) when is_binary(method) and is_map(params) do
     session_id = Keyword.get(opts, :session_id)
     # Outer GenServer deadline is slightly longer than the CDP timeout so our own
     # `{:timeout, method}` reply wins over a raw GenServer.call timeout.
@@ -110,6 +121,7 @@ defmodule CDPEx.Connection do
     # can fire before our inner {:call_timeout} reply — return the documented
     # timeout tuple rather than letting the raw exit crash the caller.
     :exit, {:timeout, _} -> {:error, {:timeout, method}}
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
   @doc """
@@ -131,14 +143,30 @@ defmodule CDPEx.Connection do
   `"Target.detachedFromTarget"` (or `:all`) scoped to `sid` also delivers `sid`'s
   own detach, which Chrome sends on the parent session (so its `session_id`
   element is the parent's, usually `nil`, and `params["sessionId"]` is `sid`).
-  """
-  @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) :: :ok
-  def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []),
-    do: GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
 
-  @doc "Removes a subscription created with `subscribe/4`."
+  Returns `{:error, :noproc}` if the connection is gone, or
+  `{:error, {:timeout, :subscribe}}` if it doesn't register within `timeout`.
+  """
+  @spec subscribe(GenServer.server(), String.t() | :all, timeout(), keyword()) ::
+          :ok | {:error, :noproc | {:timeout, :subscribe} | {:ws_closed, term()}}
+  def subscribe(conn, method, timeout \\ @default_call_timeout, opts \\ []) do
+    GenServer.call(conn, {:subscribe, method, Keyword.get(opts, :session_id), self()}, timeout)
+  catch
+    :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, :subscribe}}
+    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
+  end
+
+  @doc """
+  Removes a subscription created with `subscribe/4`. A connection that is gone has
+  no subscriptions left, so that is `:ok` too.
+  """
   @spec unsubscribe(GenServer.server(), String.t() | :all) :: :ok
-  def unsubscribe(conn, method), do: GenServer.call(conn, {:unsubscribe, method, self()})
+  def unsubscribe(conn, method) do
+    GenServer.call(conn, {:unsubscribe, method, self()})
+  catch
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> :ok
+  end
 
   @doc """
   Blocks until an event for which `matcher.(params)` returns true, or `timeout`.
@@ -175,11 +203,17 @@ defmodule CDPEx.Connection do
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {:shutdown, _} -> {:error, :noproc}
     :exit, {:timeout, _} -> {:error, {:timeout, :await_event}}
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
-  @doc "Closes the WebSocket and stops the connection."
+  @doc "Closes the WebSocket and stops the connection. `:ok` if it is already gone."
   @spec close(GenServer.server()) :: :ok
-  def close(conn), do: GenServer.stop(conn, :normal)
+  def close(conn) do
+    GenServer.stop(conn, :normal)
+  catch
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
+      Exits.warn_unclean_stop("CDPEx.Connection", reason)
+  end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
@@ -215,8 +249,27 @@ defmodule CDPEx.Connection do
       Process.flag(:trap_exit, true)
       {:ok, %__MODULE__{conn: conn, ref: ref, websocket: websocket}}
     else
-      {:error, reason} -> {:stop, {:ws_connect, reason}}
-      {:error, _conn, reason} -> {:stop, {:ws_upgrade, reason}}
+      {:error, reason} -> stop_init({:ws_connect, reason})
+      {:error, _conn, reason} -> stop_init({:ws_upgrade, reason})
+    end
+  end
+
+  # A failed init exits with `reason`, which through the link would kill a starter
+  # not trapping exits before start_link could return {:error, reason}.
+  defp stop_init(reason) do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> Process.unlink(pid)
+      [name | _] when is_atom(name) -> unlink_named(name)
+      _ -> true
+    end
+
+    {:stop, reason}
+  end
+
+  defp unlink_named(name) do
+    case Process.whereis(name) do
+      nil -> true
+      pid -> Process.unlink(pid)
     end
   end
 
@@ -256,21 +309,10 @@ defmodule CDPEx.Connection do
   @impl true
   def handle_call({:cdp_call, method, params, timeout, session_id}, from, state) do
     id = state.next_id
-    payload = Protocol.encode(method, params, id, session_id)
 
-    case ws_send(state, payload) do
-      {:ok, state} ->
-        timer = arm_timeout({:call_timeout, id}, timeout)
-        pending = Map.put(state.pending, id, {from, method, timer, session_id})
-        {:noreply, %{state | next_id: id + 1, pending: pending}}
-
-      {:error, state, reason} ->
-        # A failed socket write means this connection can no longer be trusted:
-        # reply with the documented {:ws_closed, _} shape (not the internal
-        # {:ws_send,_}/{:ws_encode,_} tuple), fail any other pending callers, and
-        # stop — so the next caller doesn't keep trying on a dead socket.
-        GenServer.reply(from, {:error, {:ws_closed, reason}})
-        stop_ws_closed(state, reason)
+    case encode(method, params, id, session_id) do
+      {:ok, payload} -> send_call(payload, method, timeout, session_id, from, state)
+      {:error, reason} -> {:reply, {:error, {:invalid_args, reason}}, state}
     end
   end
 
@@ -707,6 +749,33 @@ defmodule CDPEx.Connection do
   end
 
   # ── helpers ─────────────────────────────────────────────────────────────────
+
+  # Encoding runs in this process, so an unencodable param (a non-UTF-8 binary, a pid)
+  # must not raise here: that would take the connection down with every page on it.
+  defp encode(method, params, id, session_id) do
+    {:ok, Protocol.encode(method, params, id, session_id)}
+  rescue
+    error in [Jason.EncodeError, Elixir.Protocol.UndefinedError] -> {:error, error}
+  end
+
+  defp send_call(payload, method, timeout, session_id, from, state) do
+    id = state.next_id
+
+    case ws_send(state, payload) do
+      {:ok, state} ->
+        timer = arm_timeout({:call_timeout, id}, timeout)
+        pending = Map.put(state.pending, id, {from, method, timer, session_id})
+        {:noreply, %{state | next_id: id + 1, pending: pending}}
+
+      {:error, state, reason} ->
+        # A failed socket write means this connection can no longer be trusted:
+        # reply with the documented {:ws_closed, _} shape (not the internal
+        # {:ws_send,_}/{:ws_encode,_} tuple), fail any other pending callers, and
+        # stop — so the next caller doesn't keep trying on a dead socket.
+        GenServer.reply(from, {:error, {:ws_closed, reason}})
+        stop_ws_closed(state, reason)
+    end
+  end
 
   defp fail_all_pending(state, reason) do
     Enum.each(state.pending, fn {_id, {from, _method, timer, _session_id}} ->

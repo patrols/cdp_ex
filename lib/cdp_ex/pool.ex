@@ -38,6 +38,7 @@ defmodule CDPEx.Pool do
   use GenServer
 
   alias CDPEx.Browser
+  alias CDPEx.Exits
   alias CDPEx.ProcessLabel
 
   require Logger
@@ -103,6 +104,8 @@ defmodule CDPEx.Pool do
     :exit, {:normal, _} -> {:error, :noproc}
     :exit, {:shutdown, _} -> {:error, :noproc}
     :exit, {{:shutdown, _}, _} -> {:error, :noproc}
+    # A pool that crashed mid-wait is just as gone.
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
   @doc "Returns a browser borrowed with `checkout/2`."
@@ -140,6 +143,10 @@ defmodule CDPEx.Pool do
   starts after checkout, so it doesn't cover the wait for a free browser); pass
   `:checkout_timeout` to bound that wait.
   Returns `fun`'s value, or `{:error, reason}`.
+
+  A `{:error, {:timeout, :new_page}}` means the browser could not serve the page in
+  time and may still open it later, unowned; that browser goes back into the pool, so
+  repeated timeouts can pile pages up on it. Restart the pool if they recur.
   """
   @spec with_page(GenServer.server(), (CDPEx.Page.t() -> result), keyword()) ::
           result | {:error, term()}
@@ -149,9 +156,14 @@ defmodule CDPEx.Pool do
     with_browser(pool, fn browser -> CDPEx.with_page(browser, fun, page_opts) end, timeout)
   end
 
-  @doc "Stops the pool, stopping every browser (and reaping Chrome)."
+  @doc "Stops the pool, stopping every browser (and reaping Chrome). `:ok` if it is already gone."
   @spec stop(GenServer.server()) :: :ok
-  def stop(pool), do: GenServer.stop(pool, :normal)
+  def stop(pool) do
+    GenServer.stop(pool, :normal)
+  catch
+    :exit, {reason, {GenServer, :stop, _}} when reason != :calling_self ->
+      Exits.warn_unclean_stop("CDPEx.Pool", reason)
+  end
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
@@ -463,7 +475,5 @@ defmodule CDPEx.Pool do
   defp safe_stop(browser) do
     if Process.alive?(browser), do: Browser.stop(browser)
     :ok
-  catch
-    :exit, _ -> :ok
   end
 end

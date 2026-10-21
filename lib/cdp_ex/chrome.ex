@@ -73,6 +73,7 @@ defmodule CDPEx.Chrome do
           | {:debug_url_not_found, String.t()}
           | {:devtools_file_malformed, String.t()}
           | {:chrome_exited, integer(), String.t()}
+          | {:launch_failed, {:user_data_dir | :spawn, term()}}
 
   @spec launch(keyword()) :: {:ok, handle()} | {:error, launch_error()}
   def launch(opts \\ []) do
@@ -90,14 +91,40 @@ defmodule CDPEx.Chrome do
   def default_launch_timeout, do: @launch_timeout
 
   defp do_launch(binary, opts) do
-    {user_data_dir, owns?} = resolve_user_data_dir(opts)
-    File.mkdir_p!(user_data_dir)
-    args = build_args(user_data_dir, opts)
-    timeout = Keyword.get(opts, :launch_timeout, @launch_timeout)
+    with {:ok, user_data_dir, owns?} <- resolve_user_data_dir(opts),
+         :ok <- make_profile_dir(user_data_dir),
+         {:ok, port} <- open_port(binary, build_args(user_data_dir, opts), user_data_dir, owns?) do
+      await_launch(port, user_data_dir, owns?, Keyword.get(opts, :launch_timeout, @launch_timeout))
+    end
+  end
 
-    port =
-      Port.open({:spawn_executable, binary}, [:binary, :stderr_to_stdout, :exit_status, args: args])
+  defp make_profile_dir(dir) do
+    case File.mkdir_p(dir) do
+      :ok -> :ok
+      {:error, posix} -> {:error, {:launch_failed, {:user_data_dir, posix}}}
+    end
+  end
 
+  # Port.open raises (e.g. :eacces, :emfile) rather than returning an error when the
+  # spawn itself fails; nothing has started yet, so only the profile dir needs removing.
+  # badarg and system_limit arrive as ArgumentError and SystemLimitError, which have no
+  # `:original`. badarg (e.g. a non-string in `:extra_args`) is a caller bug and keeps
+  # raising; a full port table is a runtime failure like a refused spawn.
+  defp open_port(binary, args, user_data_dir, owns?) do
+    {:ok,
+     Port.open({:spawn_executable, binary}, [:binary, :stderr_to_stdout, :exit_status, args: args])}
+  rescue
+    error ->
+      if owns?, do: remove_dir(user_data_dir)
+
+      case error do
+        %SystemLimitError{} -> {:error, {:launch_failed, {:spawn, :system_limit}}}
+        %ErlangError{original: reason} -> {:error, {:launch_failed, {:spawn, reason}}}
+        _ -> reraise error, __STACKTRACE__
+      end
+  end
+
+  defp await_launch(port, user_data_dir, owns?, timeout) do
     os_pid =
       case Port.info(port, :os_pid) do
         {:os_pid, pid} -> pid
@@ -251,14 +278,11 @@ defmodule CDPEx.Chrome do
   end
 
   defp resolve_user_data_dir(opts) do
-    case Keyword.get(opts, :user_data_dir) do
-      nil -> {temp_dir(), true}
-      dir -> {dir, false}
+    case {Keyword.get(opts, :user_data_dir), System.tmp_dir()} do
+      {nil, nil} -> {:error, {:launch_failed, {:user_data_dir, :no_tmp_dir}}}
+      {nil, tmp} -> {:ok, Path.join(tmp, "cdp_ex-#{System.unique_integer([:positive])}"), true}
+      {dir, _tmp} -> {:ok, dir, false}
     end
-  end
-
-  defp temp_dir do
-    Path.join(System.tmp_dir!(), "cdp_ex-#{System.unique_integer([:positive])}")
   end
 
   # ── DevTools URL discovery ──────────────────────────────────────────────────

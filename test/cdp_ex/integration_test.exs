@@ -36,6 +36,41 @@ defmodule CDPEx.IntegrationTest do
     :ok
   end
 
+  describe "a browser that dies under its caller" do
+    test "its page, browser and stop calls return values instead of exiting" do
+      {:ok, browser} = CDPEx.launch()
+      {:ok, page} = CDPEx.new_page(browser)
+      kill_chrome(browser)
+
+      assert {:error, _} = Page.html(page)
+      assert CDPEx.new_page(browser) == {:error, :noproc}
+      assert CDPEx.close_page(browser, page) == {:error, :noproc}
+      assert CDPEx.stop(browser) == :ok
+    end
+
+    test "CDPEx.with_page/3 on a pooled browser (via Pool.with_browser/3) returns {:error, :noproc}" do
+      {:ok, pool} = Pool.start_link(size: 1)
+      on_exit(fn -> stop_pool_quietly(pool) end)
+
+      result =
+        Pool.with_browser(pool, fn browser ->
+          kill_chrome(browser)
+          CDPEx.with_page(browser, fn _page -> flunk("fun ran on a dead browser") end)
+        end)
+
+      assert result == {:error, :noproc}
+    end
+
+    # kill -9 Chrome, then wait for the Browser to stop on the port's exit status (its
+    # terminate/2 still reaps the profile dir).
+    defp kill_chrome(browser) do
+      os_pid = :sys.get_state(browser).chrome.os_pid
+      ref = Process.monitor(browser)
+      {_, 0} = System.cmd("kill", ["-9", to_string(os_pid)])
+      assert_receive {:DOWN, ^ref, :process, ^browser, _reason}, 10_000
+    end
+  end
+
   describe "browser lifecycle" do
     test "launch/1 returns a live pid and stop/1 shuts it down" do
       assert {:ok, browser} = CDPEx.launch()
