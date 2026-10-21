@@ -107,13 +107,21 @@ defmodule CDPEx.Chrome do
 
   # Port.open raises (e.g. :eacces, :emfile) rather than returning an error when the
   # spawn itself fails; nothing has started yet, so only the profile dir needs removing.
+  # badarg and system_limit arrive as ArgumentError and SystemLimitError, which have no
+  # `:original`. badarg (e.g. a non-string in `:extra_args`) is a caller bug and keeps
+  # raising; a full port table is a runtime failure like a refused spawn.
   defp open_port(binary, args, user_data_dir, owns?) do
     {:ok,
      Port.open({:spawn_executable, binary}, [:binary, :stderr_to_stdout, :exit_status, args: args])}
   rescue
-    error in ErlangError ->
+    error ->
       if owns?, do: remove_dir(user_data_dir)
-      {:error, {:launch_failed, {:spawn, error.original}}}
+
+      case error do
+        %SystemLimitError{} -> {:error, {:launch_failed, {:spawn, :system_limit}}}
+        %ErlangError{original: reason} -> {:error, {:launch_failed, {:spawn, reason}}}
+        _ -> reraise error, __STACKTRACE__
+      end
   end
 
   defp await_launch(port, user_data_dir, owns?, timeout) do

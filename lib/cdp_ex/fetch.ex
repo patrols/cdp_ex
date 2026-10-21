@@ -196,8 +196,5 @@ defmodule CDPEx.Fetch do
   defp safe_unsubscribe(conn) do
     Connection.unsubscribe(conn, "Fetch.requestPaused")
     Connection.unsubscribe(conn, "Fetch.authRequired")
-    :ok
-  catch
-    :exit, _ -> :ok
   end
 end

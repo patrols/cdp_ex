@@ -90,7 +90,8 @@ defmodule CDPEx.Connection do
   error, `{:error, {:timeout, method}}`, or `{:error, {:ws_closed, reason}}` /
   `{:error, :noproc}` if the connection drops or is already gone. `params` that
   can't be encoded as JSON (e.g. a binary that isn't valid UTF-8) return
-  `{:error, {:invalid_args, reason}}`; the command is not sent.
+  `{:error, {:invalid_args, reason}}`; the command is not sent. A `method` that isn't a
+  string or `params` that aren't a map raise `FunctionClauseError` in the caller.
 
   Pass `opts` with `session_id: sid` to address a flattened CDP session. A call on
   a session that has detached (its target closed, or `Target.detachFromTarget`) or
@@ -101,7 +102,11 @@ defmodule CDPEx.Connection do
   """
   @spec call(GenServer.server(), String.t(), map(), timeout(), keyword()) ::
           {:ok, map()} | {:error, call_error()}
-  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ []) do
+  def call(conn, method, params \\ %{}, timeout \\ @default_call_timeout, opts \\ [])
+
+  # Guarded here, in the caller, because Protocol.encode/4 raising FunctionClauseError
+  # inside the connection would crash it and surface to the caller as :noproc.
+  def call(conn, method, params, timeout, opts) when is_binary(method) and is_map(params) do
     session_id = Keyword.get(opts, :session_id)
     # Outer GenServer deadline is slightly longer than the CDP timeout so our own
     # `{:timeout, method}` reply wins over a raw GenServer.call timeout.

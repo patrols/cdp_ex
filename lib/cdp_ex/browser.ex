@@ -137,14 +137,21 @@ defmodule CDPEx.Browser do
     # The call runs in a throwaway process because the Browser monitors whoever made
     # it: when that process goes down while the handler is still arming, the Browser
     # tears the handler down (#40). A timeout caught in the caller would leave it alive
-    # and the page stuck on :already_authenticated.
+    # and the page stuck on :already_authenticated. The relay is linked to the caller so
+    # the caller's death takes it down too, which is the :DOWN the Browser acts on; it
+    # unlinks before replying so a caller that traps exits gets no stray {:EXIT}.
     caller = self()
     tag = make_ref()
 
     {pid, mon} =
-      spawn_monitor(fn ->
-        send(caller, {tag, call(browser, {:authenticate, page, opts}, 15_000, :authenticate)})
-      end)
+      Process.spawn(
+        fn ->
+          reply = call(browser, {:authenticate, page, opts}, 15_000, :authenticate)
+          Process.unlink(caller)
+          send(caller, {tag, reply})
+        end,
+        [:link, :monitor]
+      )
 
     receive do
       {^tag, reply} ->
@@ -947,9 +954,9 @@ defmodule CDPEx.Browser do
     :ok
   end
 
-  # Stop a page connection, tolerating an already-dead process. `Connection.close/1`
-  # is a `GenServer.stop`, which exits with `:noproc` if the process is gone — that
-  # exit must never propagate out of teardown.
+  # Stop a page connection from teardown, where nothing may raise or exit.
+  # `Connection.close/1` is already `:ok` on a gone process; the rescue and catch are
+  # a backstop so a surprise there can't skip the Chrome.stop/1 that follows.
   defp safe_close(conn) do
     if Process.alive?(conn), do: Connection.close(conn)
     :ok

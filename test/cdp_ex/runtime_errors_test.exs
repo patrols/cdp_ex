@@ -143,6 +143,22 @@ defmodule CDPEx.RuntimeErrorsTest do
     test "Page.authenticate/4 on a dead browser is {:error, :noproc}" do
       assert Page.authenticate(page(self(), dead_pid()), "u", "p") == {:error, :noproc}
     end
+
+    test "Page.authenticate/4 whose caller dies mid-call lets the browser see it go (#40)" do
+      {:ok, browser} = Stub.start(:hold, self())
+      page = page(self(), browser)
+      caller = spawn(fn -> Page.authenticate(page, "u", "p") end)
+
+      assert_receive {:stub_called, {:authenticate, ^page, _opts}, relay}
+      Process.exit(caller, :kill)
+      assert_receive {:stub_caller_down, ^relay}, 1_000
+    end
+
+    test "Page.authenticate/4 leaves no {:EXIT} behind for a caller that traps exits" do
+      Process.flag(:trap_exit, true)
+      assert Page.authenticate(page(self(), dead_pid()), "u", "p") == {:error, :noproc}
+      refute_receive {:EXIT, _, _}, 100
+    end
   end
 
   describe "Connection" do
@@ -155,12 +171,31 @@ defmodule CDPEx.RuntimeErrorsTest do
     end
 
     test "params JSON can't encode are {:invalid_args, _} and the connection survives",
-         %{conn: conn} do
+         %{conn: conn, fake: fake} do
       assert {:error, {:invalid_args, %Jason.EncodeError{}}} =
                Connection.call(conn, "Emulation.setUserAgentOverride", %{"userAgent" => <<0xFF>>})
 
+      assert {:error, {:invalid_args, %Protocol.UndefinedError{}}} =
+               Connection.call(conn, "Runtime.evaluate", %{"x" => self()})
+
       assert Process.alive?(conn)
-      refute_received {:fake_cdp_recv, _, _}
+
+      # Neither was sent nor used an id: the next call is the first frame, with id 1.
+      call = Task.async(fn -> Connection.call(conn, "Page.enable", %{}, 5_000) end)
+      assert_receive {:fake_cdp_recv, ^fake, frame}, 2_000
+      assert %{"method" => "Page.enable", "id" => 1} = frame
+      FakeCDP.send_text(fake, ~s({"id":1,"result":{}}))
+      assert Task.await(call) == {:ok, %{}}
+    end
+
+    test "arguments of the wrong type raise in the caller, not in the connection",
+         %{conn: conn} do
+      # apply/3 so the compiler's type checker doesn't reject the deliberately bad call.
+      for args <- [["Page.enable", [bad: 1]], [:"Page.enable", %{}]] do
+        assert_raise FunctionClauseError, fn -> apply(Connection, :call, [conn | args]) end
+      end
+
+      assert Process.alive?(conn)
     end
 
     test "call/5 and await_event/4 on a connection killed mid-call are {:error, :noproc}",
@@ -277,5 +312,52 @@ defmodule CDPEx.RuntimeErrorsTest.AuthenticateTimeout do
     assert_receive {:stub_called, {:authenticate, ^page, _opts}, caller}
     assert caller != self()
     assert_receive {:stub_caller_down, ^caller}, 1_000
+  end
+end
+
+defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
+  # Not async: the profile dir cdp_ex creates itself goes under System.tmp_dir/0, which
+  # these tests point at a scratch dir through the process-global TMPDIR.
+  @moduledoc false
+  use ExUnit.Case, async: false
+
+  alias CDPEx.Chrome
+
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp} do
+    scratch = Path.join(tmp, "scratch")
+    File.mkdir_p!(scratch)
+    previous = System.get_env("TMPDIR")
+    System.put_env("TMPDIR", scratch)
+
+    on_exit(fn ->
+      if previous, do: System.put_env("TMPDIR", previous), else: System.delete_env("TMPDIR")
+    end)
+
+    %{scratch: scratch}
+  end
+
+  test "a spawn the OS refuses removes the profile dir cdp_ex created",
+       %{tmp_dir: tmp, scratch: scratch} do
+    path = Path.join(tmp, "not_mine")
+    File.write!(path, "#!/bin/sh\n")
+    File.chmod!(path, 0o601)
+
+    # Root ignores the owner execute bit, so there is no :eacces to provoke there.
+    if System.cmd("id", ["-u"]) != {"0\n", 0} do
+      assert Chrome.launch(chrome_binary: path) == {:error, {:launch_failed, {:spawn, :eacces}}}
+      assert File.ls!(scratch) == []
+    end
+  end
+
+  test ":extra_args Port.open rejects raise ArgumentError and remove the profile dir",
+       %{tmp_dir: tmp, scratch: scratch} do
+    path = Path.join(tmp, "chrome")
+    File.write!(path, "#!/bin/sh\nsleep 30\n")
+    File.chmod!(path, 0o755)
+
+    assert_raise ArgumentError, fn -> Chrome.launch(chrome_binary: path, extra_args: [123]) end
+    assert File.ls!(scratch) == []
   end
 end

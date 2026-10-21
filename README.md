@@ -347,7 +347,16 @@ that can't be spawned, a browser, page or pool that is gone or dies mid-call, a 
 that can't be served in time. None of them raises or exits in your process, so
 `with_page/3` needs no `rescue`/`catch :exit` around it. Invalid arguments still
 raise, and so does anything your own `with_page` function raises, throws or exits
-with. Rather than hard-code the reason shapes, classify them to drive retries:
+with.
+
+That covers return values, not links. A browser started with `CDPEx.launch/1` or
+`CDPEx.connect/2` is linked to the process that started it (the link is what reaps
+Chrome when that process dies), so if the browser stops on its own, for example
+because Chrome died, the exit signal still reaches a starter that doesn't trap exits.
+Run a long-lived browser under your own supervisor. `with_page/3` with launch options
+contains this for its throwaway browser.
+
+Rather than hard-code the reason shapes, classify them to drive retries:
 
 ```elixir
 case CDPEx.Page.navigate(page, url) do

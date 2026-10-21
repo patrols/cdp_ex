@@ -469,7 +469,5 @@ defmodule CDPEx.Pool do
   defp safe_stop(browser) do
     if Process.alive?(browser), do: Browser.stop(browser)
     :ok
-  catch
-    :exit, _ -> :ok
   end
 end
