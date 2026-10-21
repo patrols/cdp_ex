@@ -132,6 +132,16 @@ even if the function raises:
   end)
 ```
 
+Per-operation timeouts stack, so a slow page can hold a browser far longer than any
+one of them. `deadline:` bounds the whole call, launch included: when it runs out the
+browser is torn down underneath `fun` (only the page, for a browser pid you pass in)
+and `with_page` returns `{:error, :deadline_exceeded}`. `fun` keeps running in your
+process; see `CDPEx.with_page/3` for what can and can't be interrupted.
+
+```elixir
+CDPEx.with_page([], &CDPEx.Page.html/1, deadline: 20_000)
+```
+
 ### Explicit lifecycle
 
 ```elixir
@@ -402,6 +412,7 @@ offers no way to label a supervisor from outside it.)
 | `{:cdp_fetch_auth, source}` | the `Fetch` auth handler (`:proxy`, `:server`, or `:any`) |
 | `{:cdp_fetch_disable, conn}` | the throwaway task that releases interception after its owner dies |
 | `{:cdp_pool, size}` / `{:cdp_pool_launch, pool}` | `CDPEx.Pool` and its browser-launch tasks |
+| `{:cdp_deadline, ms}` | the watchdog behind `with_page/3`'s `:deadline` |
 
 The page-helper label is the one to reach for when a scrape appears hung: it
 names the target that is still waiting, and the browser label's `os_pid` ties a

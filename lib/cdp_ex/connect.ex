@@ -20,6 +20,10 @@ defmodule CDPEx.Connect do
   @discovery_timeout 5_000
   @max_body_bytes 1_048_576
 
+  @doc false
+  @spec default_discovery_timeout() :: pos_integer()
+  def default_discovery_timeout, do: @discovery_timeout
+
   @spec resolve(String.t(), keyword(), keyword()) ::
           {:ok, String.t()} | {:error, {:connect_discovery_failed, term()}}
   def resolve(endpoint, tls_opts \\ [], opts \\ []) when is_binary(endpoint) do

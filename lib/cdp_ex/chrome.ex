@@ -85,6 +85,10 @@ defmodule CDPEx.Chrome do
     end
   end
 
+  @doc false
+  @spec default_launch_timeout() :: pos_integer()
+  def default_launch_timeout, do: @launch_timeout
+
   defp do_launch(binary, opts) do
     {user_data_dir, owns?} = resolve_user_data_dir(opts)
     File.mkdir_p!(user_data_dir)

@@ -64,6 +64,32 @@ defmodule CDPEx.Telemetry do
     * measurements — `%{system_time: System.system_time()}`
     * metadata — `%{session_id}` (`nil` for a dedicated page connection)
 
+  ### `[:cdp_ex, :with_page, :deadline_exceeded]`
+
+  A `CDPEx.with_page/3` call hit its `:deadline` and is returning
+  `{:error, :deadline_exceeded}` — `fun` hadn't returned by the deadline, or never
+  started (the deadline-capped launch, or `CDPEx.new_page/2`, ran past it). Not a
+  `[:cdp_ex, :error]`: the teardown is deliberate, so it emits no error events of
+  its own.
+
+    * measurements — `%{system_time: System.system_time()}`
+    * metadata — `%{deadline, outcome}`:
+      * `deadline` — the `:deadline` in ms
+      * `outcome` — what the returned error hides:
+        * `:value` — `fun` returned a non-error value after the deadline
+        * `{:error, reason}` — `fun` returned this error tuple, typically the
+          teardown's own (`:noproc`, `{:ws_closed, _}`)
+        * `{:raised, kind, reason}` — `fun` raised, exited or threw (`kind` is
+          `:error`, `:exit` or `:throw`; an `:error` reason is normalized to its
+          exception)
+        * `:not_started` — the deadline ran out before `fun` could start: during the
+          launch, or `CDPEx.new_page/2` returned a page after it
+      * `launch_error` — only when the browser's start (launch or `connect:`) timed
+        out under the deadline cap: the start's own error,
+        `{:debug_url_not_found, stderr_excerpt}`,
+        `{:devtools_file_malformed, contents_excerpt}` or
+        `{:connect_discovery_failed, :discovery_timeout}`
+
   ### `[:cdp_ex, :error]`
 
   A genuine fault — a page's WebSocket closed unexpectedly, the browser connection went
@@ -121,6 +147,16 @@ defmodule CDPEx.Telemetry do
       [:cdp_ex, :network_idle, :watching],
       %{system_time: System.system_time()},
       %{session_id: session_id}
+    )
+  end
+
+  @doc false
+  @spec deadline_exceeded(map()) :: :ok
+  def deadline_exceeded(metadata) do
+    :telemetry.execute(
+      [:cdp_ex, :with_page, :deadline_exceeded],
+      %{system_time: System.system_time()},
+      metadata
     )
   end
 

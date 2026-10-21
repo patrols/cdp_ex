@@ -1258,6 +1258,251 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "with_page :deadline" do
+    # Throwaway-browser deadlines include the launch: leave a cold Chrome on a slow
+    # runner room to start, and fail loudly (not vacuously) if it didn't.
+    @launch_headroom_deadline 6_000
+
+    test "tears down a throwaway browser under a blocked wait and reaps Chrome", %{
+      fixture: fixture
+    } do
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          CDPEx.with_page(
+            [],
+            fn page ->
+              Process.put(:os_pid, chrome_os_pid(page))
+              {:ok, _} = Page.navigate(page, fixture)
+              Page.wait_for_selector(page, "#never-appears", timeout: 60_000)
+            end,
+            deadline: @launch_headroom_deadline
+          )
+        end)
+
+      assert is_integer(Process.get(:os_pid)), "launch didn't complete within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      assert elapsed_us >= @launch_headroom_deadline * 1_000
+      # Teardown reaps Chrome before returning (kill + wait for exit, ~3.5s worst case).
+      assert elapsed_us < (@launch_headroom_deadline + 6_000) * 1_000
+      assert Process.info(self(), :trap_exit) == {:trap_exit, true}
+      assert Process.info(self(), :messages) == {:messages, []}
+      assert Process.info(self(), :monitors) == {:monitors, []}
+      # Last: System.cmd's port leaves its own {:EXIT, port, :normal} in a trapping caller.
+      refute os_alive?(Process.get(:os_pid))
+    end
+
+    test "catches a fun that sleeps past it at its next page call", %{fixture: fixture} do
+      started_at = System.monotonic_time(:millisecond)
+
+      result =
+        CDPEx.with_page(
+          [],
+          fn page ->
+            Process.put(:os_pid, chrome_os_pid(page))
+            elapsed = System.monotonic_time(:millisecond) - started_at
+            Process.sleep(max(@launch_headroom_deadline - elapsed, 0) + 500)
+            Process.put(:navigate, Page.navigate(page, fixture))
+          end,
+          deadline: @launch_headroom_deadline
+        )
+
+      assert is_integer(Process.get(:os_pid)), "launch didn't complete within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      # The verdict alone would hold even if nothing were torn down.
+      assert {:error, _} = Process.get(:navigate)
+      assert Process.info(self(), :messages) == {:messages, []}
+      refute os_alive?(Process.get(:os_pid))
+    end
+
+    test "reaps Chrome when the caller dies during the launch" do
+      before = our_chromes()
+      parent = self()
+
+      caller =
+        spawn(fn ->
+          fun = fn _ ->
+            send(parent, :fun_started)
+            Process.sleep(:infinity)
+          end
+
+          CDPEx.with_page([], fun, deadline: 60_000)
+        end)
+
+      assert eventually(fn -> our_chromes() -- before != [] end, 250),
+             "Chrome never started"
+
+      Process.exit(caller, :kill)
+      refute_received :fun_started, "the kill landed after the launch, not during it"
+
+      # The Browser finishes init, then its link to the dead caller stops it.
+      assert eventually(fn -> our_chromes() -- before == [] end, 1_000),
+             "Chrome outlived its caller: #{inspect(our_chromes() -- before)}"
+    end
+
+    test "returns fun's value untouched when it finishes in time", %{fixture: fixture} do
+      result =
+        CDPEx.with_page(
+          [],
+          fn page ->
+            {:ok, _} = Page.navigate(page, fixture)
+            Page.text(page, "#greeting")
+          end,
+          deadline: 30_000
+        )
+
+      assert result == {:ok, "Hello"}
+      assert Process.info(self(), :messages) == {:messages, []}
+      assert Process.info(self(), :monitors) == {:monitors, []}
+    end
+
+    test "still propagates a raise when it does not fire" do
+      assert_raise RuntimeError, "boom", fn ->
+        CDPEx.with_page([], fn _page -> raise "boom" end, deadline: 30_000)
+      end
+
+      assert Process.info(self(), :messages) == {:messages, []}
+    end
+
+    test "contains the teardown for a caller that does not trap exits" do
+      parent = self()
+
+      {caller, ref} =
+        spawn_monitor(fn ->
+          fun = fn page ->
+            send(parent, :fun_started)
+            Page.wait_for_selector(page, "#never", timeout: 60_000)
+          end
+
+          result = CDPEx.with_page([], fun, deadline: @launch_headroom_deadline)
+          send(parent, {:result, result, Process.info(self(), [:trap_exit, :messages])})
+        end)
+
+      assert_receive :fun_started, @launch_headroom_deadline, "launch didn't complete"
+      assert_receive {:result, {:error, :deadline_exceeded}, info}, 15_000
+      assert info == [trap_exit: false, messages: []]
+      assert_receive {:DOWN, ^ref, :process, ^caller, :normal}, 5_000
+    end
+
+    test "stops a connect: browser under a blocked wait and leaves Chrome running", %{
+      fixture: fixture
+    } do
+      {:ok, a} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(a) end)
+      %{host: host, port: port} = :sys.get_state(a)
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          CDPEx.with_page(
+            [connect: "http://#{host}:#{port}"],
+            fn page ->
+              {:ok, _} = Page.navigate(page, fixture)
+              Process.put(:waiting, true)
+              Page.wait_for_selector(page, "#never-appears", timeout: 60_000)
+            end,
+            deadline: 3_000
+          )
+        end)
+
+      assert Process.get(:waiting), "fun didn't reach its wait within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      assert elapsed_us < 9_000_000
+      assert Process.info(self(), :messages) == {:messages, []}
+      assert {:ok, page} = CDPEx.new_page(a, transport: :session)
+      {:ok, _} = Page.navigate(page, fixture)
+      assert {:ok, "Hello"} = Page.text(page, "#greeting")
+    end
+
+    test "through Pool.with_page/3 the pooled browser serves the next checkout", %{
+      fixture: fixture
+    } do
+      {:ok, pool} = Pool.start_link(size: 1)
+      on_exit(fn -> stop_pool_quietly(pool) end)
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          Pool.with_page(
+            pool,
+            fn page ->
+              Process.put(:browser, page.browser)
+              {:ok, _} = Page.navigate(page, fixture)
+              Page.wait_for_selector(page, "#never-appears", timeout: 60_000)
+            end,
+            deadline: 3_000
+          )
+        end)
+
+      browser = Process.get(:browser)
+      assert is_pid(browser), "fun didn't start within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      assert elapsed_us < 9_000_000
+      assert :sys.get_state(browser).pages == %{}
+
+      assert {^browser, {:ok, "Hello"}} =
+               Pool.with_page(pool, fn page ->
+                 {:ok, _} = Page.navigate(page, fixture)
+                 {page.browser, Page.text(page, "#greeting")}
+               end)
+    end
+
+    test "a real launch cut short by the capped launch_timeout" do
+      {elapsed_us, result} =
+        :timer.tc(fn -> CDPEx.with_page([], fn _ -> :ran end, deadline: 50) end)
+
+      assert result == {:error, :deadline_exceeded}
+      # The failed launch kills Chrome and waits for it before returning.
+      assert elapsed_us < 5_000_000
+      assert Process.info(self(), :messages) == {:messages, []}
+    end
+
+    test "a deadline that passes during a real new_page skips fun and closes the page" do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      # A Browser busy past the deadline, as when it is serving another caller's
+      # new_page: the call is served once it resumes.
+      :ok = :sys.suspend(browser)
+      _resumer = spawn(fn -> Process.sleep(1_500) && :sys.resume(browser) end)
+
+      result = CDPEx.with_page(browser, fn _ -> Process.put(:ran, true) end, deadline: 500)
+
+      assert result == {:error, :deadline_exceeded}
+      assert Process.get(:ran) == nil
+      assert :sys.get_state(browser).pages == %{}
+      assert Process.info(self(), :messages) == {:messages, []}
+    end
+
+    test "closes only the page on a caller-owned browser", %{fixture: fixture} do
+      {:ok, browser} = CDPEx.launch()
+      on_exit(fn -> stop_quietly(browser) end)
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          CDPEx.with_page(
+            browser,
+            fn page ->
+              Process.put(:target_id, page.target_id)
+              {:ok, _} = Page.navigate(page, fixture)
+              Page.wait_for_selector(page, "#never-appears", timeout: 60_000)
+            end,
+            deadline: 3_000
+          )
+        end)
+
+      assert is_binary(Process.get(:target_id)), "fun didn't start within the deadline"
+      assert result == {:error, :deadline_exceeded}
+      # Bounds the teardown, not just the verdict: an uninterrupted wait takes 60s.
+      assert elapsed_us < 9_000_000
+      assert Process.alive?(browser)
+      refute Map.has_key?(:sys.get_state(browser).pages, Process.get(:target_id))
+
+      assert {:ok, "Hello"} =
+               CDPEx.with_page(browser, fn page ->
+                 {:ok, _} = Page.navigate(page, fixture)
+                 Page.text(page, "#greeting")
+               end)
+    end
+  end
+
   describe "pool" do
     test "with_page reuses a warm pooled browser across calls", %{fixture: fixture} do
       {:ok, pool} = Pool.start_link(size: 1)
@@ -1426,6 +1671,27 @@ defmodule CDPEx.IntegrationTest do
   defp clicks(page) do
     {:ok, clicks} = Page.evaluate(page, "window.clicks")
     clicks
+  end
+
+  defp chrome_os_pid(page), do: :sys.get_state(page.browser).chrome.os_pid
+
+  # OS pids of the Chromes this BEAM launched (children of its erl_child_setup), so a
+  # parallel test run on the same machine doesn't count.
+  defp our_chromes do
+    {out, 0} = System.cmd("ps", ["-A", "-o", "pid=,ppid=,command="])
+
+    rows =
+      for line <- String.split(out, "\n", trim: true),
+          [pid, ppid, cmd] <- [String.split(String.trim(line), ~r/\s+/, parts: 3)],
+          do: {pid, ppid, cmd}
+
+    beam = System.pid()
+    setups = for {pid, ^beam, cmd} <- rows, cmd =~ "erl_child_setup", do: pid
+    for {pid, ppid, cmd} <- rows, ppid in setups, cmd =~ "cdp_ex-", do: pid
+  end
+
+  defp os_alive?(os_pid) do
+    match?({_, 0}, System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true))
   end
 
   defp stop_quietly(browser) do
