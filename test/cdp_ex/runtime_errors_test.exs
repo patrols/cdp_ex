@@ -412,14 +412,16 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
   @moduledoc false
   use ExUnit.Case, async: true
 
+  alias CDPEx.Browser
   alias CDPEx.Chrome
   alias CDPEx.Pool
 
   @invalid [
     headless: nil,
     chrome_binary: :chrome,
-    user_data_dir: ~c"/tmp/profile",
+    user_data_dir: :profile,
     launch_timeout: -1,
+    extra_args: [[~c"--a"]],
     extra_args: [123],
     extra_args: nil,
     args: ["--ok", :nope],
@@ -476,6 +478,31 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
            ) == :ok
 
     assert Chrome.validate_opts!(chrome_binary: nil, user_data_dir: nil, args: nil) == :ok
+
+    assert Chrome.validate_opts!(
+             chrome_binary: ~c"/usr/bin/chromium",
+             user_data_dir: ~c"/tmp/profile",
+             extra_args: [~c"--lang=th", "--mute-audio"],
+             args: [~c"--headless"]
+           ) == :ok
+  end
+
+  test "a full :args override leaves the options it replaces unchecked" do
+    assert Chrome.validate_opts!(args: ["--a"], headless: nil, window_size: :x, extra_args: [1]) ==
+             :ok
+
+    assert_raise ArgumentError, ~r/invalid :args/, fn ->
+      Chrome.validate_opts!(args: [:a], headless: nil)
+    end
+
+    for {key, value} <- [chrome_binary: :chrome, user_data_dir: 1, launch_timeout: -1] do
+      assert_raise ArgumentError, fn -> Chrome.validate_opts!([{key, value}, args: ["--a"]]) end
+    end
+  end
+
+  test "connect mode launches nothing, so its launch options are unchecked" do
+    assert {:error, {:ws_connect, _}} =
+             Browser.start_link(connect: "ws://127.0.0.1:1/devtools/browser/x", extra_args: [1])
   end
 
   test "a pool with its own start_fun gets its launch_opts unchecked" do

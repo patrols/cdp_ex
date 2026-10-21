@@ -546,6 +546,20 @@ defmodule CDPEx.WithPageDeadlineTest do
                {:error, {:connect_discovery_failed, :discovery_timeout}}
     end
 
+    test "a nil or :infinity :discovery_timeout is capped at the deadline too" do
+      {:ok, %{url: base}} = FixtureServer.start(json_version: :hang)
+
+      for discovery_timeout <- [nil, :infinity] do
+        launch_opts = [connect: base, discovery_timeout: discovery_timeout]
+
+        {elapsed_us, result} =
+          :timer.tc(fn -> CDPEx.with_page(launch_opts, fn _ -> :ran end, deadline: 100) end)
+
+        assert result == {:error, :deadline_exceeded}
+        assert elapsed_us < 2_000_000
+      end
+    end
+
     test "a start failure the cap didn't cause comes back as itself, even past it" do
       # A DevTools endpoint that rejects the WebSocket upgrade, after the deadline.
       {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])

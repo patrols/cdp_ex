@@ -706,13 +706,12 @@ defmodule CDPEx do
         {:launch_timeout, Chrome.default_launch_timeout()}
       end
 
-    # A non-integer is left for launch validation to reject, as it is without a deadline.
+    # A non-integer :launch_timeout is left for launch validation to reject, as it is
+    # without a deadline. Nothing validates :discovery_timeout, so nil or :infinity is capped.
     case Keyword.get(launch_opts, key, default) do
-      current when is_integer(current) and deadline <= current ->
-        Keyword.put(launch_opts, key, deadline)
-
-      _ ->
-        launch_opts
+      current when is_integer(current) and deadline > current -> launch_opts
+      current when key == :launch_timeout and not is_integer(current) -> launch_opts
+      _ -> Keyword.put(launch_opts, key, deadline)
     end
   end
 

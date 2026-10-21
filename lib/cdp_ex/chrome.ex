@@ -92,16 +92,20 @@ defmodule CDPEx.Chrome do
   @doc false
   @spec validate_opts!(keyword()) :: :ok
   def validate_opts!(opts) do
+    # A full :args override means build_args/2 never reads these, so they launched fine.
+    ignored =
+      if is_list(Keyword.get(opts, :args)), do: [:headless, :window_size, :extra_args], else: []
+
     Enum.each(opts, fn {key, value} ->
-      if !valid_opt?(key, value) do
+      if key not in ignored and !valid_opt?(key, value) do
         raise ArgumentError, "invalid #{inspect(key)} #{inspect(value)} (expected #{expected(key)})"
       end
     end)
   end
 
   defp valid_opt?(:headless, value), do: is_boolean(value)
-  defp valid_opt?(:chrome_binary, value), do: is_nil(value) or is_binary(value)
-  defp valid_opt?(:user_data_dir, value), do: is_nil(value) or is_binary(value)
+  defp valid_opt?(:chrome_binary, value), do: is_nil(value) or string?(value)
+  defp valid_opt?(:user_data_dir, value), do: is_nil(value) or string?(value)
   defp valid_opt?(:launch_timeout, value), do: is_integer(value) and value >= 0
   defp valid_opt?(:extra_args, value), do: strings?(value)
   defp valid_opt?(:args, value), do: is_nil(value) or strings?(value)
@@ -112,7 +116,10 @@ defmodule CDPEx.Chrome do
   defp valid_opt?(:window_size, _value), do: false
   defp valid_opt?(_key, _value), do: true
 
-  defp strings?(value), do: is_list(value) and Enum.all?(value, &is_binary/1)
+  defp strings?(value), do: is_list(value) and Enum.all?(value, &string?/1)
+
+  # File, Path and Port.open/2 all take a charlist as readily as a binary.
+  defp string?(value), do: is_binary(value) or (is_list(value) and :io_lib.char_list(value))
 
   defp expected(:headless), do: "a boolean"
   defp expected(key) when key in [:chrome_binary, :user_data_dir], do: "a string"
