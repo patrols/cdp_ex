@@ -356,7 +356,7 @@ end
 ```
 
 `CDPEx.classify_error/1` buckets a reason as `:transient` (connection dropped or
-couldn't be established, timeout, Chrome died or was slow to start, an internal helper
+couldn't be established, the page closed, timeout, Chrome died or was slow to start, an internal helper
 crashed, or a connection-layer `net::ERR_*` navigation error, so a fresh attempt may
 succeed), `:terminal` (selector miss, JS exception, usage/validation error, which a
 retry won't fix), or `:unknown` (payload-dependent, e.g. an ambiguous `net::ERR_*`
@@ -367,7 +367,8 @@ The reason shapes are documented as
 
 Retries are yours to bound: cap attempts, back off, and on a `:transient` result
 re-establish the resource (open a fresh page/browser) rather than reusing a dead
-handle — a dead page keeps returning `:noproc`.
+handle — a dead page keeps returning `:noproc`, or `{:session_closed, session_id}` for a
+`:session` page (the default on a `connect/2` browser).
 
 ## Telemetry
 

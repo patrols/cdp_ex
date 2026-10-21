@@ -875,6 +875,21 @@ defmodule CDPEx.PageTest do
       assert {:ok, {:messages, []}} = Task.await(task, 1_000)
     end
 
+    test "navigate/3 ends its readiness wait on the detach, as an error", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.navigate(page, "http://example.test/", timeout: 5_000) end)
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => navid, "method" => "Page.navigate"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{navid},"sessionId":"S","result":{"loaderId":"L"}}))
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
     test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
       task =
         Task.async(fn ->
