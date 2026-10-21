@@ -149,7 +149,9 @@ defmodule CDPEx.Connection do
   tell those apart.
 
   Pass `opts` with `session_id: sid` to only match events from that session. Such
-  a waiter returns `{:error, {:session_closed, sid}}` if the session detaches first.
+  a waiter returns `{:error, {:session_closed, sid}}` if the session detaches while
+  it waits; one registered after the detach has nothing to end it and times out
+  (a `call/5` on the session first will tell you it is gone).
 
   Keep `matcher` fast and side-effect-free: it runs inside the connection process
   for each candidate event, so a slow or blocking matcher stalls the socket — and,

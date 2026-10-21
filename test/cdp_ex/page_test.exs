@@ -769,6 +769,7 @@ defmodule CDPEx.PageTest do
     } do
       task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 5_000) end)
       wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+      answer_probe(fake)
 
       send_detach(fake, "OTHER")
       refute Task.yield(task, 100), "another session's detach ended the wait"
@@ -795,6 +796,7 @@ defmodule CDPEx.PageTest do
 
       spawn_link(fn ->
         wait_until_subscribed(conn, caller)
+        answer_pending_probe(conn, fake)
 
         FakeCDP.send_text(
           fake,
@@ -811,6 +813,22 @@ defmodule CDPEx.PageTest do
                      2_000
     end
 
+    test "wait_for_navigation/2 on an already-detached session returns at once", %{
+      page: page,
+      fake: fake
+    } do
+      task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 5_000) end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "sessionId" => "S"}}, 2_000
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"id":#{id},"error":{"code":-32001,"message":"Session with given id not found."}})
+      )
+
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
+    end
+
     test "a detach that loses the race to the milestone leaves no message behind", %{
       page: page,
       conn: conn,
@@ -823,6 +841,7 @@ defmodule CDPEx.PageTest do
         end)
 
       wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+      answer_probe(fake)
       true = :erlang.suspend_process(task.pid)
 
       FakeCDP.send_text(
@@ -2058,6 +2077,32 @@ defmodule CDPEx.PageTest do
     # Wait for the helper to finish its pre-loop drain and start counting, or an
     # event sent next would be discarded as setup noise rather than tracked.
     if conn, do: assert_receive({:idle_watching, _meta}, 2_000)
+  end
+
+  # wait_for_navigation/2's round trip on a :session page, answered as a live session.
+  defp answer_probe(fake) do
+    assert_receive {:fake_cdp_recv, ^fake, %{"id" => id, "method" => "Target.getTargetInfo"}},
+                   2_000
+
+    FakeCDP.send_text(fake, ~s({"id":#{id},"sessionId":"S","result":{}}))
+  end
+
+  # answer_probe/1 for a process that isn't FakeCDP's controller: find the call in
+  # the connection's pending map instead of the controller's mailbox.
+  defp answer_pending_probe(conn, fake, retries \\ 100) do
+    probe =
+      Enum.find(:sys.get_state(conn).pending, fn {_id, entry} ->
+        elem(entry, 1) == "Target.getTargetInfo"
+      end)
+
+    case probe do
+      {id, _entry} ->
+        FakeCDP.send_text(fake, ~s({"id":#{id},"sessionId":"S","result":{}}))
+
+      nil when retries > 0 ->
+        Process.sleep(10)
+        answer_pending_probe(conn, fake, retries - 1)
+    end
   end
 
   # Untagged, as Chrome sends it: on the browser session that attached `sid`.

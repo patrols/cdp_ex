@@ -503,6 +503,18 @@ defmodule CDPEx.Page do
     end
   end
 
+  # With nothing to send, a wait on a session that detached before the watcher
+  # subscribed would only time out: one round trip after subscribing surfaces Chrome's
+  # "session not found" as {:session_closed, sid}. Any other answer means carry on.
+  defp probe_session(%__MODULE__{session_id: nil}, _deadline), do: :ok
+
+  defp probe_session(page, deadline) do
+    case do_call(page, "Target.getTargetInfo", %{}, remaining(deadline)) do
+      {:error, {:session_closed, _sid}} = error -> error
+      _answered -> :ok
+    end
+  end
+
   # A `:session` page's connection is the shared browser socket, which outlives the
   # page, so a wait that ends on the connection's :DOWN also watches for the
   # session's detach — the session-transport equivalent (#121). The helper-run waits
@@ -654,7 +666,7 @@ defmodule CDPEx.Page do
     name = lifecycle_name(wait_until)
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
 
-    case subscribe_then_await(page, name, deadline, fn -> :ok end) do
+    case subscribe_then_await(page, name, deadline, fn -> probe_session(page, deadline) end) do
       :reached -> :ok
       :timeout -> {:error, :timeout}
       {:down, reason} -> {:error, down_reason(reason)}

@@ -258,11 +258,24 @@ defmodule CDPEx.IntegrationTest do
         sid = page.session_id
 
         waiting = Task.async(fn -> :timer.tc(fn -> wait.(page) end) end)
-        Process.sleep(300)
+
+        assert eventually(fn -> detach_watched?(page) end, 100),
+               "the wait never subscribed to its session's detach"
+
         :ok = CDPEx.close_page(browser, page)
 
         assert {elapsed_us, {:error, {:session_closed, ^sid}}} = Task.await(waiting, 5_000)
         assert elapsed_us < 2_000_000
+      end
+
+      # A session already gone when the wait starts: no detach event is coming.
+      {:ok, page} = CDPEx.new_page(browser, transport: :session)
+      :ok = CDPEx.close_page(browser, page)
+
+      for wait <- waits do
+        {elapsed_us, result} = :timer.tc(fn -> wait.(page) end)
+        assert result == {:error, {:session_closed, page.session_id}}
+        assert elapsed_us < 1_000_000
       end
     end
 
@@ -1789,6 +1802,16 @@ defmodule CDPEx.IntegrationTest do
 
   defp os_alive?(os_pid) do
     match?({_, 0}, System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true))
+  end
+
+  # The Browser holds its own detach subscription; count only the wait's.
+  defp detach_watched?(page) do
+    page.conn
+    |> :sys.get_state()
+    |> Map.fetch!(:subscribers)
+    |> Map.get("Target.detachedFromTarget", %{})
+    |> Map.delete(page.browser)
+    |> map_size() > 0
   end
 
   defp stop_quietly(browser) do
