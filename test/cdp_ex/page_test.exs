@@ -768,14 +768,74 @@ defmodule CDPEx.PageTest do
       fake: fake
     } do
       task = Task.async(fn -> Page.wait_for_navigation(page, timeout: 5_000) end)
-      wait_until_subscribed(conn, task.pid, "Target.detachedFromTarget")
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
 
       send_detach(fake, "OTHER")
       refute Task.yield(task, 100), "another session's detach ended the wait"
 
       send_detach(fake, "S")
       assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
-      refute subscribed?(conn, task.pid, "Target.detachedFromTarget")
+      # The watcher is gone, and Connection pruned its subscription.
+      wait_until_subscriber_count_below(conn, "Target.detachedFromTarget", 1)
+    end
+
+    test "wait_for_navigation/2 leaves the caller's own detach subscription and events alone", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      :ok = Connection.subscribe(conn, "Target.detachedFromTarget")
+      send_detach(fake, "QUEUED")
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", _, _} = queued, 2_000
+      send(self(), queued)
+
+      # The wait runs in this process, beside its subscription, so the milestone
+      # that ends it has to come from elsewhere.
+      caller = self()
+
+      spawn_link(fn ->
+        wait_until_subscribed(conn, caller)
+
+        FakeCDP.send_text(
+          fake,
+          ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+        )
+      end)
+
+      assert :ok = Page.wait_for_navigation(page, timeout: 2_000)
+      assert_received ^queued
+
+      send_detach(fake, "LATER")
+
+      assert_receive {:cdp_event, ^conn, "Target.detachedFromTarget", %{"sessionId" => "LATER"}, _},
+                     2_000
+    end
+
+    test "a detach that loses the race to the milestone leaves no message behind", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          result = Page.wait_for_navigation(page, timeout: 5_000)
+          {result, Process.info(self(), :messages)}
+        end)
+
+      wait_until_any_subscribed(conn, "Target.detachedFromTarget")
+      true = :erlang.suspend_process(task.pid)
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Page.lifecycleEvent","sessionId":"S","params":{"name":"networkAlmostIdle"}})
+      )
+
+      send_detach(fake, "S")
+      # The watcher has forwarded the detach and exited once its subscription is pruned.
+      wait_until_subscriber_count_below(conn, "Target.detachedFromTarget", 1)
+      true = :erlang.resume_process(task.pid)
+
+      assert {:ok, {:messages, []}} = Task.await(task, 1_000)
     end
 
     test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
@@ -1895,6 +1955,20 @@ defmodule CDPEx.PageTest do
   # helper in navigate(response: true), #42).
   defp wait_until_any_subscribed(conn, method, retries \\ 100),
     do: wait_until_subscriber_count(conn, method, 1, retries)
+
+  defp wait_until_subscriber_count_below(conn, method, count, retries \\ 100) do
+    cond do
+      map_size(Map.get(:sys.get_state(conn).subscribers, method, %{})) < count ->
+        :ok
+
+      retries == 0 ->
+        flunk("#{method} still has #{count} or more subscribers")
+
+      true ->
+        Process.sleep(10)
+        wait_until_subscriber_count_below(conn, method, count, retries - 1)
+    end
+  end
 
   # Poll until `method` has at least `count` distinct subscriber pids.
   defp wait_until_subscriber_count(conn, method, count, retries \\ 100) do

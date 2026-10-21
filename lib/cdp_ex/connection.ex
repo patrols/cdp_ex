@@ -29,7 +29,8 @@ defmodule CDPEx.Connection do
 
   @upgrade_timeout 15_000
   @default_call_timeout 10_000
-  # crdtp's SESSION_NOT_FOUND: Chrome's answer to a call on a detached session.
+  # crdtp's SESSION_NOT_FOUND dispatch code. Chrome returns it only for a sessionId it
+  # doesn't know, so on a call that carried one it means that session has detached.
   @session_not_found -32_001
 
   defstruct [
@@ -147,14 +148,20 @@ defmodule CDPEx.Connection do
   `{:ws_closed, _}` (the connection itself went away) — callers must be able to
   tell those apart.
 
-  Pass `opts` with `session_id: sid` to only match events from that session.
+  Pass `opts` with `session_id: sid` to only match events from that session. Such
+  a waiter returns `{:error, {:session_closed, sid}}` if the session detaches first.
 
   Keep `matcher` fast and side-effect-free: it runs inside the connection process
   for each candidate event, so a slow or blocking matcher stalls the socket — and,
   on a `:session`-transport connection, every page sharing it.
   """
   @spec await_event(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
-          {:ok, map()} | {:error, {:timeout, :await_event} | :noproc | {:ws_closed, term()}}
+          {:ok, map()}
+          | {:error,
+             {:timeout, :await_event}
+             | :noproc
+             | {:ws_closed, term()}
+             | {:session_closed, String.t()}}
   def await_event(conn, matcher, timeout \\ @default_call_timeout, opts \\ [])
       when is_function(matcher, 1) do
     session_id = Keyword.get(opts, :session_id)
@@ -445,6 +452,7 @@ defmodule CDPEx.Connection do
 
   defp normalize_reply({:ok, result}, _method, _session_id), do: {:ok, result}
 
+  # The only -32001 Chrome sends is "Session with given id not found": the session detached.
   defp normalize_reply({:error, %{"code" => @session_not_found}}, _method, session_id)
        when is_binary(session_id) do
     {:error, {:session_closed, session_id}}

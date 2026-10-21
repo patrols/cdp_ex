@@ -478,35 +478,100 @@ defmodule CDPEx.Page do
   # (wait_for_navigation/2, where the caller — a click, say — triggered the navigation
   # out of band and no loaderId is available; it keeps the pre-existing name-only match).
   defp subscribe_then_await(page, name, deadline, trigger) do
-    methods = watched(page, [@lifecycle_method])
-
-    case subscribe_each(page.conn, methods, remaining(deadline), page.session_id) do
+    case subscribe_each(page.conn, [@lifecycle_method], remaining(deadline), page.session_id) do
       {:error, reason} ->
         {:error, reason}
 
       :ok ->
         drain_events(page.conn, @lifecycle_method)
         ref = Process.monitor(page.conn)
+        watch = watch_detach(page, deadline)
+        await = &await_lifecycle(page, name, {ref, watch_tag(watch)}, deadline, &1)
 
         try do
           case trigger.() do
-            :ok -> await_lifecycle(page, name, ref, deadline, navigation(nil, nil))
-            {:ok, lid, fid} -> await_lifecycle(page, name, ref, deadline, navigation(lid, fid))
+            :ok -> await.(navigation(nil, nil))
+            {:ok, lid, fid} -> await.(navigation(lid, fid))
             {:error, _} = error -> error
           end
         after
+          stop_watch(watch)
           Process.demonitor(ref, [:flush])
-          :ok = unsubscribe_each(page.conn, methods)
-          Enum.each(methods, &drain_events(page.conn, &1))
+          :ok = unsubscribe_each(page.conn, [@lifecycle_method])
+          drain_events(page.conn, @lifecycle_method)
         end
     end
   end
 
   # A `:session` page's connection is the shared browser socket, which outlives the
   # page, so a wait that ends on the connection's :DOWN also watches for the
-  # session's detach — the session-transport equivalent (#121).
+  # session's detach — the session-transport equivalent (#121). The helper-run waits
+  # subscribe to it on their own pid.
   defp watched(%__MODULE__{session_id: nil}, methods), do: methods
   defp watched(_page, methods), do: [@target_detached | methods]
+
+  # The caller-run wait can't subscribe to the detach itself: unsubscribing would drop
+  # a subscription the caller holds on that browser-wide method, and the drain would
+  # eat its queued events. A monitored watcher subscribes instead and sends
+  # `{tag, {:session_closed, sid}}`; Connection prunes its subscription when it exits.
+  # Returns `{pid, monitor, tag}`, or nil for a dedicated page (or a dead connection,
+  # which the wait's own monitor reports).
+  defp watch_detach(%__MODULE__{session_id: nil}, _deadline), do: nil
+
+  defp watch_detach(%__MODULE__{conn: conn, session_id: sid} = page, deadline) do
+    parent = self()
+    tag = make_ref()
+
+    {pid, mon} =
+      spawn_monitor(fn ->
+        ProcessLabel.set({:cdp_page_helper, :detach_watch, page.target_id})
+        parent_mon = Process.monitor(parent)
+
+        case subscribe_each(conn, [@target_detached], remaining(deadline), sid) do
+          :ok -> report_detach(conn, sid, {parent, parent_mon}, tag)
+          {:error, _reason} -> :ok
+        end
+      end)
+
+    receive do
+      {^tag, :watching} -> {pid, mon, tag}
+      {:DOWN, ^mon, :process, ^pid, _reason} -> nil
+    end
+  end
+
+  defp report_detach(conn, sid, {parent, parent_mon}, tag) do
+    send(parent, {tag, :watching})
+
+    receive do
+      {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
+        send(parent, {tag, {:session_closed, sid}})
+
+      {:DOWN, ^parent_mon, :process, ^parent, _reason} ->
+        :ok
+    end
+  end
+
+  # A process's messages arrive before its :DOWN, so once the :DOWN is in, a late
+  # `{tag, _}` can be flushed for good.
+  defp stop_watch(nil), do: :ok
+
+  defp stop_watch({pid, mon, tag}) do
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^mon, :process, ^pid, _reason} -> :ok
+    end
+
+    receive do
+      {^tag, _} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  # A tag no message carries, so a dedicated page's wait never matches the clause.
+  defp watch_tag(nil), do: make_ref()
+  defp watch_tag({_pid, _mon, tag}), do: tag
 
   # Wait for the named lifecycle event — scoped to this page's session (`^sid`) and
   # the `Page.lifecycleEvent` method (the subscription is method-keyed, so other
@@ -515,21 +580,22 @@ defmodule CDPEx.Page do
   # milestone can't end the wait early; a successor document's can); with no loaderId
   # in `nav` it matches on name alone. Returns `:reached` | `{:down, reason}` |
   # `:timeout`; callers map it to their own contract.
-  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, ref, deadline, nav) do
+  defp await_lifecycle(%__MODULE__{conn: conn, session_id: sid} = page, name, mons, deadline, nav) do
+    {ref, tag} = mons
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:cdp_event, ^conn, @lifecycle_method, %{"name" => event} = params, ^sid} ->
         case track_lifecycle(params, nav) do
           {:ours, _nav} when event == name -> :reached
-          {_, nav} -> await_lifecycle(page, name, ref, deadline, nav)
+          {_, nav} -> await_lifecycle(page, name, mons, deadline, nav)
         end
 
-      {:cdp_event, ^conn, @target_detached, %{"sessionId" => ^sid}, _parent} ->
-        {:down, {:session_closed, sid}}
+      {^tag, {:session_closed, _sid} = reason} ->
+        {:down, reason}
 
       {:cdp_event, ^conn, @lifecycle_method, _params, _session_id} ->
-        await_lifecycle(page, name, ref, deadline, nav)
+        await_lifecycle(page, name, mons, deadline, nav)
 
       {:DOWN, ^ref, :process, ^conn, reason} ->
         {:down, reason}
