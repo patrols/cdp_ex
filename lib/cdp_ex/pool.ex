@@ -137,9 +137,8 @@ defmodule CDPEx.Pool do
 
   `opts` are forwarded to `CDPEx.with_page/3` (e.g. `:prevent_alerts`, or
   `:deadline`, which closes the page — not the pooled browser — and whose clock
-  starts after checkout, so it doesn't cover the wait for a free browser; with a
-  connect-mode `:start_fun` pages default to `:session`, where the deadline's
-  session-transport caveat applies); pass `:checkout_timeout` to bound that wait.
+  starts after checkout, so it doesn't cover the wait for a free browser); pass
+  `:checkout_timeout` to bound that wait.
   Returns `fun`'s value, or `{:error, reason}`.
   """
   @spec with_page(GenServer.server(), (CDPEx.Page.t() -> result), keyword()) ::

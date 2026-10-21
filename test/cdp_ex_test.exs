@@ -19,14 +19,15 @@ defmodule CDPExTest do
     # since the producing tags are scattered across {:error, _} / {:stop, _} returns and
     # can't be enumerated mechanically without a brittle source scan.
 
-    # Re-attempt may succeed: dropped connection, dead process, timeout or deadline,
-    # launch trouble, or an internal capture/idle helper crash.
+    # Re-attempt may succeed: dropped connection, dead process or closed session, timeout
+    # or deadline, launch trouble, or an internal capture/idle helper crash.
     @transient [
       {:ws_closed, :closed},
       {:ws_closed, {:ws_decode, :invalid_frame}},
       {:ws_connect, :econnrefused},
       {:ws_upgrade, :upgrade_timeout},
       :noproc,
+      {:session_closed, "4C1F0E5A2B7D9E3F"},
       :timeout,
       {:timeout, "Page.navigate"},
       {:timeout, :await_event},

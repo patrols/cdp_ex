@@ -170,8 +170,9 @@ defmodule CDPEx do
 
     * `:transient` — environmental or timing failures: the connection dropped or
       couldn't be established (`{:ws_closed, _}`, `{:ws_connect, _}`, `{:ws_upgrade, _}`,
-      `:noproc`), a wait or call timed out (`:timeout`, `{:timeout, _}`,
-      `:deadline_exceeded`), Chrome died
+      `:noproc`), a `:session` page's target closed or detached (`{:session_closed, _}`,
+      the session-transport counterpart of a dedicated page's `:noproc`), a wait or call
+      timed out (`:timeout`, `{:timeout, _}`, `:deadline_exceeded`), Chrome died
       or was slow to start (`{:chrome_exited, _, _}`, `{:debug_url_not_found, _}`,
       `{:devtools_file_malformed, _}`), an internal capture/idle helper crashed
       (`{:capture_failed, _}`, `{:idle_wait_failed, _}`), or a navigation hit a
@@ -208,6 +209,7 @@ defmodule CDPEx do
   def classify_error({:ws_connect, _}), do: :transient
   def classify_error({:ws_upgrade, _}), do: :transient
   def classify_error(:noproc), do: :transient
+  def classify_error({:session_closed, _}), do: :transient
   def classify_error(:timeout), do: :transient
   def classify_error({:timeout, _}), do: :transient
   def classify_error(:deadline_exceeded), do: :transient
@@ -465,12 +467,6 @@ defmodule CDPEx do
       a proxy's auth arm), so a deadline that fires mid-way takes effect when it
       returns; `fun` is then not started. A start that returns after the deadline
       skips `new_page/2` altogether.
-    * **`transport: :session` pages on a browser pid** (the default for a
-      `connect/2` browser) — the page is closed, but its calls ride the browser
-      socket, which stays open, and Chrome doesn't answer a call on a closed session:
-      a call in flight, or made after the deadline, waits out its own timeout before
-      `fun` sees the failure. Use the `:dedicated` transport where you can; tracked
-      in [#121](https://github.com/patrols/cdp_ex/issues/121).
     * **Closing the page on a browser pid** goes through the Browser, so on a shared or
       pooled browser it queues behind whatever the Browser is serving (another
       caller's `new_page/2`). If `close_page/2`'s own 15s timeout runs out first, the
