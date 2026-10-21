@@ -5,9 +5,10 @@ defmodule CDPEx.Exits do
 
   require Logger
 
-  # A reason other than "already gone" (or Chrome dying underneath the stop) means
-  # terminate/2 itself failed, which can leave Chrome unreaped; the stop helpers still
-  # return :ok but say so.
+  # A reason other than "already gone" (or Chrome dying underneath the stop) means the
+  # process crashed around the stop or terminate/2 itself failed. The latter can leave
+  # Chrome unreaped, so the stop helpers still return :ok but say so; the warning is not
+  # proof of a leak.
   @spec warn_unclean_stop(String.t(), term()) :: :ok
   def warn_unclean_stop(_who, reason)
       when reason in [:noproc, :normal, :shutdown] or

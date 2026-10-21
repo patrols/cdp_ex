@@ -56,7 +56,6 @@ defmodule CDPEx.Browser do
     # which a launched browser never is in production but a unit fixture can be.
     connected: false,
     pages: %{},
-    # ── Public API ──────────────────────────────────────────────────────────────
     sessions: %{},
     auths: %{},
     intercepts: %{},
@@ -64,6 +63,8 @@ defmodule CDPEx.Browser do
   ]
 
   @type t :: %__MODULE__{}
+
+  # ── Public API ──────────────────────────────────────────────────────────────
 
   @doc """
   Starts a browser. See `CDPEx.Chrome` for launch options.
@@ -160,8 +161,16 @@ defmodule CDPEx.Browser do
         Process.demonitor(mon, [:flush])
         reply
 
-      {:DOWN, ^mon, :process, ^pid, reason} ->
-        exit(reason)
+      {:DOWN, ^mon, :process, ^pid, _reason} ->
+        Process.unlink(pid)
+
+        receive do
+          {:EXIT, ^pid, _} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, :noproc}
     end
   end
 
@@ -196,9 +205,6 @@ defmodule CDPEx.Browser do
   A launched browser also kills its Chrome; a connected one (`CDPEx.connect/2`)
   closes only the pages it opened and leaves the remote Chrome running.
   """
-
-  # ── GenServer callbacks ─────────────────────────────────────────────────────
-
   @spec stop(GenServer.server()) :: :ok
   def stop(browser) do
     GenServer.stop(browser, :normal)
@@ -208,13 +214,17 @@ defmodule CDPEx.Browser do
       Exits.warn_unclean_stop("CDPEx.Browser", reason)
   end
 
-  # A Browser that is gone, or stops before replying, took its pages with it.
+  # A Browser that is gone, or stops before replying, took its pages with it. A socket
+  # close keeps its reason, as Connection.call/5 does.
   defp call(browser, request, timeout, op) do
     GenServer.call(browser, request, timeout)
   catch
     :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, op}}
+    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
     :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
+
+  # ── GenServer callbacks ─────────────────────────────────────────────────────
 
   @impl true
   def init(launch_opts) do

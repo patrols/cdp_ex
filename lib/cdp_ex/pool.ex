@@ -62,8 +62,9 @@ defmodule CDPEx.Pool do
     count: 0
   ]
 
-  # ── Public API ──────────────────────────────────────────────────────────────
   @type t :: %__MODULE__{}
+
+  # ── Public API ──────────────────────────────────────────────────────────────
 
   @doc "Starts a pool. See the moduledoc for options."
   @spec start_link(keyword()) :: GenServer.on_start()
