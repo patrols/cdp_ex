@@ -76,6 +76,7 @@ defmodule CDPEx.Browser do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {gen_opts, launch_opts} = Keyword.split(opts, [:name])
+    if !Keyword.has_key?(launch_opts, :connect), do: Chrome.validate_opts!(launch_opts)
     GenServer.start_link(__MODULE__, launch_opts, gen_opts)
   end
 

@@ -395,7 +395,7 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
     assert File.ls!(scratch) == []
   end
 
-  test ":extra_args Port.open rejects raise ArgumentError and remove the profile dir",
+  test "a non-string in :extra_args raises ArgumentError before a profile dir is made",
        %{tmp_dir: tmp, scratch: scratch} do
     path = Path.join(tmp, "chrome")
     File.write!(path, "#!/bin/sh\nsleep 30\n")
@@ -403,5 +403,71 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
 
     assert_raise ArgumentError, fn -> Chrome.launch(chrome_binary: path, extra_args: [123]) end
     assert File.ls!(scratch) == []
+  end
+end
+
+defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
+  # #125: a bad launch option used to raise inside Browser.init/1, where it exited down
+  # the link and killed a caller that wasn't trapping exits.
+  @moduledoc false
+  use ExUnit.Case, async: true
+
+  alias CDPEx.Chrome
+  alias CDPEx.Pool
+
+  @invalid [
+    headless: nil,
+    chrome_binary: :chrome,
+    user_data_dir: ~c"/tmp/profile",
+    launch_timeout: -1,
+    extra_args: [123],
+    extra_args: nil,
+    args: ["--ok", :nope],
+    window_size: {0, 600},
+    window_size: [800, 600]
+  ]
+
+  for {key, value} <- @invalid do
+    test "launch/1 raises in the caller for #{inspect(key)}: #{inspect(value)}" do
+      links = Process.info(self(), :links)
+
+      assert_raise ArgumentError, ~r/invalid #{inspect(unquote(key))}/, fn ->
+        CDPEx.launch([{unquote(key), unquote(Macro.escape(value))}])
+      end
+
+      assert Process.info(self(), :links) == links
+    end
+  end
+
+  test "with_page/3, Pool.start_link/1 and Chrome.launch/1 raise ArgumentError too" do
+    assert_raise ArgumentError, ~r/invalid :window_size/, fn -> Chrome.launch(window_size: :big) end
+    assert_raise ArgumentError, fn -> CDPEx.with_page([extra_args: [1]], fn _ -> :ok end) end
+
+    assert_raise ArgumentError, fn ->
+      CDPEx.with_page([extra_args: [1]], fn _ -> :ok end, deadline: 1_000)
+    end
+
+    assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [window_size: {800}]) end
+  end
+
+  test "valid and unknown options pass" do
+    assert Chrome.validate_opts!(
+             headless: false,
+             chrome_binary: "/usr/bin/chromium",
+             user_data_dir: "/tmp/profile",
+             launch_timeout: 0,
+             extra_args: [],
+             args: ["--headless"],
+             window_size: {800, 600},
+             proxy: "http://host:8080",
+             owner: self()
+           ) == :ok
+
+    assert Chrome.validate_opts!(chrome_binary: nil, user_data_dir: nil, args: nil) == :ok
+  end
+
+  test "a pool with its own start_fun gets its launch_opts unchecked" do
+    {:ok, pool} = Pool.start_link(launch_opts: [extra_args: [1]], start_fun: fn _ -> :ignore end)
+    assert Pool.stop(pool) == :ok
   end
 end

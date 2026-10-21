@@ -38,6 +38,7 @@ defmodule CDPEx.Pool do
   use GenServer
 
   alias CDPEx.Browser
+  alias CDPEx.Chrome
   alias CDPEx.Exits
   alias CDPEx.ProcessLabel
 
@@ -70,6 +71,14 @@ defmodule CDPEx.Pool do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {gen_opts, pool_opts} = Keyword.split(opts, [:name])
+
+    launch_opts = Keyword.get(pool_opts, :launch_opts, [])
+
+    custom_start? =
+      Keyword.has_key?(pool_opts, :start_fun) or Keyword.has_key?(launch_opts, :connect)
+
+    if !custom_start?, do: Chrome.validate_opts!(launch_opts)
+
     GenServer.start_link(__MODULE__, pool_opts, gen_opts)
   end
 
