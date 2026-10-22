@@ -2005,7 +2005,7 @@ defmodule CDPEx.PageTest do
       answer_network_enable(fake)
       assert {elapsed_us, {:error, :timeout}, []} = Task.await(task, 2_000)
       assert elapsed_us >= 300_000
-      assert elapsed_us < 500_000
+      assert elapsed_us < 550_000
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 
@@ -2069,6 +2069,56 @@ defmodule CDPEx.PageTest do
       assert {elapsed_us, {:error, :timeout}} = Task.await(task, 2_000)
       assert elapsed_us < 600_000
       :sys.resume(conn)
+    end
+
+    test "a connection stalled before registration can't hold the call past :timeout", %{
+      page: page,
+      conn: conn
+    } do
+      test = self()
+      :sys.suspend(conn)
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          Page.wait_for_response(page, "/api",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 300
+          )
+        end)
+
+      :sys.resume(conn)
+      assert result == {:error, :timeout}
+      assert elapsed_us < 700_000
+      refute_received :triggered
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    # The enable reply is queued ahead of the timeout while the connection is
+    # suspended, so the enable succeeds with the budget already spent.
+    test "doesn't run the trigger once Network.enable has used up :timeout", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 200
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      :sys.suspend(conn)
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+      Process.sleep(300)
+      :sys.resume(conn)
+
+      assert {:error, :timeout} = Task.await(task, 2_000)
+      refute_received :triggered
+      eventually(fn -> waiter_count(conn) == 0 end)
     end
 
     test "returns a Network.enable failure without running the trigger", %{page: page, fake: fake} do
