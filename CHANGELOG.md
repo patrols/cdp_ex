@@ -6,8 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- A caller that doesn't trap exits and used to survive a linked process crashing, or an `exit/2` (such as Oban's job timeout), during a throwaway-browser `with_page/3` now terminates with that signal's reason once the call returns or unwinds (see Fixed). The signal still doesn't interrupt `fun`, so pass `:deadline` to bound the call itself (#139, #140).
+
 ### Fixed
-- `with_page/3` with a throwaway browser no longer lets a caller outlive an exit signal that arrived during the call. The call traps exits, so a foreign signal (a linked process crashing, or an `exit/2` such as Oban's job timeout) used to become a message left in the mailbox, and a caller that doesn't trap exits ran on. It is now re-sent as a signal when `with_page` returns or unwinds, so the caller terminates with that reason; a `:normal` one is dropped, and a caller that traps exits still gets the message (#139).
+- `with_page/3` with a throwaway browser no longer lets a caller outlive an exit signal that arrived during the call. The call traps exits, so a foreign signal (a linked process crashing, or an `exit/2` such as Oban's job timeout) used to become a message left in the mailbox, and a caller that doesn't trap exits ran on. It is now re-sent as a signal when `with_page` returns or unwinds, so the caller terminates with that reason; a `:normal` one is dropped, and a caller that traps exits still gets the message (#139). An EXIT from the throwaway browser itself is never re-delivered (#140).
 
 ## [0.13.0] - 2026-10-22
 
