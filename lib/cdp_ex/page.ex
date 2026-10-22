@@ -716,6 +716,9 @@ defmodule CDPEx.Page do
   call timed out under heavy load), the orphaned handler is torn down automatically and
   the page becomes re-authenticatable — a retry succeeds once that teardown completes (it
   may briefly still see `{:error, :already_authenticated}` in the meantime).
+  A timeout can also race the handler finishing arming, leaving the page authenticated
+  after all: a retry then returns `{:error, :already_authenticated}` for good, which
+  means the page is armed.
 
   The bad-credentials loop guard keys on the request id, so a single request that
   must answer **both** a proxy and an origin challenge isn't supported — the second

@@ -70,6 +70,10 @@ defmodule CDPEx.Pool do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {gen_opts, pool_opts} = Keyword.split(opts, [:name])
+
+    if !Keyword.has_key?(pool_opts, :start_fun),
+      do: Browser.validate_launch_opts!(Keyword.get(pool_opts, :launch_opts, []))
+
     GenServer.start_link(__MODULE__, pool_opts, gen_opts)
   end
 

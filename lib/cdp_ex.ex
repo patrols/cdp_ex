@@ -345,6 +345,9 @@ defmodule CDPEx do
   """
   @spec launch(keyword()) :: GenServer.on_start()
   def launch(opts \\ []) do
+    # A caller bug raises here, outside the span, rather than counting as a launch exception.
+    Browser.validate_launch_opts!(opts)
+
     Telemetry.span(:launch, %{}, fn ->
       result = Browser.start_link(opts)
       {result, launch_metadata(result)}
@@ -706,10 +709,12 @@ defmodule CDPEx do
         {:launch_timeout, Chrome.default_launch_timeout()}
       end
 
-    if deadline <= Keyword.get(launch_opts, key, default) do
-      Keyword.put(launch_opts, key, deadline)
-    else
-      launch_opts
+    # A non-integer :launch_timeout is left for launch validation to reject, as it is
+    # without a deadline. Nothing validates :discovery_timeout, so nil or :infinity is capped.
+    case Keyword.get(launch_opts, key, default) do
+      current when is_integer(current) and deadline > current -> launch_opts
+      current when key == :launch_timeout and not is_integer(current) -> launch_opts
+      _ -> Keyword.put(launch_opts, key, deadline)
     end
   end
 

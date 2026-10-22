@@ -76,7 +76,20 @@ defmodule CDPEx.Browser do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {gen_opts, launch_opts} = Keyword.split(opts, [:name])
+    validate_launch_opts!(launch_opts)
     GenServer.start_link(__MODULE__, launch_opts, gen_opts)
+  end
+
+  # init/1 launches Chrome unless :connect is truthy; check the launch options in the
+  # caller first, since a raise inside init/1 exits down the link instead.
+  @doc false
+  @spec validate_launch_opts!(keyword()) :: :ok
+  def validate_launch_opts!(opts) when is_list(opts) do
+    if Keyword.get(opts, :connect), do: :ok, else: Chrome.validate_opts!(opts)
+  end
+
+  def validate_launch_opts!(opts) do
+    raise ArgumentError, "invalid launch options #{inspect(opts)} (expected a keyword list)"
   end
 
   @doc false

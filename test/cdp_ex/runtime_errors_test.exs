@@ -306,8 +306,9 @@ defmodule CDPEx.RuntimeErrorsTest.UncleanStop do
 
   test "stop helpers stay quiet for a gone or clean stop and warn for anything else" do
     for reason <- [:noproc, :normal, :shutdown, {:shutdown, :closed}, {:chrome_exited, 0}] do
-      assert capture_log(fn -> assert Exits.warn_unclean_stop("X", reason) == :ok end) ==
-               ""
+      # Before Elixir 1.16, capture_log/1 also captures other async tests' crash reports.
+      refute capture_log(fn -> assert Exits.warn_unclean_stop("X", reason) == :ok end) =~
+               "[X] stopped with"
     end
 
     log =
@@ -395,7 +396,7 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
     assert File.ls!(scratch) == []
   end
 
-  test ":extra_args Port.open rejects raise ArgumentError and remove the profile dir",
+  test "a non-string in :extra_args raises ArgumentError before a profile dir is made",
        %{tmp_dir: tmp, scratch: scratch} do
     path = Path.join(tmp, "chrome")
     File.write!(path, "#!/bin/sh\nsleep 30\n")
@@ -403,5 +404,138 @@ defmodule CDPEx.RuntimeErrorsTest.OwnedProfileDir do
 
     assert_raise ArgumentError, fn -> Chrome.launch(chrome_binary: path, extra_args: [123]) end
     assert File.ls!(scratch) == []
+  end
+end
+
+defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
+  # #125: a bad launch option used to raise inside Browser.init/1, where it exited down
+  # the link and killed a caller that wasn't trapping exits.
+  @moduledoc false
+  use ExUnit.Case, async: true
+
+  alias CDPEx.Browser
+  alias CDPEx.Chrome
+  alias CDPEx.Pool
+
+  @invalid [
+    headless: nil,
+    chrome_binary: :chrome,
+    user_data_dir: :profile,
+    launch_timeout: -1,
+    extra_args: [[~c"--a"]],
+    extra_args: [123],
+    extra_args: nil,
+    args: ["--ok", :nope],
+    window_size: {0, 600},
+    window_size: [800, 600]
+  ]
+
+  for {key, value} <- @invalid do
+    test "launch/1 raises in the caller for #{inspect(key)}: #{inspect(value)}" do
+      links = Process.info(self(), :links)
+
+      assert_raise ArgumentError, ~r/invalid #{inspect(unquote(key))}/, fn ->
+        CDPEx.launch([{unquote(key), unquote(Macro.escape(value))}])
+      end
+
+      assert Process.info(self(), :links) == links
+    end
+  end
+
+  test "with_page/3, Pool.start_link/1 and Chrome.launch/1 raise ArgumentError too" do
+    assert_raise ArgumentError, ~r/invalid :window_size/, fn -> Chrome.launch(window_size: :big) end
+    assert_raise ArgumentError, fn -> CDPEx.with_page([extra_args: [1]], fn _ -> :ok end) end
+
+    assert_raise ArgumentError, fn ->
+      CDPEx.with_page([extra_args: [1]], fn _ -> :ok end, deadline: 1_000)
+    end
+
+    assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [window_size: {800}]) end
+    assert_raise ArgumentError, ~r/keyword list/, fn -> Pool.start_link(launch_opts: :fast) end
+  end
+
+  test "only a key's first occurrence is checked, as only it is read" do
+    assert Chrome.validate_opts!(headless: true, headless: nil) == :ok
+    assert_raise ArgumentError, fn -> Chrome.validate_opts!(headless: nil, headless: true) end
+  end
+
+  test "a bad option raises before the launch telemetry span starts" do
+    id = "invalid-launch-opts-#{System.unique_integer([:positive])}"
+    events = [[:cdp_ex, :launch, :start], [:cdp_ex, :launch, :exception]]
+    :telemetry.attach_many(id, events, &__MODULE__.forward/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    assert_raise ArgumentError, fn -> CDPEx.launch(headless: nil) end
+    refute_received {:telemetry, _event}
+  end
+
+  # Handlers run in the emitting process, so this ignores launches from concurrent tests.
+  @doc false
+  def forward(event, _measurements, _metadata, test_pid) do
+    if self() == test_pid, do: send(test_pid, {:telemetry, event})
+  end
+
+  test "a nil :connect still launches, so its options are still checked" do
+    assert_raise ArgumentError, fn -> CDPEx.launch(connect: nil, extra_args: [1]) end
+    assert_raise ArgumentError, fn -> Pool.start_link(launch_opts: [connect: nil, headless: 1]) end
+  end
+
+  test "a :deadline doesn't paper over an invalid :launch_timeout" do
+    assert_raise ArgumentError, ~r/invalid :launch_timeout/, fn ->
+      CDPEx.with_page([launch_timeout: "5000"], fn _ -> :ok end, deadline: 1_000)
+    end
+  end
+
+  test "valid and unknown options pass" do
+    assert Chrome.validate_opts!(
+             headless: false,
+             chrome_binary: "/usr/bin/chromium",
+             user_data_dir: "/tmp/profile",
+             launch_timeout: 0,
+             extra_args: [],
+             args: ["--headless"],
+             window_size: {800, 600},
+             proxy: "http://host:8080",
+             owner: self()
+           ) == :ok
+
+    assert Chrome.validate_opts!(chrome_binary: nil, user_data_dir: nil, args: nil) == :ok
+    assert Chrome.validate_opts!(chrome_binary: false) == :ok
+
+    assert Chrome.validate_opts!(
+             chrome_binary: ~c"/usr/bin/chromium",
+             user_data_dir: ~c"/tmp/profile",
+             extra_args: [~c"--lang=th", "--mute-audio"],
+             args: [~c"--headless"]
+           ) == :ok
+  end
+
+  test "a full :args override leaves the options it replaces unchecked" do
+    assert Chrome.validate_opts!(args: ["--a"], headless: nil, window_size: :x, extra_args: [1]) ==
+             :ok
+
+    assert_raise ArgumentError, ~r/invalid :args/, fn ->
+      Chrome.validate_opts!(args: [:a], headless: nil)
+    end
+
+    for {key, value} <- [chrome_binary: :chrome, user_data_dir: 1, launch_timeout: -1] do
+      assert_raise ArgumentError, fn -> Chrome.validate_opts!([{key, value}, args: ["--a"]]) end
+    end
+  end
+
+  test "Browser.start_link/1 checks its own launch options" do
+    assert_raise ArgumentError, ~r/invalid :window_size/, fn ->
+      Browser.start_link(window_size: :x)
+    end
+  end
+
+  test "connect mode launches nothing, so its launch options are unchecked" do
+    assert {:error, {:ws_connect, _}} =
+             Browser.start_link(connect: "ws://127.0.0.1:1/devtools/browser/x", extra_args: [1])
+  end
+
+  test "a pool with its own start_fun gets its launch_opts unchecked" do
+    {:ok, pool} = Pool.start_link(launch_opts: [extra_args: [1]], start_fun: fn _ -> :ignore end)
+    assert Pool.stop(pool) == :ok
   end
 end

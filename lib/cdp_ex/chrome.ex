@@ -24,6 +24,9 @@ defmodule CDPEx.Chrome do
       as soon as Chrome is reachable, so a generous value is free. Raise it for
       slow cold-start hosts (e.g. headless Chrome in a constrained container).
 
+  An invalid value for any of these raises `ArgumentError` in the caller (except the
+  options a full `:args` list replaces, which are never read).
+
   ## Default flags
 
   Defaults are deliberately neutral (stability + headless), not scraping-tuned.
@@ -77,6 +80,7 @@ defmodule CDPEx.Chrome do
 
   @spec launch(keyword()) :: {:ok, handle()} | {:error, launch_error()}
   def launch(opts \\ []) do
+    validate_opts!(opts)
     binary = resolve_binary(opts)
 
     if executable?(binary) do
@@ -85,6 +89,47 @@ defmodule CDPEx.Chrome do
       {:error, {:chrome_not_found, binary}}
     end
   end
+
+  @doc false
+  @spec validate_opts!(keyword()) :: :ok
+  def validate_opts!(opts) do
+    # A full :args override means build_args/2 never reads these, so they launched fine.
+    ignored =
+      if is_list(Keyword.get(opts, :args)), do: [:headless, :window_size, :extra_args], else: []
+
+    # Keyword.get/3 reads only a key's first occurrence, so a shadowed duplicate never mattered.
+    opts
+    |> Enum.uniq_by(&elem(&1, 0))
+    |> Enum.each(fn {key, value} ->
+      if key not in ignored and !valid_opt?(key, value) do
+        raise ArgumentError, "invalid #{inspect(key)} #{inspect(value)} (expected #{expected(key)})"
+      end
+    end)
+  end
+
+  defp valid_opt?(:headless, value), do: is_boolean(value)
+  defp valid_opt?(:chrome_binary, value), do: value in [nil, false] or string?(value)
+  defp valid_opt?(:user_data_dir, value), do: is_nil(value) or string?(value)
+  defp valid_opt?(:launch_timeout, value), do: is_integer(value) and value >= 0
+  defp valid_opt?(:extra_args, value), do: strings?(value)
+  defp valid_opt?(:args, value), do: is_nil(value) or strings?(value)
+
+  defp valid_opt?(:window_size, {width, height}),
+    do: is_integer(width) and width > 0 and is_integer(height) and height > 0
+
+  defp valid_opt?(:window_size, _value), do: false
+  defp valid_opt?(_key, _value), do: true
+
+  defp strings?(value), do: is_list(value) and Enum.all?(value, &string?/1)
+
+  # File, Path and Port.open/2 all take a charlist as readily as a binary.
+  defp string?(value), do: is_binary(value) or (is_list(value) and :io_lib.char_list(value))
+
+  defp expected(:headless), do: "a boolean"
+  defp expected(key) when key in [:chrome_binary, :user_data_dir], do: "a string"
+  defp expected(:launch_timeout), do: "a non-negative integer"
+  defp expected(key) when key in [:extra_args, :args], do: "a list of strings"
+  defp expected(:window_size), do: "{width, height} as positive integers"
 
   @doc false
   @spec default_launch_timeout() :: pos_integer()
@@ -108,8 +153,8 @@ defmodule CDPEx.Chrome do
   # Port.open raises (e.g. :eacces, :emfile) rather than returning an error when the
   # spawn itself fails; nothing has started yet, so only the profile dir needs removing.
   # badarg and system_limit arrive as ArgumentError and SystemLimitError, which have no
-  # `:original`. badarg (e.g. a non-string in `:extra_args`) is a caller bug and keeps
-  # raising; a full port table is a runtime failure like a refused spawn.
+  # `:original`. badarg is a caller bug that validate_opts!/1 normally stops first, so it
+  # keeps raising as a safety net; a full port table is a runtime failure like a refused spawn.
   defp open_port(binary, args, user_data_dir, owns?) do
     {:ok,
      Port.open({:spawn_executable, binary}, [:binary, :stderr_to_stdout, :exit_status, args: args])}
