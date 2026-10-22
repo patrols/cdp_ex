@@ -2149,6 +2149,44 @@ defmodule CDPEx.PageTest do
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 
+    test "an unanswered Network.enable is {:error, :timeout}, with or without :trigger", %{
+      page: page
+    } do
+      test = self()
+      assert Page.wait_for_response(page, "/api", timeout: 150) == {:error, :timeout}
+
+      assert Page.wait_for_response(page, "/api",
+               trigger: fn -> send(test, :triggered) end,
+               timeout: 150
+             ) == {:error, :timeout}
+
+      refute_received :triggered
+    end
+
+    test "a match that arrived during an unanswered Network.enable still wins", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api/data",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 300
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"method" => "Network.enable"}}, 2_000
+      send_response(fake, "R1", "http://x/api/data")
+      sync_dispatch(conn, fake)
+
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task, 2_000)
+      refute_received :triggered
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
     test "returns a Network.enable failure without running the trigger", %{page: page, fake: fake} do
       test = self()
 
@@ -2196,6 +2234,10 @@ defmodule CDPEx.PageTest do
       )
 
       on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "an unanswered Network.enable is {:error, :timeout}", %{page: page} do
+      assert Page.wait_for_network_idle(page, idle_time: 100, timeout: 200) == {:error, :timeout}
     end
 
     test "a dedicated page never subscribes to the detach", %{page: page, conn: conn, fake: fake} do
