@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Under `with_page/3`'s `:deadline`, an invalid `:discovery_timeout` (e.g. `"5000"`) raises `ArgumentError` instead of being replaced by the deadline (#130).
+
+### Fixed
+- `connect/2` with `discovery_timeout: :infinity` raised `ArithmeticError` from inside discovery; `:infinity` now means no limit on the `/json/version` exchange. Any other value that isn't `nil` or an integer in `0..4_294_967_295` (e.g. `"5000"`, `-1`, `1.5`) raises `ArgumentError` in the caller (#130).
+
 ## [0.12.0] - 2026-10-22
 
 ### Changed

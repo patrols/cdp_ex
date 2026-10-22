@@ -69,6 +69,14 @@ defmodule CDPEx.ConnectTest do
              Connect.resolve("http://#{host}:#{port}", [], timeout: 50)
   end
 
+  test "an :infinity timeout discovers without a deadline" do
+    {:ok, %{url: base}} = FixtureServer.start()
+    %URI{host: host, port: port} = URI.parse(base)
+
+    assert Connect.resolve("http://#{host}:#{port}", [], timeout: :infinity) ==
+             {:ok, "ws://#{host}:#{port}/devtools/browser/FAKE-GUID"}
+  end
+
   test "an unreachable endpoint is a discovery failure" do
     assert {:error, {:connect_discovery_failed, _}} = Connect.resolve("http://127.0.0.1:1")
   end
@@ -81,5 +89,38 @@ defmodule CDPEx.ConnectTest do
   test "a host-less ws:// endpoint is a structured failure, not a later ArgumentError" do
     assert {:error, {:connect_discovery_failed, {:invalid_endpoint, _}}} =
              Connect.resolve("ws:///devtools/browser/x")
+  end
+
+  describe "CDPEx.connect/2 :discovery_timeout" do
+    # The fixture's ws:// URL serves a page, not an upgrade, so getting as far as
+    # {:ws_upgrade, _} means discovery itself succeeded.
+    test "nil and :infinity discover the endpoint" do
+      {:ok, %{url: base}} = FixtureServer.start()
+
+      for timeout <- [nil, :infinity] do
+        assert {:error, {:ws_upgrade, _}} = CDPEx.connect(base, discovery_timeout: timeout)
+      end
+    end
+
+    test "an integer bounds discovery" do
+      {:ok, %{url: base}} = FixtureServer.start(json_version: :hang)
+
+      for timeout <- [0, 50] do
+        {elapsed_us, result} =
+          :timer.tc(fn -> CDPEx.connect(base, discovery_timeout: timeout) end)
+
+        assert result == {:error, {:connect_discovery_failed, :discovery_timeout}}
+        assert elapsed_us < 2_000_000
+      end
+    end
+
+    test "any other value raises in the caller" do
+      for timeout <- ["5000", -1, 4_294_967_296, 1.5, :never] do
+        assert_raise ArgumentError,
+                     "invalid :discovery_timeout #{inspect(timeout)} " <>
+                       "(expected integer ms in 0..4_294_967_295 or :infinity)",
+                     fn -> CDPEx.connect("http://127.0.0.1:1", discovery_timeout: timeout) end
+      end
+    end
   end
 end

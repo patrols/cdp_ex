@@ -560,6 +560,18 @@ defmodule CDPEx.WithPageDeadlineTest do
       end
     end
 
+    test "an invalid :discovery_timeout raises instead of being capped" do
+      {:ok, %{url: base}} = FixtureServer.start(json_version: :hang)
+
+      for timeout <- ["5000", 4_294_967_296] do
+        assert_raise ArgumentError, ~r/invalid :discovery_timeout #{inspect(timeout)}/, fn ->
+          CDPEx.with_page([connect: base, discovery_timeout: timeout], fn _ -> :ran end,
+            deadline: 100
+          )
+        end
+      end
+    end
+
     test "a start failure the cap didn't cause comes back as itself, even past it" do
       # A DevTools endpoint that rejects the WebSocket upgrade, after the deadline.
       {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])

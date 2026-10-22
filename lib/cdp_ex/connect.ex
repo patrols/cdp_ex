@@ -41,7 +41,7 @@ defmodule CDPEx.Connect do
 
   defp discover(scheme, host, port, tls_opts, timeout) do
     {transport, ws_scheme} = if scheme == "https", do: {:https, "wss"}, else: {:http, "ws"}
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = deadline(timeout)
 
     with {:ok, conn} <-
            HTTP1.connect(transport, host, port, connect_opts(transport, host, tls_opts, timeout)),
@@ -72,7 +72,8 @@ defmodule CDPEx.Connect do
   # would fail discovery even when the caller explicitly opted out of verification.
   # Mint adds hostname verification itself when verify == :verify_peer; SNI is set to
   # the host (disabled for an IP literal, per Protocol.sni/1). The TCP connect is
-  # bounded by `timeout` too, so a black-hole host can't stall past the deadline.
+  # bounded by `timeout` too, so a black-hole host can't stall past the deadline (Mint
+  # hands it to :gen_tcp/:ssl.connect, which take :infinity as well).
   defp connect_opts(:https, host, tls_opts, timeout),
     do: [
       mode: :passive,
@@ -84,6 +85,9 @@ defmodule CDPEx.Connect do
 
   defp connect_opts(_http, _host, _tls_opts, timeout),
     do: [mode: :passive, transport_opts: [timeout: timeout]]
+
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
 
   # Issue the GET; on a request failure (after a successful connect) close the conn so
   # the socket isn't leaked. The happy path closes it in recv_body, and a failed
@@ -104,7 +108,12 @@ defmodule CDPEx.Connect do
 
   # Drain the response under one absolute deadline (re-checked before each recv, so a
   # dripping endpoint can't extend it) with a body cap. Closes the conn on every exit.
-  defp recv_body(conn, ref, deadline, status \\ nil, acc \\ []) do
+  defp recv_body(conn, ref, deadline, status \\ nil, acc \\ [])
+
+  defp recv_body(conn, ref, :infinity, status, acc),
+    do: drain(conn, ref, :infinity, status, acc, :infinity)
+
+  defp recv_body(conn, ref, deadline, status, acc) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do

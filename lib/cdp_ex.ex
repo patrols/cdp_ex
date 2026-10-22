@@ -386,15 +386,18 @@ defmodule CDPEx do
   Options: `:insecure` (skip `wss://` cert verification, default `false`),
   `:cacertfile` / `:cacerts` (custom CA for `wss://`), `:discovery_timeout` (ceiling
   in ms for the whole `http(s)://` `/json/version` exchange — TCP connect, recv, and
-  body — default `5_000`; raise it for a slow remote endpoint), `:name` (register the
-  process).
+  body — default `5_000`; raise it for a slow remote endpoint, or pass `:infinity` for
+  no limit, which lets an endpoint that never answers hang the caller; `nil` means the
+  default, and any other value that isn't an integer in `0..4_294_967_295` raises
+  `ArgumentError`), `:name` (register the process).
   """
   @spec connect(String.t(), keyword()) :: GenServer.on_start()
   def connect(endpoint, opts \\ []) when is_binary(endpoint) do
+    {disc_timeout, opts} = Keyword.pop(opts, :discovery_timeout)
+    disc_opts = discovery_opts(disc_timeout)
+
     Telemetry.span(:connect, %{}, fn ->
       {tls_opts, opts} = Keyword.split(opts, [:insecure, :cacertfile, :cacerts])
-      {disc_timeout, opts} = Keyword.pop(opts, :discovery_timeout)
-      disc_opts = if disc_timeout, do: [timeout: disc_timeout], else: []
 
       result =
         case Connect.resolve(endpoint, tls_opts, disc_opts) do
@@ -404,6 +407,21 @@ defmodule CDPEx do
 
       {result, launch_metadata(result)}
     end)
+  end
+
+  defp discovery_opts(nil), do: []
+
+  defp discovery_opts(timeout) do
+    if valid_discovery_timeout?(timeout), do: [timeout: timeout], else: invalid_discovery!(timeout)
+  end
+
+  defp valid_discovery_timeout?(timeout),
+    do: timeout == :infinity or (is_integer(timeout) and timeout in 0..4_294_967_295)
+
+  @spec invalid_discovery!(term()) :: no_return()
+  defp invalid_discovery!(other) do
+    raise ArgumentError,
+          "invalid :discovery_timeout #{inspect(other)} (expected integer ms in 0..4_294_967_295 or :infinity)"
   end
 
   @doc """
@@ -488,8 +506,9 @@ defmodule CDPEx do
     * **Launch** — the browser doesn't exist yet, so `:launch_timeout` is capped at the
       deadline when the deadline is smaller or equal (default `15_000`), and so is
       connect-mode's `:discovery_timeout` (default `5_000`, and a `nil` or `:infinity` is
-      capped too). A non-integer `:launch_timeout` is not capped: it raises
-      `ArgumentError` like any invalid launch option. The WebSocket connect and
+      capped too). An invalid value is not capped: a non-integer `:launch_timeout`
+      raises `ArgumentError` like any invalid launch option, and so does a
+      `:discovery_timeout` that `connect/2` rejects. The WebSocket connect and
       upgrade after them (normally milliseconds) keep their own timeouts. A start whose
       capped timeout runs out at or after the deadline returns
       `{:error, :deadline_exceeded}`, with its own error in the telemetry event's
@@ -711,14 +730,23 @@ defmodule CDPEx do
         {:launch_timeout, Chrome.default_launch_timeout()}
       end
 
-    # A non-integer :launch_timeout is left for launch validation to reject, as it is
-    # without a deadline. Nothing validates :discovery_timeout, so nil or :infinity is capped.
-    case Keyword.get(launch_opts, key, default) do
-      current when is_integer(current) and deadline > current -> launch_opts
-      current when key == :launch_timeout and not is_integer(current) -> launch_opts
-      _ -> Keyword.put(launch_opts, key, deadline)
+    # An invalid value is left for launch/1 or connect/2 to reject, as it is without a
+    # deadline. A nil or :infinity :discovery_timeout is valid (default / no limit), so
+    # it is capped; for :launch_timeout both are invalid, and only :discovery_timeout
+    # has an upper bound.
+    current = Keyword.get(launch_opts, key, default)
+
+    if cappable?(key, current) and not (is_integer(current) and deadline > current) do
+      Keyword.put(launch_opts, key, deadline)
+    else
+      launch_opts
     end
   end
+
+  defp cappable?(:launch_timeout, current), do: is_integer(current)
+
+  defp cappable?(:discovery_timeout, current),
+    do: is_nil(current) or valid_discovery_timeout?(current)
 
   # The verdict is the clock's, not the watchdog's: it only fires at or after
   # `deadline_at`, so any teardown `fun` saw implies a late return, and a starved
