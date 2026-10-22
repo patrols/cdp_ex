@@ -2121,6 +2121,33 @@ defmodule CDPEx.PageTest do
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 
+    test "a match that arrived during Network.enable wins even once :timeout is spent", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api/data",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 200
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      :sys.suspend(conn)
+      send_response(fake, "R1", "http://x/api/data")
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
+      Process.sleep(300)
+      :sys.resume(conn)
+
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task, 2_000)
+      refute_received :triggered
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
     test "returns a Network.enable failure without running the trigger", %{page: page, fake: fake} do
       test = self()
 
