@@ -450,6 +450,84 @@ defmodule CDPEx.ConnectionTest do
     assert {:error, {:timeout, :await_event}} = Connection.await_event(conn, fn _ -> false end, 100)
   end
 
+  describe "await_event_async/4" do
+    test "registers before returning and delivers the outcome as a message", %{
+      conn: conn,
+      fake: fake
+    } do
+      {:ok, ref} = Connection.await_event_async(conn, &(&1["name"] == "x"), 2_000)
+      assert waiter_count(conn) == 1
+
+      FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"y"}}))
+      FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"x"}}))
+
+      assert_receive {:cdp_await, ^ref, {:ok, %{"name" => "x"}}}, 2_000
+      assert waiter_count(conn) == 0
+    end
+
+    test "delivers a timeout as the outcome", %{conn: conn} do
+      {:ok, ref} = Connection.await_event_async(conn, fn _ -> false end, 50)
+      assert_receive {:cdp_await, ^ref, {:error, {:timeout, :await_event}}}, 2_000
+    end
+
+    test "fails a session waiter on that session's detach", %{conn: conn, fake: fake} do
+      {:ok, ref} = Connection.await_event_async(conn, fn _ -> false end, 5_000, session_id: "S")
+
+      FakeCDP.send_text(
+        fake,
+        ~s({"method":"Target.detachedFromTarget","params":{"sessionId":"S","targetId":"T"}})
+      )
+
+      assert_receive {:cdp_await, ^ref, {:error, {:session_closed, "S"}}}, 2_000
+    end
+
+    test "a closed connection sends a {:ws_closed, _} outcome", %{conn: conn} do
+      {:ok, ref} = Connection.await_event_async(conn, fn _ -> false end, 5_000)
+      Connection.close(conn)
+      assert_receive {:cdp_await, ^ref, {:error, {:ws_closed, _}}}, 2_000
+    end
+
+    test "returns {:error, :noproc} for a gone connection", %{conn: conn} do
+      Connection.close(conn)
+      assert {:error, :noproc} = Connection.await_event_async(conn, fn _ -> true end, 100)
+    end
+
+    test "cancel_await/2 drops a pending waiter", %{conn: conn, fake: fake} do
+      {:ok, ref} = Connection.await_event_async(conn, &(&1["name"] == "x"), 5_000)
+      :ok = Connection.cancel_await(conn, ref)
+      eventually(fn -> waiter_count(conn) == 0 end)
+
+      FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"x"}}))
+      refute_receive {:cdp_await, ^ref, _}, 100
+    end
+
+    test "cancel_await/2 drops an outcome the connection sends after it", %{
+      conn: conn,
+      fake: fake
+    } do
+      {:ok, ref} = Connection.await_event_async(conn, fn _ -> true end, 5_000)
+
+      # The match is queued ahead of the cancel, so it is sent after the flush.
+      :ok = :sys.suspend(conn)
+      FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"x"}}))
+      eventually(fn -> elem(Process.info(conn, :message_queue_len), 1) > 0 end)
+      :ok = Connection.cancel_await(conn, ref)
+      :ok = :sys.resume(conn)
+
+      eventually(fn -> waiter_count(conn) == 0 end)
+      refute_receive {:cdp_await, ^ref, _}, 100
+    end
+
+    test "cancel_await/2 flushes an outcome that already arrived", %{conn: conn, fake: fake} do
+      {:ok, ref} = Connection.await_event_async(conn, fn _ -> true end, 5_000)
+      FakeCDP.send_text(fake, ~s({"method":"Page.lifecycleEvent","params":{"name":"x"}}))
+      eventually(fn -> waiter_count(conn) == 0 end)
+
+      :ok = Connection.cancel_await(conn, ref)
+      refute_received {:cdp_await, ^ref, _}
+    end
+  end
+
   test "answering a server ping leaves the connection usable", %{conn: conn, fake: fake} do
     FakeCDP.send_ping(fake, "ping-payload")
 

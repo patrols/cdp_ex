@@ -1536,7 +1536,11 @@ defmodule CDPEx.Page do
 
   Useful after a `click/3` (or other in-page action) that triggers an XHR/`fetch`:
   wait for the specific response, then read it with `response_body/3` (the returned
-  params carry the `"requestId"`).
+  params carry the `"requestId"`). Pass the action as `:trigger`:
+
+      Page.wait_for_response(page, "/api/search",
+        trigger: fn -> Page.click(page, "#search") end
+      )
 
   `matcher` selects on the response URL and may be:
 
@@ -1552,26 +1556,57 @@ defmodule CDPEx.Page do
   under `params["response"]["status"]`, request id under `params["requestId"]`) — or
   `{:error, :timeout}` if nothing matched in time, or `{:error, reason}` if the
   connection drops (or, on a `:session` page, `{:error, {:session_closed, sid}}` if
-  the session detaches while it waits; a detach that lands between its
-  `Network.enable` and the wait starting is missed, and the call runs to
-  `:timeout`). Lazily enables the `Network` domain. Only responses observed
-  **after** this call are considered, so call it before triggering the request.
+  the session detaches). Lazily enables the `Network` domain. Only responses
+  observed **after** this call are considered.
+
+  ## Triggering the request
+
+  With `:trigger`, the wait is registered (and `Network` enabled) first, then
+  `trigger` runs in the calling process, then the call waits for the match, so a
+  response that arrives while `trigger` is still running, however fast, is caught.
+  A `{:error, _}` from `trigger` is returned as is, without waiting; any other
+  return value starts the wait. A raise, throw or exit in `trigger` propagates, and
+  the wait is cancelled first. `trigger`'s run time counts against `:timeout`.
+
+  Without `:trigger` the call blocks from the start, so the request has to come
+  from another process (e.g. the wait in a `Task`, then the click). That races: a
+  response that lands before the wait is registered, including during its
+  `Network.enable`, is missed and the call runs to `:timeout`, and on a `:session`
+  page so is a detach in that window. Prefer `:trigger`.
 
   > #### Returns `{:ok, params}`, not a bare `:ok` {: .info}
   >
   > Unlike `wait_for_navigation/2` / `wait_for_selector/3` / `wait_for_network_idle/2`
   > (which return `:ok`), this returns the matched event — match on `{:ok, params}`.
 
-  Options: `:timeout` — ms (default 30_000).
+  Options:
+    * `:trigger` — a 0-arity function that starts the request (see above)
+    * `:timeout` — overall ceiling in ms, `trigger` included (default 30_000)
   """
   @spec wait_for_response(t(), (String.t() -> boolean()) | Regex.t() | String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def wait_for_response(%__MODULE__{} = page, matcher, opts \\ []) do
+    trigger = response_trigger(Keyword.get(opts, :trigger))
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, @navigate_timeout)
     predicate = response_url_predicate(matcher)
 
-    # One deadline for the whole call so :timeout is a true overall ceiling: the lazy
-    # Network.enable and the await draw from the same budget.
+    if trigger do
+      await_triggered_response(page, predicate, trigger, deadline)
+    else
+      await_response(page, predicate, deadline)
+    end
+  end
+
+  defp response_trigger(nil), do: nil
+  defp response_trigger(fun) when is_function(fun, 0), do: fun
+
+  defp response_trigger(other) do
+    raise ArgumentError, "invalid :trigger #{inspect(other)} (expected a 0-arity function)"
+  end
+
+  # One deadline for the whole call so :timeout is a true overall ceiling: the lazy
+  # Network.enable and the await draw from the same budget.
+  defp await_response(page, predicate, deadline) do
     with :ok <- ensure_network(page, remaining(deadline)) do
       case Connection.await_event(page.conn, predicate, remaining(deadline),
              session_id: page.session_id
@@ -1582,6 +1617,49 @@ defmodule CDPEx.Page do
       end
     end
   end
+
+  # The waiter is registered before Network.enable, not after, so a detach during
+  # the enable fails it too: Connection fails a session's waiters on its detach.
+  defp await_triggered_response(page, predicate, trigger, deadline) do
+    case Connection.await_event_async(page.conn, predicate, remaining(deadline),
+           session_id: page.session_id
+         ) do
+      {:ok, ref} ->
+        mon = Process.monitor(page.conn)
+
+        try do
+          with :ok <- ensure_network(page, remaining(deadline)),
+               :ok <- run_trigger(trigger) do
+            receive_response(ref, mon, deadline)
+          end
+        after
+          Process.demonitor(mon, [:flush])
+          Connection.cancel_await(page.conn, ref)
+        end
+
+      {:error, reason} ->
+        await_result({:error, reason})
+    end
+  end
+
+  defp run_trigger(trigger) do
+    case trigger.() do
+      {:error, _} = error -> error
+      _ -> :ok
+    end
+  end
+
+  defp receive_response(ref, mon, deadline) do
+    receive do
+      {:cdp_await, ^ref, result} -> await_result(result)
+      {:DOWN, ^mon, :process, _conn, reason} -> {:error, down_reason(reason)}
+    after
+      remaining(deadline) -> {:error, :timeout}
+    end
+  end
+
+  defp await_result({:error, {:timeout, :await_event}}), do: {:error, :timeout}
+  defp await_result(result), do: result
 
   # Build a params-predicate from the public URL matcher (function / Regex / substring),
   # always guarding that the event actually carries a response URL — so it fires only on
