@@ -471,7 +471,9 @@ defmodule CDPEx do
   timeout) takes effect when `with_page` returns or unwinds. A caller that doesn't
   trap exits is then terminated with that signal's reason (a `:normal` one is
   dropped); a caller that traps exits finds it in its mailbox, as usual. Until the
-  call ends, though, such a signal doesn't interrupt `fun`.
+  call ends, though, such a signal doesn't interrupt `fun`: it only takes effect once
+  `with_page` returns or unwinds. A caller with a time budget (e.g. an Oban worker's
+  `timeout/1`) should also pass `:deadline`, which bounds the call itself.
   On slow cold-start hosts, raise `:launch_timeout` (a ceiling, not a fixed wait).
 
   `opts` go to `new_page/2`, except `:deadline`.
@@ -684,27 +686,37 @@ defmodule CDPEx do
     # link so caller death reaps the browser.
     prev_trap = Process.flag(:trap_exit, true)
 
-    try do
-      case start.() do
-        {:ok, browser} ->
-          try do
-            try do
-              body.(browser)
-            after
-              safe(fn -> stop(browser) end)
-            end
-          after
-            # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
-            # our own stop/1) so it can't surface to the caller once we restore the
-            # prior trap_exit flag. Foreign EXITs are handled by restore_trap/1.
-            drain_exit(browser)
-          end
-
-        {:error, reason} ->
-          on_start_error.(reason)
+    started =
+      try do
+        start.()
+      catch
+        kind, reason ->
+          restore_trap(prev_trap, nil)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
-    after
-      restore_trap(prev_trap)
+
+    case started do
+      {:ok, browser} ->
+        try do
+          try do
+            body.(browser)
+          after
+            safe(fn -> stop(browser) end)
+          end
+        after
+          # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
+          # our own stop/1) so it can't surface to the caller once we restore the
+          # prior trap_exit flag. Foreign EXITs are handled by restore_trap/2.
+          drain_exit(browser)
+          restore_trap(prev_trap, browser)
+        end
+
+      {:error, reason} ->
+        try do
+          on_start_error.(reason)
+        after
+          restore_trap(prev_trap, nil)
+        end
     end
   end
 
@@ -713,16 +725,20 @@ defmodule CDPEx do
   # by a foreign non-:normal exit signal (e.g. Oban's job timeout, sent with
   # exit/2): re-send it to self as a signal, so the caller dies with that reason
   # even mid-raise. Its :normal ones would have been ignored, so they are dropped.
-  defp restore_trap(true), do: Process.flag(:trap_exit, true)
+  # `browser` (nil when the start failed, which unlinks first) is never foreign: a
+  # crash of it was already returned as a value, so an EXIT from it that
+  # drain_exit/1's `after 0` missed is dropped too, whatever ERTS signal order did.
+  defp restore_trap(true, _browser), do: Process.flag(:trap_exit, true)
 
-  defp restore_trap(false) do
+  defp restore_trap(false, browser) do
     Process.flag(:trap_exit, false)
-    redeliver_exits()
+    redeliver_exits(browser)
   end
 
-  defp redeliver_exits do
+  defp redeliver_exits(browser) do
     receive do
-      {:EXIT, from, :normal} when is_pid(from) or is_port(from) -> redeliver_exits()
+      {:EXIT, ^browser, _} -> redeliver_exits(browser)
+      {:EXIT, from, :normal} when is_pid(from) or is_port(from) -> redeliver_exits(browser)
       {:EXIT, from, reason} when is_pid(from) or is_port(from) -> Process.exit(self(), reason)
     after
       0 -> :ok
