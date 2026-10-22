@@ -411,12 +411,15 @@ defmodule CDPEx do
 
   defp discovery_opts(nil), do: []
 
-  defp discovery_opts(timeout)
-       when timeout == :infinity or (is_integer(timeout) and timeout in 0..4_294_967_295) do
-    [timeout: timeout]
+  defp discovery_opts(timeout) do
+    if valid_discovery_timeout?(timeout), do: [timeout: timeout], else: invalid_discovery!(timeout)
   end
 
-  defp discovery_opts(other) do
+  defp valid_discovery_timeout?(timeout),
+    do: timeout == :infinity or (is_integer(timeout) and timeout in 0..4_294_967_295)
+
+  @spec invalid_discovery!(term()) :: no_return()
+  defp invalid_discovery!(other) do
     raise ArgumentError,
           "invalid :discovery_timeout #{inspect(other)} (expected integer ms in 0..4_294_967_295 or :infinity)"
   end
@@ -742,9 +745,8 @@ defmodule CDPEx do
 
   defp cappable?(:launch_timeout, current), do: is_integer(current)
 
-  defp cappable?(:discovery_timeout, current) do
-    current in [nil, :infinity] or (is_integer(current) and current <= 4_294_967_295)
-  end
+  defp cappable?(:discovery_timeout, current),
+    do: is_nil(current) or valid_discovery_timeout?(current)
 
   # The verdict is the clock's, not the watchdog's: it only fires at or after
   # `deadline_at`, so any teardown `fun` saw implies a late return, and a starved
