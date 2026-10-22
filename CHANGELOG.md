@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-22
+
 ### Changed
 - A caller that doesn't trap exits and used to survive a linked process crashing, or an `exit/2` (such as Oban's job timeout), during a throwaway-browser `with_page/3` now terminates with that signal's reason once the call returns or unwinds (see Fixed). The signal still doesn't interrupt `fun`, so pass `:deadline` to bound the call itself (#139, #140).
 
@@ -274,7 +276,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/patrols/cdp_ex/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/patrols/cdp_ex/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/patrols/cdp_ex/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/patrols/cdp_ex/compare/v0.10.0...v0.11.0
