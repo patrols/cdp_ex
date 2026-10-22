@@ -2137,8 +2137,9 @@ defmodule CDPEx.PageTest do
         end)
 
       assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
-      :sys.suspend(conn)
       send_response(fake, "R1", "http://x/api/data")
+      sync_dispatch(conn, fake)
+      :sys.suspend(conn)
       FakeCDP.send_text(fake, ~s({"id":#{nid},"result":{}}))
       Process.sleep(300)
       :sys.resume(conn)
