@@ -243,6 +243,8 @@ defmodule CDPEx.RuntimeErrorsTest do
       :ok
     end
 
+    # Killing the pool takes its Task.Supervisor down with it, which logs a crash report.
+    @tag capture_log: true
     test "checkout/2 on a pool that crashes mid-wait is {:error, :noproc}" do
       {:ok, pool} =
         Pool.start_link(size: 1, start_fun: fn _ -> Agent.start_link(fn -> :ok end) end)
