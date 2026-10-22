@@ -306,8 +306,9 @@ defmodule CDPEx.RuntimeErrorsTest.UncleanStop do
 
   test "stop helpers stay quiet for a gone or clean stop and warn for anything else" do
     for reason <- [:noproc, :normal, :shutdown, {:shutdown, :closed}, {:chrome_exited, 0}] do
-      assert capture_log(fn -> assert Exits.warn_unclean_stop("X", reason) == :ok end) ==
-               ""
+      # Before Elixir 1.16, capture_log/1 also captures other async tests' crash reports.
+      refute capture_log(fn -> assert Exits.warn_unclean_stop("X", reason) == :ok end) =~
+               "[X] stopped with"
     end
 
     log =
