@@ -465,11 +465,13 @@ defmodule CDPEx do
   fails to start, or crashes during the call (e.g. its connection drops),
   `with_page` returns `{:error, reason}` instead of letting the exit propagate to
   the caller. To do that it briefly traps exits in the calling process for the
-  duration of the call, launch included.
-  Only the browser's own `{:EXIT, _, _}` is drained — a *foreign* process linked
-  to the caller that exits during this window has its exit delivered as a message
-  left in the caller's mailbox, so a caller that links other processes and relies
-  on un-trapped exit propagation should pass a pre-launched browser pid instead.
+  duration of the call, launch included, and the trap is invisible afterwards: the
+  browser's own `{:EXIT, _, _}` is drained, and a *foreign* exit signal that arrives
+  during the call (a linked process crashing, or an `exit/2` such as Oban's job
+  timeout) takes effect when `with_page` returns or unwinds. A caller that doesn't
+  trap exits is then terminated with that signal's reason (a `:normal` one is
+  dropped); a caller that traps exits finds it in its mailbox, as usual. Until the
+  call ends, though, such a signal doesn't interrupt `fun`.
   On slow cold-start hosts, raise `:launch_timeout` (a ceiling, not a fixed wait).
 
   `opts` go to `new_page/2`, except `:deadline`.
@@ -694,7 +696,7 @@ defmodule CDPEx do
           after
             # Drain the browser's queued {:EXIT, browser, _} (from its crash, or from
             # our own stop/1) so it can't surface to the caller once we restore the
-            # prior trap_exit flag. A foreign linked process's EXIT is left as-is.
+            # prior trap_exit flag. Foreign EXITs are handled by restore_trap/1.
             drain_exit(browser)
           end
 
@@ -702,7 +704,28 @@ defmodule CDPEx do
           on_start_error.(reason)
       end
     after
-      Process.flag(:trap_exit, prev_trap)
+      restore_trap(prev_trap)
+    end
+  end
+
+  # Undo the trap so the caller can't tell it happened. A trapping caller expects
+  # EXIT messages, so they stay queued. A non-trapping one would have been killed
+  # by a foreign non-:normal exit signal (e.g. Oban's job timeout, sent with
+  # exit/2): re-send it to self as a signal, so the caller dies with that reason
+  # even mid-raise. Its :normal ones would have been ignored, so they are dropped.
+  defp restore_trap(true), do: Process.flag(:trap_exit, true)
+
+  defp restore_trap(false) do
+    Process.flag(:trap_exit, false)
+    redeliver_exits()
+  end
+
+  defp redeliver_exits do
+    receive do
+      {:EXIT, from, :normal} when is_pid(from) or is_port(from) -> redeliver_exits()
+      {:EXIT, from, reason} when is_pid(from) or is_port(from) -> Process.exit(self(), reason)
+    after
+      0 -> :ok
     end
   end
 

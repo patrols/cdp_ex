@@ -1697,6 +1697,51 @@ defmodule CDPEx.IntegrationTest do
     end
   end
 
+  describe "with_page exit trapping" do
+    # The timer is armed inside fun, so it fires while fun runs whatever the launch took.
+    test "a foreign exit signal terminates a non-trapping caller once Chrome is reaped" do
+      parent = self()
+
+      for fun_ending <- [:returns, :raises] do
+        {caller, ref} =
+          spawn_monitor(fn ->
+            CDPEx.with_page([], fn page ->
+              send(parent, {:os_pid, chrome_os_pid(page)})
+              {:ok, _} = :timer.exit_after(200, :job_timeout)
+              Process.sleep(1_000)
+              if fun_ending == :raises, do: raise("boom")
+            end)
+
+            send(parent, :survived)
+          end)
+
+        assert_receive {:os_pid, os_pid}, 30_000
+        assert_receive {:DOWN, ^ref, :process, ^caller, :job_timeout}, 15_000
+        refute_received :survived
+        refute os_alive?(os_pid)
+      end
+    end
+
+    test "a caller that traps exits keeps the EXIT message" do
+      {caller, ref} =
+        spawn_monitor(fn ->
+          Process.flag(:trap_exit, true)
+
+          result =
+            CDPEx.with_page([], fn _page ->
+              {:ok, _} = :timer.exit_after(200, :job_timeout)
+              Process.sleep(1_000)
+              :ran
+            end)
+
+          exit({:done, result, Process.info(self(), :messages)})
+        end)
+
+      assert_receive {:DOWN, ^ref, :process, ^caller, {:done, :ran, messages}}, 30_000
+      assert {:messages, [{:EXIT, _timer, :job_timeout}]} = messages
+    end
+  end
+
   describe "pool" do
     test "with_page reuses a warm pooled browser across calls", %{fixture: fixture} do
       {:ok, pool} = Pool.start_link(size: 1)
