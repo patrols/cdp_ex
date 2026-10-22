@@ -1,7 +1,7 @@
 defmodule CDPEx.MixProject do
   use Mix.Project
 
-  @version "0.11.0"
+  @version "0.11.1"
   @source_url "https://github.com/patrols/cdp_ex"
 
   def project do

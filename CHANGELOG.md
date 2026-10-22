@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-22
+
 ### Fixed
 - Runtime failures now come back as `{:error, reason}` instead of a raise or an exit in the caller, so `with_page/3` no longer needs a `rescue`/`catch :exit` around it. Invalid arguments still raise, and a raise, throw or exit from `with_page/3`'s own `fun` still propagates. The guarantee covers return values, not links: a browser started with `launch/1` or `connect/2` stays linked to the process that started it, so a browser that stops on its own (Chrome died) still sends that process an exit signal (#124).
   - A failed `CDPEx.launch/1`, `connect/2` or `Connection.start_link/2` returns its error to a caller that doesn't trap exits instead of killing it, and on OTP 24/25 no longer leaves a stray `{:EXIT, pid, reason}` in the caller's mailbox (it did after #120).
@@ -15,7 +17,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `Connection.subscribe/4` returns `{:error, :noproc}`, `{:error, {:timeout, :subscribe}}` or `{:error, {:ws_closed, reason}}` instead of exiting, so a `:session` page's `observe_network/2` and similar waits on a closed socket now return `{:error, {:ws_closed, reason}}` where they returned `{:error, :noproc}` (still `:transient`); `unsubscribe/2` is `:ok` on a gone connection; `call/5`, `await_event/4` and `Pool.checkout/2` return `{:error, :noproc}` for a process killed mid-call.
   - `CDPEx.stop/1`, `Pool.stop/1` and `Connection.close/1` are `:ok` on a process that is already gone, and log a warning when it stopped with anything other than a clean or already-gone reason.
   - The relay behind `Page.authenticate/4` is labelled `{:cdp_authenticate, target_id}`.
-- An invalid launch option (e.g. `extra_args: [123]`, `window_size: {0, 600}`, `headless: nil`) raises `ArgumentError` in the caller of `CDPEx.launch/1`, `with_page/3`, `Browser.start_link/1`, `Pool.start_link/1` and `Chrome.launch/1`. It used to raise inside the browser process during startup, which killed a caller that doesn't trap exits; `with_page/3` returned it as `{:error, {%ArgumentError{}, stacktrace}}` instead, so match on the raise now (#127).
+- An invalid launch option (e.g. `extra_args: [123]`, `window_size: {0, 600}`, `headless: nil`) raises `ArgumentError` in the caller of `CDPEx.launch/1`, `with_page/3`, `Browser.start_link/1`, `Pool.start_link/1` and `Chrome.launch/1`. It used to raise inside the browser process during startup, which killed a caller that doesn't trap exits; `with_page/3` returned it as `{:error, {%ArgumentError{}, stacktrace}}` instead, so match on the raise now. Under a `:deadline`, `launch_timeout: nil` or `:infinity` used to be replaced by the deadline and now raises too (#127).
 - A `transport: :session` page whose target closed or detached no longer leaves its calls and waits running to their own timeouts. Calls fail with the new `{:error, {:session_closed, session_id}}` (classified `:transient`, like a dedicated page's `:noproc`): one in flight when the session detaches fails at once, and a later one fails on Chrome's "session not found" reply, which used to be dropped because it carries no `sessionId`. `navigate/3`, `wait_for_navigation/2`, `wait_for_network_idle/2`, `wait_for_response/3` and session-scoped `Connection.await_event/4` waiters end with the same error on the detach, and `wait_for_selector/3`, `wait_for_function/3` and `click/3 :wait` stop retrying. `with_page/3`'s `:deadline` (and `CDPEx.Pool.with_page/3`'s) now returns near the deadline on session pages too. A `Connection.subscribe/4` to `"Target.detachedFromTarget"` (or `:all`) scoped to a session now also receives that session's own detach (#123).
 
 ## [0.11.0] - 2026-10-21
@@ -245,7 +247,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/patrols/cdp_ex/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/patrols/cdp_ex/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/patrols/cdp_ex/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/patrols/cdp_ex/compare/v0.8.0...v0.9.0
