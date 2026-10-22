@@ -1576,8 +1576,8 @@ defmodule CDPEx.Page do
   One that runs past `:timeout` makes the call return when it finishes: with the
   response if one matched before the deadline, else `{:error, :timeout}`. Give
   `trigger`'s own operations shorter timeouts than the overall one. If the enable
-  leaves no budget, `trigger` doesn't run, and the call returns a response that
-  already matched, else `{:error, :timeout}`.
+  leaves no budget, `trigger` doesn't run, and the call returns an outcome that
+  already arrived (a match, a detach, a dropped connection), else `{:error, :timeout}`.
 
   Without `:trigger` the call blocks from the start, so the request has to come
   from another process (e.g. the wait in a `Task`, then the click). That races: a
@@ -1642,7 +1642,7 @@ defmodule CDPEx.Page do
         try do
           case enable_network_within(page, deadline) do
             :ok -> trigger_and_wait(ref, mon, trigger, deadline)
-            {:error, :timeout} = timeout -> matched_already(ref, timeout)
+            {:error, :timeout} -> receive_response(ref, mon, deadline)
             {:error, _} = error -> error
           end
         after
@@ -1655,11 +1655,12 @@ defmodule CDPEx.Page do
     end
   end
 
-  # A trigger usually has side effects (a click, a submit), so don't fire one that
-  # can only end in {:error, :timeout}.
+  # A trigger usually has side effects (a click, a submit), so don't fire one with
+  # no budget left. With the budget spent, receive_response/3 only reports an
+  # outcome already in the mailbox (a match, a detach, a closed socket), else times out.
   defp trigger_and_wait(ref, mon, trigger, deadline) do
     if remaining(deadline) == 0 do
-      matched_already(ref, {:error, :timeout})
+      receive_response(ref, mon, deadline)
     else
       case run_trigger(trigger) do
         :ok -> receive_response(ref, mon, deadline)
@@ -2178,8 +2179,6 @@ defmodule CDPEx.Page do
     end
   end
 
-  # Lazily enable the Network domain (idempotent in CDP) so cookie/header ops
-  # work without callers opting in at page creation — keeps Page stateless.
   # For a wait whose :timeout spans the lazy enable: running out of budget there is
   # the wait's own {:error, :timeout}, not the enable call's.
   defp enable_network_within(page, deadline) do
@@ -2189,6 +2188,8 @@ defmodule CDPEx.Page do
     end
   end
 
+  # Lazily enable the Network domain (idempotent in CDP) so cookie/header ops
+  # work without callers opting in at page creation — keeps Page stateless.
   defp ensure_network(page, timeout) do
     case do_call(page, "Network.enable", %{}, timeout) do
       {:ok, _} -> :ok

@@ -94,10 +94,10 @@ defmodule CDPEx.ConnectTest do
   describe "CDPEx.connect/2 :discovery_timeout" do
     # The fixture's ws:// URL serves a page, not an upgrade, so getting as far as
     # {:ws_upgrade, _} means discovery itself succeeded.
-    test "nil and :infinity discover the endpoint" do
+    test "nil, :infinity and the largest integer discover the endpoint" do
       {:ok, %{url: base}} = FixtureServer.start()
 
-      for timeout <- [nil, :infinity] do
+      for timeout <- [nil, :infinity, 4_294_967_295] do
         assert {:error, {:ws_upgrade, _}} = CDPEx.connect(base, discovery_timeout: timeout)
       end
     end

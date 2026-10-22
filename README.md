@@ -288,17 +288,19 @@ end
 
 ### Grab an API response triggered by a click (SPA)
 
-Arm the waiter *before* the action that fires the request. The matcher is a substring,
+Pass the action as `:trigger`: the wait is registered before it runs, so a response
+that arrives while the click is still in flight is caught. The matcher is a substring,
 a `Regex`, or a `(url -> boolean)` function.
 
 ```elixir
 CDPEx.with_page([], fn page ->
   {:ok, _} = CDPEx.Page.navigate(page, "https://example.com/app")
 
-  waiter = Task.async(fn -> CDPEx.Page.wait_for_response(page, ~r{/api/items}) end)
-  :ok = CDPEx.Page.click(page, "#load-more")
+  {:ok, %{"requestId" => id, "response" => %{"status" => 200}}} =
+    CDPEx.Page.wait_for_response(page, ~r{/api/items},
+      trigger: fn -> CDPEx.Page.click(page, "#load-more") end
+    )
 
-  {:ok, %{"requestId" => id, "response" => %{"status" => 200}}} = Task.await(waiter)
   CDPEx.Page.response_body(page, id)
 end)
 ```

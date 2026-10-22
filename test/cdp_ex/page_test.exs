@@ -951,6 +951,33 @@ defmodule CDPEx.PageTest do
       assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)
     end
 
+    # The task is suspended while the enable reply and then the detach reach its
+    # mailbox, so it sees the enable succeed with the budget already spent.
+    test "wait_for_response/3 :trigger reports a detach that arrived before the budget ran out",
+         %{page: page, conn: conn, fake: fake} do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 200
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      true = :erlang.suspend_process(task.pid)
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"sessionId":"S","result":{}}))
+      sync_dispatch(conn, fake)
+      send_detach(fake, "S")
+      sync_dispatch(conn, fake)
+      Process.sleep(300)
+      true = :erlang.resume_process(task.pid)
+
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)
+      refute_received :triggered
+    end
+
     test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
       task =
         Task.async(fn ->
@@ -2007,6 +2034,25 @@ defmodule CDPEx.PageTest do
       assert elapsed_us >= 300_000
       assert elapsed_us < 550_000
       eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "a trigger that runs past :timeout still returns a response that matched while it ran",
+         %{page: page, conn: conn, fake: fake} do
+      trigger = fn ->
+        send_response(fake, "R1", "http://x/api/data")
+        sync_dispatch(conn, fake)
+        Process.sleep(300)
+      end
+
+      task =
+        Task.async(fn ->
+          result = Page.wait_for_response(page, "/api/data", trigger: trigger, timeout: 200)
+          {result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {{:ok, %{"requestId" => "R1"}}, []} = Task.await(task, 2_000)
+      assert waiter_count(conn) == 0
     end
 
     test "errors if the connection drops while waiting", %{page: page, conn: conn, fake: fake} do
