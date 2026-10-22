@@ -6,10 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-22
+
 ### Added
 - `CDPEx.Page.wait_for_response/3` takes a `:trigger` function (e.g. `fn -> Page.click(page, "#btn") end`). The wait is registered, and `Network` enabled, before `trigger` runs, so a response (or, on a `:session` page, a detach) that arrives while it runs is no longer missed; the docs cover the error and `:timeout` rules, and a trigger never fires once `:timeout` is spent. Calls without `:trigger` behave as before (#131, #133).
 
 ### Changed
+- `Page.wait_for_response/3` and `Page.wait_for_network_idle/2` return `{:error, :timeout}` where an enable that ran out of budget used to return `{:error, {:timeout, "Network.enable"}}` (#135).
 - Under `with_page/3`'s `:deadline`, an invalid `:discovery_timeout` (e.g. `"5000"`) raises `ArgumentError` instead of being replaced by the deadline (#130).
 
 ### Fixed
@@ -265,7 +268,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/patrols/cdp_ex/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/patrols/cdp_ex/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/patrols/cdp_ex/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/patrols/cdp_ex/compare/v0.9.0...v0.10.0

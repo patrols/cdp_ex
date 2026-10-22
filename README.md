@@ -60,7 +60,7 @@ Add `cdp_ex` to your deps in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:cdp_ex, "~> 0.12.0"}
+    {:cdp_ex, "~> 0.13.0"}
   ]
 end
 ```
