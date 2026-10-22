@@ -487,7 +487,9 @@ defmodule CDPEx do
 
     * **Launch** — the browser doesn't exist yet, so `:launch_timeout` is capped at the
       deadline when the deadline is smaller or equal (default `15_000`), and so is
-      connect-mode's `:discovery_timeout` (default `5_000`). The WebSocket connect and
+      connect-mode's `:discovery_timeout` (default `5_000`, and a `nil` or `:infinity` is
+      capped too). A non-integer `:launch_timeout` is not capped: it raises
+      `ArgumentError` like any invalid launch option. The WebSocket connect and
       upgrade after them (normally milliseconds) keep their own timeouts. A start whose
       capped timeout runs out at or after the deadline returns
       `{:error, :deadline_exceeded}`, with its own error in the telemetry event's

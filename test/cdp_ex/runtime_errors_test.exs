@@ -481,8 +481,10 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
   end
 
   test "a :deadline doesn't paper over an invalid :launch_timeout" do
-    assert_raise ArgumentError, ~r/invalid :launch_timeout/, fn ->
-      CDPEx.with_page([launch_timeout: "5000"], fn _ -> :ok end, deadline: 1_000)
+    for timeout <- ["5000", nil, :infinity] do
+      assert_raise ArgumentError, ~r/invalid :launch_timeout/, fn ->
+        CDPEx.with_page([launch_timeout: timeout], fn _ -> :ok end, deadline: 1_000)
+      end
     end
   end
 
