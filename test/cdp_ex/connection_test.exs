@@ -492,6 +492,20 @@ defmodule CDPEx.ConnectionTest do
       assert {:error, :noproc} = Connection.await_event_async(conn, fn _ -> true end, 100)
     end
 
+    test "returns a timeout against a stalled connection, and leaves no waiter after it resumes",
+         %{conn: conn} do
+      :ok = :sys.suspend(conn)
+
+      assert {:error, {:timeout, :await_event}} =
+               Connection.await_event_async(conn, fn _ -> false end, 50)
+
+      # The queued registration still lands on resume; its own timer clears it,
+      # and the unaliased ref drops the outcome.
+      :ok = :sys.resume(conn)
+      eventually(fn -> waiter_count(conn) == 0 end)
+      refute_receive {:cdp_await, _, _}, 100
+    end
+
     test "cancel_await/2 drops a pending waiter", %{conn: conn, fake: fake} do
       {:ok, ref} = Connection.await_event_async(conn, &(&1["name"] == "x"), 5_000)
       :ok = Connection.cancel_await(conn, ref)

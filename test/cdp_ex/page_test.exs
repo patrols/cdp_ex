@@ -1919,6 +1919,24 @@ defmodule CDPEx.PageTest do
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 
+    test "a throw in the trigger propagates and leaves no wait or message behind", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          thrown =
+            catch_throw(Page.wait_for_response(page, "/api", trigger: fn -> throw(:boom) end))
+
+          {thrown, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {:boom, []} = Task.await(task, 2_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
     test "an exit in the trigger propagates", %{page: page, fake: fake} do
       task =
         Task.async(fn ->
@@ -1940,6 +1958,32 @@ defmodule CDPEx.PageTest do
       answer_network_enable(fake)
       assert {elapsed_us, {:error, :timeout}} = Task.await(task, 2_000)
       assert elapsed_us < 600_000
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    # The call returns when the trigger does (~300ms), not a fresh :timeout
+    # after it (~600ms).
+    test "a trigger that runs past :timeout is not interrupted, then the call times out", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      trigger = fn -> Process.sleep(300) end
+
+      task =
+        Task.async(fn ->
+          {elapsed_us, result} =
+            :timer.tc(fn ->
+              Page.wait_for_response(page, "/api", trigger: trigger, timeout: 300)
+            end)
+
+          {elapsed_us, result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {elapsed_us, {:error, :timeout}, []} = Task.await(task, 2_000)
+      assert elapsed_us >= 300_000
+      assert elapsed_us < 500_000
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 

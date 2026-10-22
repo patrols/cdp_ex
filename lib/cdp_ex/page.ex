@@ -1566,7 +1566,13 @@ defmodule CDPEx.Page do
   response that arrives while `trigger` is still running, however fast, is caught.
   A `{:error, _}` from `trigger` is returned as is, without waiting; any other
   return value starts the wait. A raise, throw or exit in `trigger` propagates, and
-  the wait is cancelled first. `trigger`'s run time counts against `:timeout`.
+  the wait is cancelled first.
+
+  `:timeout` bounds the enable and the wait, and `trigger`'s run time counts
+  against it, but `trigger` runs in the calling process and is not interrupted.
+  One that runs past `:timeout` makes the call return when it finishes: with the
+  response if one matched before the deadline, else `{:error, :timeout}`. Give
+  `trigger`'s own operations shorter timeouts than the overall one.
 
   Without `:trigger` the call blocks from the start, so the request has to come
   from another process (e.g. the wait in a `Task`, then the click). That races: a
@@ -1581,7 +1587,8 @@ defmodule CDPEx.Page do
 
   Options:
     * `:trigger` — a 0-arity function that starts the request (see above)
-    * `:timeout` — overall ceiling in ms, `trigger` included (default 30_000)
+    * `:timeout` — ceiling in ms; a running `trigger` is not interrupted (see
+      above) (default 30_000)
   """
   @spec wait_for_response(t(), (String.t() -> boolean()) | Regex.t() | String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
