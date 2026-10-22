@@ -1619,7 +1619,7 @@ defmodule CDPEx.Page do
   # One deadline for the whole call so :timeout is a true overall ceiling: the lazy
   # Network.enable and the await draw from the same budget.
   defp await_response(page, predicate, deadline) do
-    with :ok <- ensure_network(page, remaining(deadline)) do
+    with :ok <- enable_network_within(page, deadline) do
       case Connection.await_event(page.conn, predicate, remaining(deadline),
              session_id: page.session_id
            ) do
@@ -1640,8 +1640,10 @@ defmodule CDPEx.Page do
         mon = Process.monitor(page.conn)
 
         try do
-          with :ok <- ensure_network(page, remaining(deadline)) do
-            trigger_and_wait(ref, mon, trigger, deadline)
+          case enable_network_within(page, deadline) do
+            :ok -> trigger_and_wait(ref, mon, trigger, deadline)
+            {:error, :timeout} = timeout -> matched_already(ref, timeout)
+            {:error, _} = error -> error
           end
         after
           Process.demonitor(mon, [:flush])
@@ -1762,7 +1764,7 @@ defmodule CDPEx.Page do
     methods = watched(page, @idle_events)
 
     with :ok <- subscribe_each(page.conn, methods, remaining(deadline), page.session_id),
-         :ok <- ensure_network(page, remaining(deadline)) do
+         :ok <- enable_network_within(page, deadline) do
       Enum.each(@idle_events, &drain_events(page.conn, &1))
 
       # Subscribed is not yet counting: the drain above discards whatever arrived
@@ -2178,6 +2180,15 @@ defmodule CDPEx.Page do
 
   # Lazily enable the Network domain (idempotent in CDP) so cookie/header ops
   # work without callers opting in at page creation — keeps Page stateless.
+  # For a wait whose :timeout spans the lazy enable: running out of budget there is
+  # the wait's own {:error, :timeout}, not the enable call's.
+  defp enable_network_within(page, deadline) do
+    case ensure_network(page, remaining(deadline)) do
+      {:error, {:timeout, "Network.enable"}} -> {:error, :timeout}
+      other -> other
+    end
+  end
+
   defp ensure_network(page, timeout) do
     case do_call(page, "Network.enable", %{}, timeout) do
       {:ok, _} -> :ok
