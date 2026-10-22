@@ -500,6 +500,7 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
            ) == :ok
 
     assert Chrome.validate_opts!(chrome_binary: nil, user_data_dir: nil, args: nil) == :ok
+    assert Chrome.validate_opts!(chrome_binary: false) == :ok
 
     assert Chrome.validate_opts!(
              chrome_binary: ~c"/usr/bin/chromium",
@@ -519,6 +520,12 @@ defmodule CDPEx.RuntimeErrorsTest.InvalidLaunchOpts do
 
     for {key, value} <- [chrome_binary: :chrome, user_data_dir: 1, launch_timeout: -1] do
       assert_raise ArgumentError, fn -> Chrome.validate_opts!([{key, value}, args: ["--a"]]) end
+    end
+  end
+
+  test "Browser.start_link/1 checks its own launch options" do
+    assert_raise ArgumentError, ~r/invalid :window_size/, fn ->
+      Browser.start_link(window_size: :x)
     end
   end
 

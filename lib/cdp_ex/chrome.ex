@@ -24,7 +24,8 @@ defmodule CDPEx.Chrome do
       as soon as Chrome is reachable, so a generous value is free. Raise it for
       slow cold-start hosts (e.g. headless Chrome in a constrained container).
 
-  An invalid value for any of these raises `ArgumentError` in the caller.
+  An invalid value for any of these raises `ArgumentError` in the caller (except the
+  options a full `:args` list replaces, which are never read).
 
   ## Default flags
 
@@ -107,7 +108,7 @@ defmodule CDPEx.Chrome do
   end
 
   defp valid_opt?(:headless, value), do: is_boolean(value)
-  defp valid_opt?(:chrome_binary, value), do: is_nil(value) or string?(value)
+  defp valid_opt?(:chrome_binary, value), do: value in [nil, false] or string?(value)
   defp valid_opt?(:user_data_dir, value), do: is_nil(value) or string?(value)
   defp valid_opt?(:launch_timeout, value), do: is_integer(value) and value >= 0
   defp valid_opt?(:extra_args, value), do: strings?(value)
@@ -152,7 +153,8 @@ defmodule CDPEx.Chrome do
   # Port.open raises (e.g. :eacces, :emfile) rather than returning an error when the
   # spawn itself fails; nothing has started yet, so only the profile dir needs removing.
   # badarg and system_limit arrive as ArgumentError and SystemLimitError, which have no
-  # `:original`. badarg is a caller bug and keeps raising; a full port table is a runtime failure like a refused spawn.
+  # `:original`. badarg is a caller bug that validate_opts!/1 normally stops first, so it
+  # keeps raising as a safety net; a full port table is a runtime failure like a refused spawn.
   defp open_port(binary, args, user_data_dir, owns?) do
     {:ok,
      Port.open({:spawn_executable, binary}, [:binary, :stderr_to_stdout, :exit_status, args: args])}
