@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `CDPEx.Page.wait_for_response/3` takes a `:trigger` function (e.g. `fn -> Page.click(page, "#btn") end`). The wait is registered, and `Network` enabled, before `trigger` runs, so a response (or, on a `:session` page, a detach) that arrives while it runs is no longer missed; the docs cover the error and `:timeout` rules. Calls without `:trigger` behave as before (#131).
+
 ### Changed
 - Under `with_page/3`'s `:deadline`, an invalid `:discovery_timeout` (e.g. `"5000"`) raises `ArgumentError` instead of being replaced by the deadline (#130).
 

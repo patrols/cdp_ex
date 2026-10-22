@@ -206,6 +206,53 @@ defmodule CDPEx.Connection do
     :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
   end
 
+  # await_event/4 without the block: registers the waiter and returns `{:ok, ref}`
+  # at once; the outcome (what await_event/4 would return) arrives later as
+  # `{:cdp_await, ref, result}`. `ref` is a process alias, so after
+  # cancel_await/2 nothing for it can still land in the caller's mailbox. The
+  # caller must also monitor `conn`: a killed connection sends no outcome.
+  @doc false
+  @spec await_event_async(GenServer.server(), (map() -> boolean()), timeout(), keyword()) ::
+          {:ok, reference()} | {:error, :noproc | {:timeout, :await_event} | {:ws_closed, term()}}
+  def await_event_async(conn, matcher, timeout, opts \\ []) when is_function(matcher, 1) do
+    ref = :erlang.alias()
+    session_id = Keyword.get(opts, :session_id)
+
+    case register_async(conn, {:await_event_async, matcher, timeout, session_id, ref}, timeout) do
+      :ok ->
+        {:ok, ref}
+
+      {:error, _} = error ->
+        true = :erlang.unalias(ref)
+        # A timed-out registration can still land once the connection catches up.
+        GenServer.cast(conn, {:cancel_await, ref})
+        error
+    end
+  end
+
+  defp register_async(conn, request, timeout) do
+    GenServer.call(conn, request, call_deadline(timeout))
+  catch
+    :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, :await_event}}
+    :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
+    :exit, {reason, {GenServer, :call, _}} when reason != :calling_self -> {:error, :noproc}
+  end
+
+  # Drops a waiter from await_event_async/4 and flushes an outcome that already
+  # arrived. A cast, so a wedged or dead connection can't block the cleanup.
+  @doc false
+  @spec cancel_await(GenServer.server(), reference()) :: :ok
+  def cancel_await(conn, ref) when is_reference(ref) do
+    _ = :erlang.unalias(ref)
+    GenServer.cast(conn, {:cancel_await, ref})
+
+    receive do
+      {:cdp_await, ^ref, _result} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
   @doc "Closes the WebSocket and stops the connection. `:ok` if it is already gone."
   @spec close(GenServer.server()) :: :ok
   def close(conn) do
@@ -351,6 +398,24 @@ defmodule CDPEx.Connection do
     {:noreply, %{state | waiters: [{matcher, session_id, from, timer} | state.waiters]}}
   end
 
+  def handle_call({:await_event_async, matcher, timeout, session_id, ref}, _from, state) do
+    to = {:async, ref}
+    timer = arm_timeout({:waiter_timeout, to}, timeout)
+    {:reply, :ok, %{state | waiters: [{matcher, session_id, to, timer} | state.waiters]}}
+  end
+
+  @impl true
+  def handle_cast({:cancel_await, ref}, state) do
+    case pop_waiter(state.waiters, {:async, ref}) do
+      {nil, _waiters} ->
+        {:noreply, state}
+
+      {{_matcher, _sid, _to, timer}, waiters} ->
+        cancel_timer(timer)
+        {:noreply, %{state | waiters: waiters}}
+    end
+  end
+
   @impl true
   def handle_info({:call_timeout, id}, state) do
     case Map.pop(state.pending, id) do
@@ -369,7 +434,7 @@ defmodule CDPEx.Connection do
         {:noreply, state}
 
       {_waiter, waiters} ->
-        GenServer.reply(from, {:error, {:timeout, :await_event}})
+        reply_waiter(from, {:error, {:timeout, :await_event}})
         {:noreply, %{state | waiters: waiters}}
     end
   end
@@ -529,7 +594,7 @@ defmodule CDPEx.Connection do
 
     Enum.each(dead, fn {_matcher, _sid, from, timer} ->
       cancel_timer(timer)
-      GenServer.reply(from, reason)
+      reply_waiter(from, reason)
     end)
 
     %{state | pending: pending, waiters: waiters}
@@ -545,7 +610,7 @@ defmodule CDPEx.Connection do
 
     Enum.each(matched, fn {_matcher, _sid, from, timer} ->
       cancel_timer(timer)
-      GenServer.reply(from, {:ok, params})
+      reply_waiter(from, {:ok, params})
     end)
 
     %{state | waiters: kept}
@@ -788,9 +853,16 @@ defmodule CDPEx.Connection do
     # that simply never fired the awaited event.
     Enum.each(state.waiters, fn {_matcher, _session_id, from, timer} ->
       cancel_timer(timer)
-      GenServer.reply(from, {:error, reason})
+      reply_waiter(from, {:error, reason})
     end)
   end
+
+  defp reply_waiter({:async, ref}, result) do
+    _ = send(ref, {:cdp_await, ref, result})
+    :ok
+  end
+
+  defp reply_waiter(from, result), do: GenServer.reply(from, result)
 
   defp pop_waiter(waiters, from) do
     case Enum.split_with(waiters, fn {_m, _sid, f, _t} -> f == from end) do

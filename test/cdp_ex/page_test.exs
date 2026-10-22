@@ -901,6 +901,56 @@ defmodule CDPEx.PageTest do
       assert {:error, {:session_closed, "S"}} = Task.await(task, 1_000)
     end
 
+    test "wait_for_response/3 :trigger catches a detach while the trigger runs", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      trigger = fn ->
+        send_detach(fake, "S")
+        sync_dispatch(conn, fake)
+      end
+
+      task =
+        Task.async(fn -> Page.wait_for_response(page, "/api", trigger: trigger, timeout: 5_000) end)
+
+      answer_network_enable(fake)
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)
+    end
+
+    test "wait_for_response/3 :trigger catches a detach right behind the Network.enable reply",
+         %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api", trigger: fn -> :ok end, timeout: 5_000)
+        end)
+
+      answer_network_enable(fake)
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)
+    end
+
+    test "wait_for_response/3 :trigger ends on a detach after the trigger", %{
+      page: page,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 5_000
+          )
+        end)
+
+      answer_network_enable(fake)
+      assert_receive :triggered, 2_000
+
+      send_detach(fake, "S")
+      assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)
+    end
+
     test "navigate/3 with response: true ends on the detach", %{page: page, conn: conn, fake: fake} do
       task =
         Task.async(fn ->
@@ -1780,6 +1830,279 @@ defmodule CDPEx.PageTest do
     end
   end
 
+  describe "wait_for_response/3 :trigger (#126)" do
+    test "catches a response that arrives while the trigger is still running", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      # The response is dispatched before the trigger returns, so only a wait
+      # registered before the trigger ran can see it.
+      trigger = fn ->
+        send_response(fake, "R1", "http://x/api/data")
+        sync_dispatch(conn, fake)
+        {:ok, %{}}
+      end
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api/data", trigger: trigger, timeout: 2_000)
+        end)
+
+      answer_network_enable(fake)
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task, 3_000)
+      assert waiter_count(conn) == 0
+    end
+
+    test "waits for a response that arrives after the trigger", %{
+      page: page,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api/data",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 2_000
+          )
+        end)
+
+      answer_network_enable(fake)
+      assert_receive :triggered, 2_000
+
+      send_response(fake, "R0", "http://x/other")
+      send_response(fake, "R1", "http://x/api/data")
+      assert {:ok, %{"requestId" => "R1"}} = Task.await(task, 3_000)
+    end
+
+    test "returns the trigger's {:error, _} without waiting, and drops the wait", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          result =
+            Page.wait_for_response(page, "/api",
+              trigger: fn -> {:error, :not_clicked} end,
+              timeout: 5_000
+            )
+
+          {result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {{:error, :not_clicked}, []} = Task.await(task, 1_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "a response that matched while the trigger ran beats the trigger's {:error, _}", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      trigger = fn ->
+        send_response(fake, "R1", "http://x/api/data")
+        sync_dispatch(conn, fake)
+        {:error, :late_click_error}
+      end
+
+      task =
+        Task.async(fn ->
+          result = Page.wait_for_response(page, "/api/data", trigger: trigger, timeout: 2_000)
+          {result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {{:ok, %{"requestId" => "R1"}}, []} = Task.await(task, 3_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "a raise in the trigger propagates and leaves no wait or message behind", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          raised =
+            try do
+              Page.wait_for_response(page, "/api", trigger: fn -> raise "boom" end)
+            rescue
+              e in RuntimeError -> e
+            end
+
+          {raised, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {%RuntimeError{message: "boom"}, []} = Task.await(task, 2_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "a throw in the trigger propagates and leaves no wait or message behind", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          thrown =
+            catch_throw(Page.wait_for_response(page, "/api", trigger: fn -> throw(:boom) end))
+
+          {thrown, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {:boom, []} = Task.await(task, 2_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "an exit in the trigger propagates", %{page: page, fake: fake} do
+      task =
+        Task.async(fn ->
+          catch_exit(Page.wait_for_response(page, "/api", trigger: fn -> exit(:boom) end))
+        end)
+
+      answer_network_enable(fake)
+      assert :boom = Task.await(task, 2_000)
+    end
+
+    test "the trigger's run time counts against :timeout", %{page: page, conn: conn, fake: fake} do
+      trigger = fn -> Process.sleep(200) end
+
+      task =
+        Task.async(fn ->
+          :timer.tc(fn -> Page.wait_for_response(page, "/api", trigger: trigger, timeout: 300) end)
+        end)
+
+      answer_network_enable(fake)
+      assert {elapsed_us, {:error, :timeout}} = Task.await(task, 2_000)
+      assert elapsed_us < 600_000
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    # The call returns when the trigger does (~300ms), not a fresh :timeout
+    # after it (~600ms).
+    test "a trigger that runs past :timeout is not interrupted, then the call times out", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      trigger = fn -> Process.sleep(300) end
+
+      task =
+        Task.async(fn ->
+          {elapsed_us, result} =
+            :timer.tc(fn ->
+              Page.wait_for_response(page, "/api", trigger: trigger, timeout: 300)
+            end)
+
+          {elapsed_us, result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {elapsed_us, {:error, :timeout}, []} = Task.await(task, 2_000)
+      assert elapsed_us >= 300_000
+      assert elapsed_us < 500_000
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
+    test "errors if the connection drops while waiting", %{page: page, conn: conn, fake: fake} do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/never",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 3_000
+          )
+        end)
+
+      answer_network_enable(fake)
+      assert_receive :triggered, 2_000
+      Connection.close(conn)
+
+      assert {:error, reason} = Task.await(task, 2_000)
+      assert reason == :noproc or match?({:ws_closed, _}, reason)
+    end
+
+    test "returns {:error, :noproc} if the connection is killed while waiting", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/never",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 3_000
+          )
+        end)
+
+      answer_network_enable(fake)
+      assert_receive :triggered, 2_000
+      Process.exit(conn, :kill)
+
+      assert {:error, :noproc} = Task.await(task, 2_000)
+    end
+
+    test "a stalled connection can't hold the call past :timeout", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      task =
+        Task.async(fn ->
+          :timer.tc(fn ->
+            Page.wait_for_response(page, "/api",
+              trigger: fn -> :sys.suspend(conn) end,
+              timeout: 300
+            )
+          end)
+        end)
+
+      answer_network_enable(fake)
+      assert {elapsed_us, {:error, :timeout}} = Task.await(task, 2_000)
+      assert elapsed_us < 600_000
+      :sys.resume(conn)
+    end
+
+    test "returns a Network.enable failure without running the trigger", %{page: page, fake: fake} do
+      test = self()
+
+      task =
+        Task.async(fn ->
+          Page.wait_for_response(page, "/api",
+            trigger: fn -> send(test, :triggered) end,
+            timeout: 2_000
+          )
+        end)
+
+      assert_receive {:fake_cdp_recv, ^fake, %{"id" => nid, "method" => "Network.enable"}}, 2_000
+      FakeCDP.send_text(fake, ~s({"id":#{nid},"error":{"code":-32000,"message":"nope"}}))
+
+      assert {:error, {:cdp_error, "Network.enable", _}} = Task.await(task, 1_000)
+      refute_received :triggered
+    end
+
+    test "rejects a :trigger that isn't a 0-arity function before any CDP call", %{
+      page: page,
+      fake: fake
+    } do
+      for bad <- [fn _ -> :ok end, :click, "fn"] do
+        assert_raise ArgumentError, ~r/invalid :trigger/, fn ->
+          Page.wait_for_response(page, "/api", trigger: bad)
+        end
+      end
+
+      refute_receive {:fake_cdp_recv, ^fake, _}, 50
+    end
+  end
+
   describe "wait_for_network_idle/2" do
     # The idle helper announces the moment it stops setting up and starts
     # counting; `enable_network_idle/2` waits for that instead of guessing at it
@@ -2181,6 +2504,42 @@ defmodule CDPEx.PageTest do
       nil when retries > 0 ->
         Process.sleep(10)
         answer_pending_probe(conn, fake, retries - 1)
+    end
+  end
+
+  defp send_response(fake, request_id, url) do
+    FakeCDP.send_text(
+      fake,
+      ~s({"method":"Network.responseReceived","params":{"requestId":"#{request_id}","response":{"url":"#{url}","status":200}}})
+    )
+  end
+
+  # Returns once the connection has dispatched every frame sent before it: frames
+  # are handled in order, so a marker event coming back means the earlier ones
+  # reached every waiter registered at the time.
+  defp sync_dispatch(conn, fake) do
+    :ok = Connection.subscribe(conn, "Test.marker")
+    FakeCDP.send_text(fake, ~s({"method":"Test.marker","params":{}}))
+    assert_receive {:cdp_event, ^conn, "Test.marker", _, _}, 2_000
+    Connection.unsubscribe(conn, "Test.marker")
+  end
+
+  # What a finished wait left in this process's mailbox, after a late matching
+  # response has had every chance to arrive.
+  defp leftovers(conn, fake) do
+    send_response(fake, "LATE", "http://x/api")
+    sync_dispatch(conn, fake)
+    {:messages, messages} = Process.info(self(), :messages)
+    messages
+  end
+
+  defp waiter_count(conn), do: length(:sys.get_state(conn).waiters)
+
+  defp eventually(fun, retries \\ 100) do
+    cond do
+      fun.() -> :ok
+      retries == 0 -> flunk("condition not met in time")
+      true -> Process.sleep(10) && eventually(fun, retries - 1)
     end
   end
 

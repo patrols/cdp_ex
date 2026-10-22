@@ -971,6 +971,47 @@ defmodule CDPEx.IntegrationTest do
       assert {:ok, "fetched-data"} = read_body_eventually(page, req)
     end
 
+    test "wait_for_response :trigger catches the response of the click it runs", %{
+      page: page,
+      fixture: fixture
+    } do
+      {:ok, _} = Page.navigate(page, fixture)
+      :ok = Page.wait_for_selector(page, "#fetch-btn")
+
+      request_ids =
+        for _ <- 1..20 do
+          assert {:ok, %{"requestId" => req, "response" => %{"status" => 200, "url" => url}}} =
+                   Page.wait_for_response(page, "/data",
+                     trigger: fn -> Page.click(page, "#fetch-btn") end,
+                     timeout: 5_000
+                   )
+
+          assert url =~ "/data"
+          req
+        end
+
+      # Each wait matched a request of its own.
+      assert length(Enum.uniq(request_ids)) == 20
+      refute_received {:cdp_await, _, _}
+    end
+
+    test "wait_for_response :trigger catches a response that is in before the trigger returns",
+         %{page: page, fixture: fixture} do
+      {:ok, _} = Page.navigate(page, fixture)
+
+      for n <- 1..20 do
+        # The evaluate resolves only once the fetch has its response.
+        trigger = fn ->
+          Page.evaluate(page, "fetch('/data?n=#{n}').then(r => r.text())", await_promise: true)
+        end
+
+        assert {:ok, %{"response" => %{"status" => 200, "url" => url}}} =
+                 Page.wait_for_response(page, "/data?n=#{n}", trigger: trigger, timeout: 5_000)
+
+        assert url =~ "/data?n=#{n}"
+      end
+    end
+
     test "wait_for_network_idle settles even when the fetch redirects", %{
       page: page,
       fixture: fixture
