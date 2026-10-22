@@ -6,7 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.11.1] - 2026-10-22
+## [0.12.0] - 2026-10-22
+
+### Changed
+- Return values change for callers that matched the old failure shapes (details under Fixed):
+  - `with_page/3` raises `ArgumentError` for an invalid launch option instead of returning `{:error, {%ArgumentError{}, _}}` (#127).
+  - A `:session` page's waits on a closed socket return `{:error, {:ws_closed, _}}` instead of `{:error, :noproc}` (#124).
+  - Calls that used to exit or raise on a gone or dying process now return `{:error, _}` or `:ok`, so a `rescue`/`catch :exit` around them no longer fires (#124).
 
 ### Fixed
 - Runtime failures now come back as `{:error, reason}` instead of a raise or an exit in the caller, so `with_page/3` no longer needs a `rescue`/`catch :exit` around it. Invalid arguments still raise, and a raise, throw or exit from `with_page/3`'s own `fun` still propagates. The guarantee covers return values, not links: a browser started with `launch/1` or `connect/2` stays linked to the process that started it, so a browser that stops on its own (Chrome died) still sends that process an exit signal (#124).
@@ -247,8 +253,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CDPEx.Page`: `navigate/3`, `wait_for_selector/3`, `evaluate/3`, `click/3`,
   `html/2`, `screenshot/2`.
 
-[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.11.1...HEAD
-[0.11.1]: https://github.com/patrols/cdp_ex/compare/v0.11.0...v0.11.1
+[Unreleased]: https://github.com/patrols/cdp_ex/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/patrols/cdp_ex/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/patrols/cdp_ex/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/patrols/cdp_ex/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/patrols/cdp_ex/compare/v0.8.0...v0.9.0
