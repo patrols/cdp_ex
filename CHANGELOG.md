@@ -13,6 +13,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `with_page/3` raises `ArgumentError` for an invalid launch option instead of returning `{:error, {%ArgumentError{}, _}}` (#127).
   - Under a `:deadline`, `with_page/3` raises for `launch_timeout: nil` or `:infinity`, which the deadline used to replace (#127).
   - A `:session` page's waits on a closed socket return `{:error, {:ws_closed, _}}` instead of `{:error, :noproc}` (#124).
+  - A `:session` page whose target closed or detached fails its calls and waits with `{:error, {:session_closed, session_id}}` instead of running to `{:error, {:timeout, _}}` (#123).
   - Calls that used to exit or raise on a gone or dying process now return `{:error, _}` or `:ok`, so a `rescue`/`catch :exit` around them no longer fires (#124).
 
 ### Fixed
