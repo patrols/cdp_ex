@@ -487,6 +487,12 @@ defmodule CDPEx.ConnectionTest do
       assert_receive {:cdp_await, ^ref, {:error, {:ws_closed, _}}}, 2_000
     end
 
+    test "a timeout of 0 still registers on a healthy connection", %{conn: conn} do
+      assert {:ok, ref} = Connection.await_event_async(conn, fn _ -> false end, 0)
+      assert_receive {:cdp_await, ^ref, {:error, {:timeout, :await_event}}}, 1_000
+      :ok = Connection.cancel_await(conn, ref)
+    end
+
     test "returns {:error, :noproc} for a gone connection", %{conn: conn} do
       Connection.close(conn)
       assert {:error, :noproc} = Connection.await_event_async(conn, fn _ -> true end, 100)

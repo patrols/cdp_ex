@@ -223,9 +223,8 @@ defmodule CDPEx.Connection do
         {:ok, ref}
 
       {:error, _} = error ->
-        true = :erlang.unalias(ref)
         # A timed-out registration can still land once the connection catches up.
-        GenServer.cast(conn, {:cancel_await, ref})
+        cancel_await(conn, ref)
         error
     end
   end
