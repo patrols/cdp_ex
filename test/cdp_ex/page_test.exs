@@ -961,7 +961,7 @@ defmodule CDPEx.PageTest do
         Task.async(fn ->
           Page.wait_for_response(page, "/api",
             trigger: fn -> send(test, :triggered) end,
-            timeout: 200
+            timeout: 1_000
           )
         end)
 
@@ -971,7 +971,7 @@ defmodule CDPEx.PageTest do
       sync_dispatch(conn, fake)
       send_detach(fake, "S")
       sync_dispatch(conn, fake)
-      Process.sleep(300)
+      Process.sleep(1_100)
       true = :erlang.resume_process(task.pid)
 
       assert {:error, {:session_closed, "S"}} = Task.await(task, 2_000)

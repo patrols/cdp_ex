@@ -13,7 +13,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Under `with_page/3`'s `:deadline`, an invalid `:discovery_timeout` (e.g. `"5000"`) raises `ArgumentError` instead of being replaced by the deadline (#130).
 
 ### Fixed
-- `Page.wait_for_response/3` and `Page.wait_for_network_idle/2` return their documented `{:error, :timeout}` when the lazy `Network.enable` uses up `:timeout`, instead of `{:error, {:timeout, "Network.enable"}}`; with `:trigger`, an outcome that already arrived (a match, a detach, a dropped connection) is returned instead (#135).
+- `Page.wait_for_response/3` and `Page.wait_for_network_idle/2` return their documented `{:error, :timeout}` when the lazy `Network.enable` uses up `:timeout`, instead of `{:error, {:timeout, "Network.enable"}}`; with `:trigger`, an outcome that already arrived (a match, a detach, a dropped connection) is returned instead (#135, #136).
 - `connect/2` with `discovery_timeout: :infinity` raised `ArithmeticError` from inside discovery; `:infinity` now means no limit on the `/json/version` exchange. Any other value that isn't `nil` or an integer in `0..4_294_967_295` (e.g. `"5000"`, `-1`, `1.5`) raises `ArgumentError` in the caller (#130).
 
 ## [0.12.0] - 2026-10-22
