@@ -230,8 +230,10 @@ defmodule CDPEx.Connection do
     end
   end
 
+  # Only registration happens in this call, so it gets the caller's budget rather than
+  # call_deadline/1's extra second; the floor keeps timeout: 0 from failing outright.
   defp register_async(conn, request, timeout) do
-    GenServer.call(conn, request, call_deadline(timeout))
+    GenServer.call(conn, request, registration_timeout(timeout))
   catch
     :exit, {:timeout, {GenServer, :call, _}} -> {:error, {:timeout, :await_event}}
     :exit, {{:shutdown, {:ws_closed, reason}}, _} -> {:error, {:ws_closed, reason}}
@@ -891,6 +893,9 @@ defmodule CDPEx.Connection do
     _ = Process.cancel_timer(timer)
     :ok
   end
+
+  defp registration_timeout(:infinity), do: :infinity
+  defp registration_timeout(timeout), do: max(timeout, 50)
 
   defp call_deadline(:infinity), do: :infinity
   defp call_deadline(timeout) when is_integer(timeout), do: timeout + 1_000

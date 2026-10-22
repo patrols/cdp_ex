@@ -1575,7 +1575,9 @@ defmodule CDPEx.Page do
   against it, but `trigger` runs in the calling process and is not interrupted.
   One that runs past `:timeout` makes the call return when it finishes: with the
   response if one matched before the deadline, else `{:error, :timeout}`. Give
-  `trigger`'s own operations shorter timeouts than the overall one.
+  `trigger`'s own operations shorter timeouts than the overall one. If the enable
+  leaves no budget, `trigger` doesn't run, and the call returns a response that
+  already matched, else `{:error, :timeout}`.
 
   Without `:trigger` the call blocks from the start, so the request has to come
   from another process (e.g. the wait in a `Task`, then the click). That races: a
@@ -1639,10 +1641,7 @@ defmodule CDPEx.Page do
 
         try do
           with :ok <- ensure_network(page, remaining(deadline)) do
-            case run_trigger(trigger) do
-              :ok -> receive_response(ref, mon, deadline)
-              {:error, _} = error -> matched_already(ref, error)
-            end
+            trigger_and_wait(ref, mon, trigger, deadline)
           end
         after
           Process.demonitor(mon, [:flush])
@@ -1651,6 +1650,19 @@ defmodule CDPEx.Page do
 
       {:error, reason} ->
         await_result({:error, reason})
+    end
+  end
+
+  # A trigger usually has side effects (a click, a submit), so don't fire one that
+  # can only end in {:error, :timeout}.
+  defp trigger_and_wait(ref, mon, trigger, deadline) do
+    if remaining(deadline) == 0 do
+      matched_already(ref, {:error, :timeout})
+    else
+      case run_trigger(trigger) do
+        :ok -> receive_response(ref, mon, deadline)
+        {:error, _} = error -> matched_already(ref, error)
+      end
     end
   end
 
