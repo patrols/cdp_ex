@@ -695,6 +695,10 @@ defmodule CDPEx do
           :erlang.raise(kind, reason, __STACKTRACE__)
       end
 
+    run_started(started, prev_trap, body, on_start_error)
+  end
+
+  defp run_started(started, prev_trap, body, on_start_error) do
     case started do
       {:ok, browser} ->
         try do
@@ -717,6 +721,10 @@ defmodule CDPEx do
         after
           restore_trap(prev_trap, nil)
         end
+
+      other ->
+        restore_trap(prev_trap, nil)
+        raise CaseClauseError, term: other
     end
   end
 
@@ -725,9 +733,12 @@ defmodule CDPEx do
   # by a foreign non-:normal exit signal (e.g. Oban's job timeout, sent with
   # exit/2): re-send it to self as a signal, so the caller dies with that reason
   # even mid-raise. Its :normal ones would have been ignored, so they are dropped.
-  # `browser` (nil when the start failed, which unlinks first) is never foreign: a
-  # crash of it was already returned as a value, so an EXIT from it that
-  # drain_exit/1's `after 0` missed is dropped too, whatever ERTS signal order did.
+  # `browser` is never foreign: a crash of it was already returned as a value, so an
+  # EXIT from it that lands after drain_exit/1's last `after 0` is dropped too (this
+  # scan runs after the flag is cleared, so it sees every one queued as a message).
+  # It is nil when the start failed: stop_init/1 unlinks, and on OTP 26+ proc_lib
+  # flushes the EXIT of an init/1 that raises; on older OTP that EXIT would be
+  # re-delivered after with_page returned the same reason as {:error, _}.
   defp restore_trap(true, _browser), do: Process.flag(:trap_exit, true)
 
   defp restore_trap(false, browser) do

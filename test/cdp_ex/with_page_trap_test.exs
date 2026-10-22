@@ -145,8 +145,9 @@ defmodule CDPEx.WithPageTrapTest do
     end
   end
 
-  # drain_exit/1 takes one queued browser EXIT with `after 0`; the extra one injected
-  # here stands for a browser EXIT that wasn't queued yet when it ran.
+  # A process exits once, so a second browser EXIT stands for one a single-shot drain
+  # would miss. drain_exit/1 takes them all; redeliver_exits/1's own browser clause
+  # (one landing after the drain) has no seam to inject through and is not covered.
   describe "a browser EXIT still queued when the trap is restored" do
     for trap? <- [false, true] do
       test "is dropped, not re-delivered (caller traps exits: #{trap?})", %{
