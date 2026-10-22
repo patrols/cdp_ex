@@ -388,7 +388,7 @@ defmodule CDPEx do
   in ms for the whole `http(s)://` `/json/version` exchange — TCP connect, recv, and
   body — default `5_000`; raise it for a slow remote endpoint, or pass `:infinity` for
   no limit, which lets an endpoint that never answers hang the caller; `nil` means the
-  default, and any other value that isn't a non-negative integer raises
+  default, and any other value that isn't an integer in `0..4_294_967_295` raises
   `ArgumentError`), `:name` (register the process).
   """
   @spec connect(String.t(), keyword()) :: GenServer.on_start()
@@ -412,13 +412,13 @@ defmodule CDPEx do
   defp discovery_opts(nil), do: []
 
   defp discovery_opts(timeout)
-       when timeout == :infinity or (is_integer(timeout) and timeout >= 0) do
+       when timeout == :infinity or (is_integer(timeout) and timeout in 0..4_294_967_295) do
     [timeout: timeout]
   end
 
   defp discovery_opts(other) do
     raise ArgumentError,
-          "invalid :discovery_timeout #{inspect(other)} (expected a non-negative integer or :infinity)"
+          "invalid :discovery_timeout #{inspect(other)} (expected integer ms in 0..4_294_967_295 or :infinity)"
   end
 
   @doc """

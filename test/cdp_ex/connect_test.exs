@@ -115,10 +115,10 @@ defmodule CDPEx.ConnectTest do
     end
 
     test "any other value raises in the caller" do
-      for timeout <- ["5000", -1, 1.5, :never] do
+      for timeout <- ["5000", -1, 4_294_967_296, 1.5, :never] do
         assert_raise ArgumentError,
                      "invalid :discovery_timeout #{inspect(timeout)} " <>
-                       "(expected a non-negative integer or :infinity)",
+                       "(expected integer ms in 0..4_294_967_295 or :infinity)",
                      fn -> CDPEx.connect("http://127.0.0.1:1", discovery_timeout: timeout) end
       end
     end
