@@ -471,9 +471,9 @@ defmodule CDPEx do
   timeout) takes effect when `with_page` returns or unwinds. A caller that doesn't
   trap exits is then terminated with that signal's reason (a `:normal` one is
   dropped); a caller that traps exits finds it in its mailbox, as usual. Until the
-  call ends, though, such a signal doesn't interrupt `fun`: it only takes effect once
-  `with_page` returns or unwinds. A caller with a time budget (e.g. an Oban worker's
-  `timeout/1`) should also pass `:deadline`, which bounds the call itself.
+  call ends, though, such a signal doesn't interrupt `fun`, so a caller with a time
+  budget (e.g. an Oban worker's `timeout/1`) should also pass `:deadline`, which
+  bounds the call itself.
   On slow cold-start hosts, raise `:launch_timeout` (a ceiling, not a fixed wait).
 
   `opts` go to `new_page/2`, except `:deadline`.
@@ -737,7 +737,7 @@ defmodule CDPEx do
 
   defp redeliver_exits(browser) do
     receive do
-      {:EXIT, ^browser, _} -> redeliver_exits(browser)
+      {:EXIT, ^browser, _} when is_pid(browser) -> redeliver_exits(browser)
       {:EXIT, from, :normal} when is_pid(from) or is_port(from) -> redeliver_exits(browser)
       {:EXIT, from, reason} when is_pid(from) or is_port(from) -> Process.exit(self(), reason)
     after
@@ -910,13 +910,13 @@ defmodule CDPEx do
     :exit, _ -> :ok
   end
 
-  # Remove a single queued {:EXIT, browser, _} (delivered as a message because the
+  # Remove the queued {:EXIT, browser, _} (delivered as a message because the
   # throwaway-browser `with_page/3` clause traps exits) so it can't leak to the
-  # caller after the prior trap_exit flag is restored. At most one can exist — a
-  # process exits once.
+  # caller after the prior trap_exit flag is restored. A process exits once, but
+  # take every match: this is the only drain a trapping caller gets.
   defp drain_exit(browser) do
     receive do
-      {:EXIT, ^browser, _reason} -> :ok
+      {:EXIT, ^browser, _reason} -> drain_exit(browser)
     after
       0 -> :ok
     end

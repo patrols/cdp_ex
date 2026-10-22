@@ -26,7 +26,7 @@ defmodule CDPEx.WithPageTrapTest do
         spawn_monitor(fn ->
           CDPEx.with_page(launch_opts, fn _ ->
             {:ok, _} = :timer.exit_after(50, :job_timeout)
-            await_queued_exit(:job_timeout)
+            await_queued(self(), &match?({:EXIT, _, :job_timeout}, &1))
           end)
 
           exit(:survived)
@@ -57,6 +57,11 @@ defmodule CDPEx.WithPageTrapTest do
     end
 
     test "terminates the caller once a :deadline is exceeded", %{launch_opts: launch_opts} do
+      handler = "trap-test-#{System.unique_integer([:positive])}"
+      event = [:cdp_ex, :with_page, :deadline_exceeded]
+      :telemetry.attach(handler, event, &__MODULE__.forward_exceeded/4, self())
+      on_exit(fn -> :telemetry.detach(handler) end)
+
       caller =
         spawn_caller(fn ->
           CDPEx.with_page(
@@ -73,6 +78,8 @@ defmodule CDPEx.WithPageTrapTest do
         end)
 
       assert_down_with_foreign_exit(caller, :job_timeout)
+      {pid, _ref} = caller
+      assert_received {:deadline_exceeded, ^pid}
     end
 
     test "terminates the caller when a linked process crashes", %{launch_opts: launch_opts} do
@@ -129,7 +136,8 @@ defmodule CDPEx.WithPageTrapTest do
         # The upgrade request is in, so the caller is blocked in the start, trapping.
         assert_receive {:fake_cdp_stalled, fake}, 10_000
         Process.exit(pid, :job_timeout)
-        await_queued(pid, {:EXIT, self(), :job_timeout})
+        test_pid = self()
+        await_queued(pid, &(&1 == {:EXIT, test_pid, :job_timeout}))
         FakeCDP.hard_close(fake)
 
         assert_receive {:DOWN, ^ref, :process, ^pid, :job_timeout}, 10_000
@@ -140,21 +148,27 @@ defmodule CDPEx.WithPageTrapTest do
   # drain_exit/1 takes one queued browser EXIT with `after 0`; the extra one injected
   # here stands for a browser EXIT that wasn't queued yet when it ran.
   describe "a browser EXIT still queued when the trap is restored" do
-    test "is dropped, not re-delivered", %{launch_opts: launch_opts} do
-      {pid, ref} =
-        spawn_monitor(fn ->
-          result =
-            CDPEx.with_page(launch_opts, fn page ->
-              send(self(), {:EXIT, page.browser, :browser_crash})
-              send(self(), {:EXIT, page.browser, :browser_crash})
-              :ran
-            end)
+    for trap? <- [false, true] do
+      test "is dropped, not re-delivered (caller traps exits: #{trap?})", %{
+        launch_opts: launch_opts
+      } do
+        {pid, ref} =
+          spawn_monitor(fn ->
+            Process.flag(:trap_exit, unquote(trap?))
 
-          exit({:done, result, Process.info(self(), [:trap_exit, :messages])})
-        end)
+            result =
+              CDPEx.with_page(launch_opts, fn page ->
+                send(self(), {:EXIT, page.browser, :browser_crash})
+                send(self(), {:EXIT, page.browser, :browser_crash})
+                :ran
+              end)
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, {:done, :ran, info}}, 10_000
-      assert info == [trap_exit: false, messages: []]
+            exit({:done, result, Process.info(self(), [:trap_exit, :messages])})
+          end)
+
+        assert_receive {:DOWN, ^ref, :process, ^pid, {:done, :ran, info}}, 10_000
+        assert info == [trap_exit: unquote(trap?), messages: []]
+      end
     end
 
     test "doesn't mask a foreign exit queued after it", %{launch_opts: launch_opts} do
@@ -222,24 +236,24 @@ defmodule CDPEx.WithPageTrapTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, ^reason}, 10_000
   end
 
-  defp await_queued_exit(reason) do
-    {:messages, messages} = Process.info(self(), :messages)
+  # Polls (bounded) until `pid`'s mailbox holds a message matching `match?`.
+  defp await_queued(pid, match?, tries \\ 1_000) do
+    case Process.info(pid, :messages) do
+      nil ->
+        flunk("#{inspect(pid)} died while the test waited on its mailbox")
 
-    if Enum.any?(messages, &match?({:EXIT, _, ^reason}, &1)) do
-      :ok
-    else
-      Process.sleep(5)
-      await_queued_exit(reason)
+      {:messages, messages} ->
+        cond do
+          Enum.any?(messages, match?) -> :ok
+          tries == 0 -> flunk("message never queued in #{inspect(pid)}: #{inspect(messages)}")
+          true -> Process.sleep(5) && await_queued(pid, match?, tries - 1)
+        end
     end
   end
 
-  defp await_queued(pid, message) do
-    {:messages, messages} = Process.info(pid, :messages)
-
-    if message not in messages do
-      Process.sleep(5)
-      await_queued(pid, message)
-    end
+  @doc false
+  def forward_exceeded(_event, _measurements, _metadata, test_pid) do
+    if Process.get(:trap_test_pid) == test_pid, do: send(test_pid, {:deadline_exceeded, self()})
   end
 
   # Answers a connected browser's session new_page and teardown.
