@@ -729,18 +729,21 @@ defmodule CDPEx do
 
     # An invalid value is left for launch/1 or connect/2 to reject, as it is without a
     # deadline. A nil or :infinity :discovery_timeout is valid (default / no limit), so
-    # it is capped; for :launch_timeout both are invalid.
-    case Keyword.get(launch_opts, key, default) do
-      current when is_integer(current) and deadline > current ->
-        launch_opts
+    # it is capped; for :launch_timeout both are invalid, and only :discovery_timeout
+    # has an upper bound.
+    current = Keyword.get(launch_opts, key, default)
 
-      current
-      when is_integer(current) or (key == :discovery_timeout and current in [nil, :infinity]) ->
-        Keyword.put(launch_opts, key, deadline)
-
-      _invalid ->
-        launch_opts
+    if cappable?(key, current) and not (is_integer(current) and deadline > current) do
+      Keyword.put(launch_opts, key, deadline)
+    else
+      launch_opts
     end
+  end
+
+  defp cappable?(:launch_timeout, current), do: is_integer(current)
+
+  defp cappable?(:discovery_timeout, current) do
+    current in [nil, :infinity] or (is_integer(current) and current <= 4_294_967_295)
   end
 
   # The verdict is the clock's, not the watchdog's: it only fires at or after

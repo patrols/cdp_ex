@@ -563,8 +563,12 @@ defmodule CDPEx.WithPageDeadlineTest do
     test "an invalid :discovery_timeout raises instead of being capped" do
       {:ok, %{url: base}} = FixtureServer.start(json_version: :hang)
 
-      assert_raise ArgumentError, ~r/invalid :discovery_timeout "5000"/, fn ->
-        CDPEx.with_page([connect: base, discovery_timeout: "5000"], fn _ -> :ran end, deadline: 100)
+      for timeout <- ["5000", 4_294_967_296] do
+        assert_raise ArgumentError, ~r/invalid :discovery_timeout #{inspect(timeout)}/, fn ->
+          CDPEx.with_page([connect: base, discovery_timeout: timeout], fn _ -> :ran end,
+            deadline: 100
+          )
+        end
       end
     end
 
