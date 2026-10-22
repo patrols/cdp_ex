@@ -1564,9 +1564,12 @@ defmodule CDPEx.Page do
   With `:trigger`, the wait is registered (and `Network` enabled) first, then
   `trigger` runs in the calling process, then the call waits for the match, so a
   response that arrives while `trigger` is still running, however fast, is caught.
-  A `{:error, _}` from `trigger` is returned as is, without waiting; any other
-  return value starts the wait. A raise, throw or exit in `trigger` propagates, and
-  the wait is cancelled first.
+  A `{:error, _}` from `trigger` is returned without waiting, unless the response
+  already matched while it ran (then the match wins); any other return value starts
+  the wait. A raise, throw or exit in `trigger` propagates, and the wait is cancelled
+  first. The outcome is delivered to the calling process's mailbox while `trigger`
+  runs, so `trigger` must not consume messages it doesn't own. If the calling process
+  is killed mid-call, the wait stays registered in the connection until `:timeout`.
 
   `:timeout` bounds the enable and the wait, and `trigger`'s run time counts
   against it, but `trigger` runs in the calling process and is not interrupted.
@@ -1635,9 +1638,11 @@ defmodule CDPEx.Page do
         mon = Process.monitor(page.conn)
 
         try do
-          with :ok <- ensure_network(page, remaining(deadline)),
-               :ok <- run_trigger(trigger) do
-            receive_response(ref, mon, deadline)
+          with :ok <- ensure_network(page, remaining(deadline)) do
+            case run_trigger(trigger) do
+              :ok -> receive_response(ref, mon, deadline)
+              {:error, _} = error -> matched_already(ref, error)
+            end
           end
         after
           Process.demonitor(mon, [:flush])
@@ -1653,6 +1658,14 @@ defmodule CDPEx.Page do
     case trigger.() do
       {:error, _} = error -> error
       _ -> :ok
+    end
+  end
+
+  defp matched_already(ref, error) do
+    receive do
+      {:cdp_await, ^ref, {:ok, _} = matched} -> matched
+    after
+      0 -> error
     end
   end
 

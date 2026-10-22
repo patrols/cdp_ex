@@ -1897,6 +1897,28 @@ defmodule CDPEx.PageTest do
       eventually(fn -> waiter_count(conn) == 0 end)
     end
 
+    test "a response that matched while the trigger ran beats the trigger's {:error, _}", %{
+      page: page,
+      conn: conn,
+      fake: fake
+    } do
+      trigger = fn ->
+        send_response(fake, "R1", "http://x/api/data")
+        sync_dispatch(conn, fake)
+        {:error, :late_click_error}
+      end
+
+      task =
+        Task.async(fn ->
+          result = Page.wait_for_response(page, "/api/data", trigger: trigger, timeout: 2_000)
+          {result, leftovers(conn, fake)}
+        end)
+
+      answer_network_enable(fake)
+      assert {{:ok, %{"requestId" => "R1"}}, []} = Task.await(task, 3_000)
+      eventually(fn -> waiter_count(conn) == 0 end)
+    end
+
     test "a raise in the trigger propagates and leaves no wait or message behind", %{
       page: page,
       conn: conn,
