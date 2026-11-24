@@ -28,8 +28,8 @@ jobs:
             otp: "26.2"
           - elixir: "1.19.5"
             otp: "28.1"
-          - elixir: "1.20.0"
-            otp: "28.1"
+          - elixir: "1.20.5"
+            otp: "29.1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,6 +66,9 @@ jobs:
   integration:
     name: integration (real Chrome)
     runs-on: ubuntu-24.04
+    env:
+      OTP_VERSION: "29.1"
+      ELIXIR_VERSION: "1.20.5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,8 +76,8 @@ jobs:
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "28.1"
-          elixir-version: "1.19.5"
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
 
       - name: Install Chrome
         id: setup-chrome
@@ -88,8 +91,8 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-integration-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-integration-
+          key: ${{ runner.os }}-mix-integration-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-integration-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
       - run: mix deps.get
 
